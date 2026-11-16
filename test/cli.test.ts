@@ -74,6 +74,39 @@ test('two command-line devices: create, invite, add, join, sign, block, nsec', a
   } finally { await closeBox(b); }
 });
 
+test('with the box off, a computer that stays on helps the other devices sign', async () => {
+  const dir = tmp('kk-box-');
+  let b = await startBox({ dir, port: 0, log: () => {} });
+  const port = b.port;
+  let helper: any;
+  try {
+    const [mac, mini, old] = [tmp('kk-mac-'), tmp('kk-mini-'), tmp('kk-old-')];
+    await cli(mac, 'create', b.qr()!, 'MacBook');
+    for (const [home, name] of [[mini, 'Mac mini'], [old, 'Old laptop']] as const) {
+      await cli(home, 'join', (await cli(mac, 'add', (await cli(home, 'invite', name)).text)).text);
+      await cli(home, 'sign', '{}');
+    }
+    const hp = 21000 + Math.floor(Math.random() * 20000);
+    helper = (await cli(mac, 'serve', String(hp), `http://127.0.0.1:${hp}`)).run;
+    await cli(old, 'block', 'Old laptop').catch(() => {});       // (a device may not block itself out of turn; use the Mac)
+    await cli(mini, 'block', 'Old laptop');
+    await helper.refresh();
+    await cli(mini, 'status');                                   // the mini learns where the Mac listens
+
+    await closeBox(b);                                           // the box goes off
+    const signed = JSON.parse((await cli(mini, 'sign', JSON.stringify({ content: 'signed with no box', created_at: 1700000000 }))).text);
+    assert.ok(verifyEvent(signed));
+    // The blocked one gets no help from the Mac either, and nothing but signing works without the box.
+    await assert.rejects(cli(old, 'sign', '{}'), /blocked|fetch failed|no_box/);
+    await assert.rejects(cli(mini, 'nsec'), /fetch failed|no_box|ECONNREFUSED/);
+    await assert.rejects(cli(mini, 'status'), /fetch failed|ECONNREFUSED/);
+
+    b = await startBox({ dir, port, log: () => {} });             // and comes back
+    assert.ok(verifyEvent(JSON.parse((await cli(mini, 'sign', '{"content":"box is back"}')).text)));
+    assert.match((await cli(mini, 'status')).text, /Old laptop  BLOCKED/);
+  } finally { helper?.close(); await closeBox(b); }
+});
+
 test('a site signs in through the remote signer over a relay', { skip: spawnSync('which', ['nak']).status !== 0 && 'nak is not installed' }, async () => {
   const port = 20000 + Math.floor(Math.random() * 20000);
   const relayProc = spawn('nak', ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { stdio: 'ignore' });

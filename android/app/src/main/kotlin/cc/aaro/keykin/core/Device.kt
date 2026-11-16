@@ -24,7 +24,7 @@ class Held(var piece: Piece, val npub: String, val boxKey: String, val addr: Str
         fun of(o: JSONObject) = Held(Piece(o.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }, o.getInt("i"), BigInteger(o.getString("share"), 16)), o.getString("npub"), o.getString("boxKey"), o.getString("addr"), o.optInt("epoch", 0))
     }
 }
-data class Member(val key: String, val i: Int, val name: String, val kind: String, val chip: Boolean, val blocked: Boolean, val added: Long)
+data class Member(val key: String, val i: Int, val name: String, val kind: String, val chip: Boolean, val blocked: Boolean, val added: Long, val addr: String? = null)
 data class Qr(val addr: String, val key: String, val code: String)
 data class Invite(val key: String, val name: String, val chip: String?)
 data class JoinText(val addr: String, val boxKey: String, val npub: String)
@@ -71,7 +71,7 @@ object Device {
         var tries = 0
         while (true) {
             val r = send(seal(body().put("epoch", h.epoch), me, fp))
-            if (r.optString("error") != "stale" || tries++ > 0) { if (r.has("error")) refuse(r.getString("error")); return r }
+            if (r.optString("error") != "stale" || tries++ > 0 || r.optJSONArray("catchups") == null) { if (r.has("error")) refuse(r.getString("error")); return r }
             var share = h.piece.share
             val cs = r.getJSONArray("catchups")
             for (k in 0 until cs.length()) cs.getJSONObject(k).let { c -> share = share.add(BigInteger(Seal.from(me.sk, c.getString("from"), "cycle", c.getString("sealed")), 16)).mod(N) }
@@ -96,6 +96,20 @@ object Device {
             c.outputStream.use { it.write(utf8(req.toString())) }
             JSONObject(String((if (c.responseCode < 400) c.inputStream else c.errorStream).readBytes(), Charsets.UTF_8))
         } catch (e: java.io.IOException) { refuse("no_box", e.message) } finally { c.disconnect() }
+    }
+
+    /**
+     * Asks the box first and, if it cannot be reached, other devices that listen (a computer that stays
+     * on). Only signing and message keys can be done without the box.
+     */
+    fun withHelpers(box: Send, helpers: List<Send>): Send = { req ->
+        try { box(req) } catch (e: KeykinException) {
+            val op = req.optJSONObject("body")?.optString("op")
+            if (e.code != "no_box" || (op != "sign" && op != "ecdh")) throw e
+            var last: JSONObject? = null
+            for (h in helpers) { try { val r = h(req); if (!r.has("error")) { last = r; break }; last = r } catch (_: KeykinException) { } }
+            last ?: throw e
+        }
     }
 
     /** After scanning the box's QR: the device and the box make the key together. No whole key exists. */
@@ -124,7 +138,7 @@ object Device {
     fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> = listing(me, send).first
     private fun listing(me: Me, send: Send): Pair<List<Member>, Int> {
         val r = call(send, seal(JSONObject().put("op", "members"), me)); val a = r.getJSONArray("members")
-        return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added")) } } to r.getInt("next")
+        return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added"), if (m.has("addr")) m.getString("addr") else null) } } to r.getInt("next")
     }
     fun block(me: Me, h: Held, key: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "block").put("key", key), me)) }
     /** Needs the fingerprint. */

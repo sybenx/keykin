@@ -28,7 +28,7 @@ const call = async (send: Send, req: Signed) => { const r = await send(req); if 
 async function current(me: Me, h: Held, send: Send, t: number, body: (h: Held) => object, fp?: Fingerprint) {
   for (let tries = 0; ; tries++) {
     const r = await send(await seal({ ...body(h), epoch: h.epoch }, me.sk, t, fp));
-    if (r?.error !== 'stale' || tries) { if (r?.error) refuse(r.error); return r; }
+    if (r?.error !== 'stale' || tries || !Array.isArray(r.catchups)) { if (r?.error) refuse(r.error); return r; }
     let share = h.piece.share;
     for (const c of r.catchups) share = mod(share + scalarFrom(openFrom(me.sk, c.from, 'cycle', c.sealed)));
     const C = commitmentFrom(r.commitment);
@@ -153,4 +153,23 @@ export async function approveLogin(me: Me, h: Held, text: string, send: Send, t 
   if (!q || typeof q.code !== 'string') refuse('bad_qr');
   if (q.key !== h.boxKey) refuse('wrong_box');          // only this account's own box
   await call(send, await seal({ op: 'login', code: q.code }, me.sk, t, me.fp));
+}
+
+/** Tells the box where this device listens for other devices (see helper.ts), or with no address, that it stopped. */
+export async function setAddress(me: Me, addr: string | undefined, send: Send, t = now()) { return call(send, await seal({ op: 'address', addr }, me.sk, t)); }
+
+/**
+ * Asks the box first and, if it cannot be reached, other devices that listen. Only signing and message
+ * keys can be done without the box; everything else needs it.
+ */
+export function withHelpers(box: Send, helpers: Send[]): Send {
+  return async (req) => {
+    try { return await box(req); }
+    catch (e) {
+      if (req.body?.op !== 'sign' && req.body?.op !== 'ecdh') throw e;
+      let last: any = { error: 'no_box' };
+      for (const h of helpers) { try { const r = await h(req); if (!r?.error) return r; last = r; } catch { /* try the next */ } }
+      return last;
+    }
+  };
 }

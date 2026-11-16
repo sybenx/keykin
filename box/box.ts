@@ -11,7 +11,8 @@ import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, type Commitment } from '../src/curve.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex } from '../src/bytes.ts';
 
-export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; blocked: boolean; added: number }
+/** `addr` is where a device that can listen answers other devices when the box is off. */
+export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; addr?: string; blocked: boolean; added: number }
 /** What waits for a newly added member: the two values its piece is built from. */
 export interface Welcome { by: string; box: string; device?: string; fetched?: boolean }
 /** A change of piece waiting for a member that was not there when the keys were cycled. */
@@ -75,6 +76,13 @@ export class Box {
         case 'welcome_put': return this.#welcomePut(s, from, body);
         case 'welcome': return this.#welcome(s, from);
         case 'reveal': return this.#reveal(s, from, req);
+        case 'address': {
+          // A device that can listen says where; the others use it when the box is off.
+          if (body.addr !== undefined && (typeof body.addr !== 'string' || body.addr.length > 200 || !/^https?:\/\//.test(body.addr))) refuse('bad_address');
+          if (body.addr) from.addr = body.addr; else delete from.addr;
+          this.#save();
+          return { ok: true };
+        }
         case 'login': {
           // Logging in to the box's page gives the power to block and unblock anything, so it needs the fingerprint.
           this.#needFingerprint(from, req);

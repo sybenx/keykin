@@ -100,6 +100,19 @@ class BoxInteropTest {
         assertThrows(KeykinException::class.java) { Nip44.decrypt(v[3].dropLast(4) + "AAAA", unhex(v[0])) }
     }
 
+    @Test fun helpersAreAskedOnlyWhenTheBoxIsOffAndOnlyToSign() {
+        val off: Send = { refuse("no_box") }
+        val helper: Send = { JSONObject().put("ok", true).put("by", "helper") }
+        val refusing: Send = { JSONObject().put("error", "blocked") }
+        fun req(op: String) = JSONObject().put("body", JSONObject().put("op", op))
+        assertEquals("helper", Device.withHelpers(off, listOf(helper))(req("sign")).getString("by"))
+        assertEquals("helper", Device.withHelpers(off, listOf(refusing, helper))(req("ecdh")).getString("by"))
+        assertEquals("blocked", Device.withHelpers(off, listOf(refusing))(req("sign")).getString("error"))
+        assertEquals("no_box", assertThrows(KeykinException::class.java) { Device.withHelpers(off, listOf(helper))(req("reveal")) }.code)
+        assertEquals("no_box", assertThrows(KeykinException::class.java) { Device.withHelpers(off, emptyList())(req("sign")) }.code)
+        assertEquals("box", Device.withHelpers({ JSONObject().put("by", "box") }, listOf(helper))(req("sign")).getString("by"))
+    }
+
     @Test fun bech32MatchesNip19() {
         assertEquals("npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg", Bech32.npub("7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"))
         assertEquals("nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5", Bech32.nsec("67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa"))

@@ -47,5 +47,10 @@ class Store(private val c: Context) {
         return Me(unhex(o.getString("sk")), o.getString("name"), Chip.publicKey(c))
     }
     fun held(): Held? = read()?.optJSONObject("held")?.let(Held::of)
+    /** Where other devices listen, as last seen at the box: used when the box is off. */
+    fun helpers(): List<String> = read()?.optJSONArray("helpers")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
+    @Synchronized fun keepHelpers(addrs: List<String>) { read()?.let { write(it.put("helpers", org.json.JSONArray(addrs))) } }
+    /** The box, then the helpers. */
+    fun send(h: Held): cc.aaro.keykin.core.Send = cc.aaro.keykin.core.Device.withHelpers(cc.aaro.keykin.core.Device.http(h.addr), helpers().map { cc.aaro.keykin.core.Device.http(it) })
     @Synchronized fun keep(h: Held) { write((read() ?: error("no device")).put("held", h.json())) }
 }

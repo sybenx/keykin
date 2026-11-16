@@ -12,6 +12,8 @@ export interface Saved {
   addr?: string;
   held?: { commitment: string[]; i: number; share: string; npub: string; boxKey: string; epoch?: number };
   bunker?: BunkerState;
+  /** The device list as last seen at the box, for when the box is off. */
+  list?: { key: string; i: number; name: string; kind: string; blocked: boolean; addr?: string }[];
 }
 
 export function load(file: string, name = 'This computer'): Saved {
@@ -36,4 +38,4 @@ export const keep = (s: Saved, h: Held, addr: string) => {
   s.held = { commitment: commitmentHex(h.piece.C), i: h.piece.i, share: scalarHex(h.piece.share), npub: h.npub, boxKey: h.boxKey, epoch: h.epoch };
 };
 export const sender = (addr: string): Send => async (r) =>
-  (await fetch(`${addr}/keykin`, { method: 'POST', body: JSON.stringify(r), headers: { connection: 'close' } })).json();
+  (await fetch(`${addr}/keykin`, { method: 'POST', body: JSON.stringify(r), headers: { connection: 'close' }, signal: AbortSignal.timeout(6000) })).json();

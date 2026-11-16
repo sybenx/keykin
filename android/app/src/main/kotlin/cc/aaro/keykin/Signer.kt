@@ -47,16 +47,17 @@ object Signer {
         val me = store.me(Build.MODEL ?: "Android device")
         val h = store.held() ?: throw KeykinException("no_account")
         h.changed = { store.keep(it) }
+        val send = store.send(h)       // the box, or a computer that stays on when the box is off
         return when (type) {
             "get_public_key" -> mapOf("result" to h.npub, "package" to c.packageName)
             "sign_event" -> {
                 val e = JSONObject(payload)
                 val tags = (e.optJSONArray("tags") ?: JSONArray()).let { a -> List(a.length()) { i -> a.getJSONArray(i).let { t -> List(t.length()) { t.getString(it) } } } }
-                val ev = Device.sign(me, h, e.getInt("kind"), e.optString("content", ""), tags, if (e.has("created_at")) e.getLong("created_at") else System.currentTimeMillis() / 1000)
+                val ev = Device.sign(me, h, e.getInt("kind"), e.optString("content", ""), tags, if (e.has("created_at")) e.getLong("created_at") else System.currentTimeMillis() / 1000, send)
                 mapOf("result" to ev.getString("sig"), "signature" to ev.getString("sig"), "event" to ev.toString())
             }
-            "nip44_encrypt" -> mapOf("result" to Device.nip44Encrypt(me, h, peer, payload), "signature" to "")
-            "nip44_decrypt" -> mapOf("result" to Device.nip44Decrypt(me, h, peer, payload), "signature" to "")
+            "nip44_encrypt" -> mapOf("result" to Device.nip44Encrypt(me, h, peer, payload, send), "signature" to "")
+            "nip44_decrypt" -> mapOf("result" to Device.nip44Decrypt(me, h, peer, payload, send), "signature" to "")
             else -> throw KeykinException("unsupported")
         }.let { if (type.startsWith("nip44")) mapOf("result" to it.getValue("result"), "signature" to it.getValue("result")) else it }
     }

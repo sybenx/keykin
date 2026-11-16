@@ -125,14 +125,14 @@ class MainActivity : FragmentActivity() {
             }
         }
     }
-    private fun loadMembers() { held?.let { members = Device.members(me, it) } }
+    private fun loadMembers() { held?.let { members = Device.members(me, it); store.keepHelpers(members.filter { m -> m.addr != null && !m.blocked && m.key != me.key }.map { m -> m.addr!! }) } }
     private fun refresh() = work { loadMembers() }
     private fun toggleBlock(m: Member) = held?.let { h -> work {
         if (m.blocked) Device.unblock(me, h, m.key, fingerprint("Unblock ${m.name}")) else Device.block(me, h, m.key)
         loadMembers(); note = if (m.blocked) "${m.name} is unblocked." else "${m.name} is blocked."
     } }
     private fun signTest() = held?.let { h -> work {
-        val ev = Device.sign(me, h, 1, "Signed by Keykin on ${me.name}")
+        val ev = Device.sign(me, h, 1, "Signed by Keykin on ${me.name}", send = store.send(h))
         note = "Signed. Event ${ev.getString("id").take(12)}…"
         android.util.Log.i("Keykin", "signed " + ev.getString("id"))
     } }

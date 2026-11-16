@@ -84,10 +84,23 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 A blocked member is refused everything. A box cannot be blocked through this endpoint and a box
 may not ask for a signature.
 
-**The box owner can block and unblock any device** from the box itself (the login page, once
-built). This is the way back when a thief with an unlocked phone blocks every other device
+**The box owner can block and unblock any device** from the box's page (section 6a). This is the way back when a thief with an unlocked phone blocks every other device
 first: the owner blocks the phone and unblocks the rest. A stolen phone could always do that,
 and the box is what recovers from it.
+
+## 6a. The box's page
+
+What the person who runs the box sees in a browser, at the box's address. Plain HTML from the
+box itself, nothing loaded from elsewhere.
+
+- **Log in** with the owner secret. The box prints it once, on its first start, and keeps only
+  its hash. Five wrong tries in a minute are refused for the rest of that minute. A session lasts
+  12 hours, in a cookie scripts cannot read.
+- **No account yet:** the setup QR of section 2, with the same text available to copy for a
+  device with no camera. The QR names the address the browser used. The page moves on by itself
+  once a device has created the account.
+- **With an account:** the npub and the list of devices, each with Block or Unblock. The box
+  itself has no button. Every button carries a per-session token.
 
 ## 7. Adding a member
 
@@ -105,8 +118,11 @@ exists only on the device that asked.
 
 ## 9. Not built yet
 
-- **The login page** and its QRST login, with the device list and Block buttons. The box has
-  the owner's block function ready for it. The box prints its QR as text; nothing draws it.
+- **QRST login to the box's page.** `DIRECTION.md` says login is by QRST. Today it is an owner
+  secret typed into the page. QRST runs over relays and needs the phone app to take part, so it
+  is a later step; the page is built so that only the login form changes.
+- **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
+  `state.json`, start it, and read the new secret from its output.
 - **A real chip.** The box-side check is built and tested with a software P-256 key standing in.
   The Android Keystore and Secure Enclave side is not written, and nothing proves to the box
   that a chip key really lives in a chip.

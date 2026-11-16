@@ -19,7 +19,8 @@ export interface Account {
   members: Member[];
   welcomes: Record<string, Welcome>;
 }
-export interface BoxState { sk: string; key: string; account: Account | null }
+/** `owner` is the hash of the owner secret that logs in to the page. */
+export interface BoxState { sk: string; key: string; owner?: string; account: Account | null }
 
 const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation

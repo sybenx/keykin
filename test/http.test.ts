@@ -28,6 +28,6 @@ test('over real HTTP: scan the QR, create, sign, restart from the state file, si
     assert.equal(b.qr(), null);
     const s2 = await D.signEvent(phone, held, { ...ev, content: 'after restart' }, send);
     assert.ok(schnorr.verify(hexToBytes(s2.sig), hexToBytes(s2.id), hexToBytes(held.npub)));
-    assert.match(await (await fetch(`${qr.addr}/`, { headers: { connection: 'close' } })).text(), /Set up/);
+    assert.match(await (await fetch(`${qr.addr}/`, { headers: { connection: 'close' } })).text(), /Log in/);
   } finally { await stop(); }
 });

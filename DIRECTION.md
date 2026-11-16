@@ -84,7 +84,8 @@ This replaces the earlier idea of a primary device that generates the nsec and k
 - **It never starts a signature.** It only helps a device that asks.
 - **It serves the login page.** The page shows the list of devices with a Block button next
   to each.
-- **Login to that page is by QRST.**
+- **Login to that page is by QRST.** Built so far: a device in the account scans a code on the
+  page and approves with a fingerprint. The QRST protocol itself is not used yet.
 
 ### A lost phone
 

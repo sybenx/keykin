@@ -8,6 +8,7 @@ My devices and my box. Any two pieces sign.
 - `box/`: the box (`box.ts`), its page (`page.ts`) and its HTTP server (`server.ts`).
 - `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
 - `android/`: the phone app.
+- `ext/`: the browser extension. `node ext/build.mjs`, then load `ext/dist` in Chrome with Load unpacked.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 
 ```bash

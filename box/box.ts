@@ -8,23 +8,29 @@ import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
-import { commitmentFrom, commitmentHex, scalarHex, type Commitment } from '../src/curve.ts';
+import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, type Commitment } from '../src/curve.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex } from '../src/bytes.ts';
 
 export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; blocked: boolean; added: number }
 /** What waits for a newly added member: the two values its piece is built from. */
-export interface Welcome { by: string; box: string; device?: string }
+export interface Welcome { by: string; box: string; device?: string; fetched?: boolean }
+/** A change of piece waiting for a member that was not there when the keys were cycled. */
+export interface Catchup { from: string; sealed: string }
 export interface Account {
   commitment: string[]; npub: string;
   i: number; share: string;            // the box's own piece
+  epoch: number;                       // goes up each time the keys are cycled
+  next: number;                        // the next unused index
   members: Member[];
   welcomes: Record<string, Welcome>;
+  catchups: Record<string, Catchup[]>;
 }
 /** `owner` is the hash of the owner secret that logs in to the page. */
 export interface BoxState { sk: string; key: string; owner?: string; account: Account | null }
 
 const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
+const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 
 export class Box {
   state: BoxState;
@@ -51,10 +57,16 @@ export class Box {
       const s = this.state.account ?? refuse('not_set_up');
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
       if (from.blocked) refuse('blocked');
+      // A device still on the old pieces is told so, and handed what it needs to catch up.
+      if (EPOCH_OPS.has(body.op) && body.epoch !== s.epoch) {
+        return { error: 'stale', epoch: s.epoch, commitment: s.commitment, catchups: s.catchups[from.key] ?? [] };
+      }
       switch (body.op) {
+        case 'cycle': return this.#cycle(s, from, req, body);
+        case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
         case 'sign': return this.#sign(s, from, body);
         case 'ecdh': return this.#ecdh(s, from, body);
-        case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, boxKey: this.state.key, members: s.members };
+        case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, next: s.next, boxKey: this.state.key, members: s.members };
         case 'block': return this.#block(s, body.key);
         case 'unblock': return this.#unblock(s, from, req, body.key);
         case 'add': return this.#add(s, from, req, body, now);
@@ -124,7 +136,7 @@ export class Box {
         { key: device, i: DEVICE_I, name: p!.name, kind: 'device', chip: p!.chip, blocked: false, added: now },
         { key: this.state.key, i: BOX_I, name: 'Box', kind: 'box', blocked: false, added: now },
       ],
-      welcomes: {},
+      welcomes: {}, catchups: {}, epoch: 0, next: 3,
     };
     this.#save();
     return { ok: true, npub: out.done.npub, pkg2: sealTo(this.state.sk, device, 'keygen', out.forDevice) };
@@ -180,7 +192,8 @@ export class Box {
     if (!m || !HEX64.test(m.key) || !Number.isInteger(m.i) || m.i < 1) refuse('bad_member');
     if (m.kind !== 'device' && m.kind !== 'box') refuse('bad_member');
     if (m.chip !== undefined && !CHIP.test(m.chip)) refuse('bad_chip_key');
-    if (s.members.some((x) => x.key === m.key || x.i >= m.i)) refuse('already_listed');   // indices only go up
+    if (m.i !== s.next || s.members.some((x) => x.key === m.key)) refuse('already_listed');   // indices are never reused
+    s.next++;
     const helpers = [from.i, s.i].sort((a, b) => a - b);
     const mine = F.repairDeltas(this.#C(s), helpers, s.i, BigInt('0x' + s.share), m.i);
     const sigma = F.repairSigma([mine.get(s.i)!, openFrom(this.state.sk, from.key, 'repair-delta', body.delta)]);
@@ -202,7 +215,36 @@ export class Box {
   #welcome(s: Account, from: Member) {
     const w = s.welcomes[from.key] ?? refuse('no_welcome');
     if (!w.device) refuse('not_ready');
-    return { ok: true, npub: s.npub, commitment: s.commitment, i: from.i, box: w.box, from: w.by, device: w.device };
+    if (!w.fetched) { w.fetched = true; this.#save(); }
+    return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, i: from.i, box: w.box, from: w.by, device: w.device };
+  }
+
+  // --- Cycling the keys --------------------------------------------------------------------------
+
+  // After a block, the pieces are moved to a new line through the same key. Every member still
+  // welcome gets a small change to its piece; a blocked member gets none, so its old piece no
+  // longer fits with anyone's and it is dropped from the list. The asking device picks the change
+  // (one number, `b1`): it sends it to the box sealed, and each other member's share of it sealed
+  // to that member. Nobody learns anything about the key from it.
+  #cycle(s: Account, from: Member, req: Signed, body: any) {
+    this.#needFingerprint(from, req);
+    // A newcomer that has not collected its piece yet would be left with halves of the old line.
+    if (Object.values(s.welcomes).some((w) => !w.fetched)) refuse('pending_welcome');
+    s.welcomes = {};
+    const others = s.members.filter((m) => !m.blocked && m.key !== from.key && m.key !== this.state.key);
+    const given = body.changes ?? {};
+    if (Object.keys(given).length !== others.length || others.some((m) => typeof given[m.key] !== 'string')) refuse('bad_cycle');
+    const b1 = scalarFrom(openFrom(this.state.sk, from.key, 'cycle', body.b1));
+    if (b1 === 0n) refuse('bad_cycle');
+    const C = this.#C(s);
+    s.share = scalarHex(mod(BigInt('0x' + s.share) + b1 * BigInt(s.i)));
+    s.commitment = commitmentHex([C[0], C[1].add(mul(b1))]);
+    s.epoch++;
+    s.members = s.members.filter((m) => !m.blocked);
+    for (const k of Object.keys(s.catchups)) if (!s.members.some((m) => m.key === k)) delete s.catchups[k];
+    for (const m of others) (s.catchups[m.key] ??= []).push({ from: from.key, sealed: given[m.key] });
+    this.#save();
+    return { ok: true, epoch: s.epoch, commitment: s.commitment };
   }
 
   // --- Falling back to the nsec --------------------------------------------------------------

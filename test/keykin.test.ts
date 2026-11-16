@@ -116,7 +116,7 @@ test('account changes need the fingerprint', async () => {
   await D.unblock(phone, laptop.me.key, send, NOW);
   // A fingerprint signature cannot be moved onto another request.
   const real = await seal({ op: 'unblock', key: laptop.me.key }, phone.sk, NOW, phone.fp);
-  const moved = await seal({ op: 'reveal' }, phone.sk, NOW); moved.fp = real.fp;
+  const moved = await seal({ op: 'reveal', epoch: 0 }, phone.sk, NOW); moved.fp = real.fp;
   assert.deepEqual(box.handle(moved, NOW), { error: 'needs_fingerprint' });
   assert.equal(box.state.account!.members.length, 4);
 });
@@ -158,6 +158,43 @@ test('a thief blocks every other device; the box owner puts it right', async () 
   await assert.rejects(D.formNsec(phone, held, send, NOW), /blocked/);
   await D.signEvent(laptop.me, laptop.held, note(held.npub), send, NOW);
   await D.signEvent(tablet.me, tablet.held, note(held.npub), send, NOW);
+});
+
+test('cycling the keys: a blocked piece stops fitting, the rest catch up, the npub stays', async () => {
+  const { box, send, phone, held, add } = await setup();
+  const laptop = await add('Laptop');
+  const tablet = await add('Tablet');
+  const thief = await add('Stolen');
+  const msg = eventId(note(held.npub));
+  await D.block(phone, thief.me.key, send, NOW);
+  await assert.rejects(D.cycle({ ...phone, fp: undefined }, held, send, NOW), /needs_fingerprint/);
+  const before = await D.formNsec(phone, held, send, NOW);
+  await D.cycle(phone, held, send, NOW);
+  const a = box.state.account!;
+  assert.equal(a.epoch, 1);
+  assert.deepEqual(a.members.map((m) => m.name), ['Phone', 'Box', 'Laptop', 'Tablet']);     // the blocked one is gone
+  // The stolen piece no longer fits with the box's new piece, even if the box were to answer it.
+  const boxPiece = { C: held.piece.C, i: a.i, share: BigInt('0x' + a.share) };
+  const stale = ask(thief.held.piece, msg);
+  assert.throws(() => finish(thief.held.piece, msg, stale, answer(boxPiece, msg, stale.commit)), /bad_partial|bad_signature/);
+  await assert.rejects(D.signEvent(thief.me, thief.held, note(held.npub), send, NOW), /unknown_member/);
+  // The one who cycled signs at once; the others catch up on their next request, by themselves.
+  assert.ok(valid((await D.signEvent(phone, held, note(held.npub), send, NOW)).sig, msg, held.npub));
+  assert.equal(laptop.held.epoch, 0);
+  assert.ok(valid((await D.signEvent(laptop.me, laptop.held, note(held.npub), send, NOW)).sig, msg, held.npub));
+  assert.equal(laptop.held.epoch, 1);
+  assert.equal(a.catchups[laptop.me.key], undefined);
+  // A second cycle before the tablet has come back: it catches up on both at once.
+  await D.cycle(laptop.me, laptop.held, send, NOW);
+  assert.equal(await D.formNsec(tablet.me, tablet.held, send, NOW), before);              // same key throughout
+  assert.equal(tablet.held.epoch, 2);
+  // Two caught-up devices still sign with no box, and a new device gets an index never used before.
+  await D.signEvent(phone, held, note(held.npub), send, NOW);
+  const m2 = ask(held.piece, msg);
+  assert.ok(valid(finish(held.piece, msg, m2, answer(tablet.held.piece, msg, m2.commit)), msg, held.npub));
+  const fresh = await add('New');
+  assert.equal(fresh.held.piece.i, 6);                                   // 5 was the stolen one: never reused
+  assert.ok(valid((await D.signEvent(fresh.me, fresh.held, note(held.npub), send, NOW)).sig, msg, held.npub));
 });
 
 test('the box refuses strangers, other accounts, stale, repeated and altered requests', async () => {
@@ -218,4 +255,8 @@ test('state survives a restart, waiting welcomes included', async () => {
   const h = await D.join(late, held.boxKey, held.npub, send2, NOW);
   assert.ok(valid((await D.signEvent(late, h, note(held.npub), send2, NOW)).sig, eventId(note(held.npub)), held.npub));
   assert.deepEqual(again.state.account!.welcomes, {});             // cleared once it has signed
+  // A newcomer that has not collected its piece holds up a cycle, so it is never stranded.
+  const slow = device('Slow');
+  await D.addMember(late, h, { key: slow.key, name: 'Slow', kind: 'device', chip: slow.chip }, send2, NOW);
+  await assert.rejects(D.cycle(late, h, send2, NOW), /pending_welcome/);
 });

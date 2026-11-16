@@ -8,6 +8,7 @@
 //   keykin status                                        the account and its devices
 //   keykin sign '<event json>'                           sign one event
 //   keykin block <name> | unblock <name>
+//   keykin cycle                                         after a block: drop blocked devices for good
 //   keykin bunker <relay url>                            sign in to sites (NIP-46)
 //   keykin nsec                                          form the whole nsec here and print it
 //
@@ -46,6 +47,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       const inv = JSON.parse(a)?.invite ?? fail('That is not an invite.');
       const held = heldOf(s);
       await D.addMember(me, held, { key: inv.key, name: String(inv.name), kind: 'device', chip: inv.chip }, box());
+      keep(s, held, s.addr!); save(file, s);
       return out(JSON.stringify({ keykin: 2, join: { addr: s.addr, boxKey: held.boxKey, npub: held.npub } }));
     }
     case 'join': {
@@ -63,20 +65,22 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
     }
     case 'sign': {
       const held = heldOf(s), e = JSON.parse(a);
-      return out(JSON.stringify(await D.signEvent(me, held, { pubkey: held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box())));
+      try { return out(JSON.stringify(await D.signEvent(me, held, { pubkey: held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box()))); }
+      finally { keep(s, held, s.addr!); save(file, s); }
     }
     case 'block': await D.block(me, await byName(a), box()); return out(`${a} is blocked.`);
     case 'unblock': await D.unblock(me, await byName(a), box()); return out(`${a} is unblocked.`);
-    case 'nsec': return out(await D.formNsec(me, heldOf(s), box()));
+    case 'cycle': { const held = heldOf(s); await D.cycle(me, held, box()); keep(s, held, s.addr!); save(file, s); return out('Keys cycled. Blocked devices are gone for good.'); }
+    case 'nsec': { const held = heldOf(s); const n = await D.formNsec(me, held, box()); keep(s, held, s.addr!); save(file, s); return out(n); }
     case 'bunker': {
       if (!a) fail('Give a relay address, for example wss://relay.example.com');
       const held = heldOf(s);
       if (!s.bunker) { s.bunker = newBunker(); save(file, s); }
-      const run = await runBunker({ bunker: s.bunker, me, held, send: box(), relay: a, onChange: () => save(file, s), log: out });
+      const run = await runBunker({ bunker: s.bunker, me, held, send: box(), relay: a, onChange: () => { keep(s, held, s.addr!); save(file, s); }, log: out });
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, invite, add, join, status, sign, block, unblock, bunker, nsec'); return;
+    default: out('Commands: create, invite, add, join, status, sign, block, unblock, cycle, bunker, nsec'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

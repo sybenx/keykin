@@ -10,7 +10,7 @@ import type { BunkerState } from '../src/nip46.ts';
 export interface Saved {
   me: { sk: string; key: string; name: string; chip: string; chipSk: string };
   addr?: string;
-  held?: { commitment: string[]; i: number; share: string; npub: string; boxKey: string };
+  held?: { commitment: string[]; i: number; share: string; npub: string; boxKey: string; epoch?: number };
   bunker?: BunkerState;
 }
 
@@ -29,11 +29,11 @@ export const meOf = (s: Saved): Me => ({ sk: s.me.sk, key: s.me.key, name: s.me.
 export const heldOf = (s: Saved): Held => {
   if (!s.held) throw new Error('This device is not in an account yet. Run create or join.');
   const C = commitmentFrom(s.held.commitment);
-  return { piece: { C, i: s.held.i, share: scalarFrom(s.held.share) }, npub: s.held.npub, boxKey: s.held.boxKey };
+  return { piece: { C, i: s.held.i, share: scalarFrom(s.held.share) }, npub: s.held.npub, boxKey: s.held.boxKey, epoch: s.held.epoch ?? 0 };
 };
 export const keep = (s: Saved, h: Held, addr: string) => {
   s.addr = addr;
-  s.held = { commitment: commitmentHex(h.piece.C), i: h.piece.i, share: scalarHex(h.piece.share), npub: h.npub, boxKey: h.boxKey };
+  s.held = { commitment: commitmentHex(h.piece.C), i: h.piece.i, share: scalarHex(h.piece.share), npub: h.npub, boxKey: h.boxKey, epoch: h.epoch };
 };
 export const sender = (addr: string): Send => async (r) =>
   (await fetch(`${addr}/keykin`, { method: 'POST', body: JSON.stringify(r), headers: { connection: 'close' } })).json();

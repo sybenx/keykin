@@ -80,6 +80,11 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 A blocked member is refused everything. A box cannot be blocked through this endpoint and a box
 may not ask for a signature.
 
+**The box owner can block and unblock any device** from the box itself (the login page, once
+built). This is the way back when a thief with an unlocked phone blocks every other device
+first: the owner blocks the phone and unblocks the rest. A stolen phone could always do that,
+and the box is what recovers from it.
+
 ## 7. Adding a member
 
 The key is never whole here either. The asking device and the box each hold a piece. Using
@@ -114,8 +119,6 @@ exists only on the device that asked.
 
 ## 10. Known weak spots
 
-- A thief with an unlocked phone can block every other device before the owner blocks the
-  phone. The owner then needs the box's login page to undo it.
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
 - The box's piece sits in its state file unencrypted.
 - Requests travel as plain HTTP. The address is meant to be a tailnet one. Secrets inside

@@ -69,6 +69,18 @@ export class Box {
   /** The box owner's Block button (the login page calls this once the owner is logged in). */
   ownerBlock(key: string) { return this.#block(this.state.account ?? refuse('not_set_up'), key); }
 
+  /**
+   * The box owner's Unblock button. This is the way back when a thief with an unlocked phone has
+   * blocked every other device: the owner logs in to the box, blocks the phone and unblocks the rest.
+   */
+  ownerUnblock(key: string) {
+    const s = this.state.account ?? refuse('not_set_up');
+    const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
+    m.blocked = false;
+    this.#save();
+    return { ok: true };
+  }
+
   #save() { this.onChange(this.state); }
   #C(s: Account): Commitment { return commitmentFrom(s.commitment); }
 

@@ -94,6 +94,9 @@ This replaces the earlier idea of a primary device that generates the nsec and k
   devices stop helping the phone too.
 - **Blocking is one press.** Unblocking or adding a device needs an approval from a device
   still in hand.
+- **The box can always put it right.** A thief with an unlocked phone can block the other
+  devices first. That was always true. The box owner logs in, blocks the phone and unblocks
+  the rest.
 - **Cycle the keys afterwards,** which makes the lost phone's piece worthless.
 
 ### What this simple version gives up

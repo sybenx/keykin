@@ -143,6 +143,22 @@ test('a blocked phone gets no help, and cannot undo it itself', async () => {
   assert.throws(() => box.ownerBlock(box.state.key), /cannot_block_box/);
 });
 
+test('a thief blocks every other device; the box owner puts it right', async () => {
+  const { box, send, phone, held, add } = await setup();
+  const laptop = await add('Laptop');
+  const tablet = await add('Tablet');
+  await D.block(phone, laptop.me.key, send, NOW);                 // the thief holds the phone
+  await D.block(phone, tablet.me.key, send, NOW);
+  await assert.rejects(D.block(laptop.me, phone.key, send, NOW), /blocked/);   // too late from a device
+  box.ownerBlock(phone.key);                                      // the owner, at the box
+  box.ownerUnblock(laptop.me.key);
+  box.ownerUnblock(tablet.me.key);
+  await assert.rejects(D.signEvent(phone, held, note(held.npub), send, NOW), /blocked/);
+  await assert.rejects(D.formNsec(phone, held, send, NOW), /blocked/);
+  await D.signEvent(laptop.me, laptop.held, note(held.npub), send, NOW);
+  await D.signEvent(tablet.me, tablet.held, note(held.npub), send, NOW);
+});
+
 test('the box refuses strangers, other accounts, stale, repeated and altered requests', async () => {
   const { box, send, phone, held } = await setup();
   assert.deepEqual(box.handle(await seal({ op: 'members' }, newMemberKey().sk, NOW), NOW), { error: 'unknown_member' });

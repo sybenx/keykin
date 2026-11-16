@@ -51,6 +51,10 @@ A helper never signs a bare hash. Nonces are made per request and used once.
 - An **account change** also carries `fp`: an ECDSA (SHA-256) signature by the asker's chip key
   over the same `JCS(body)`. Without a valid one the box answers `needs_fingerprint`. A device
   with no chip key gets `no_chip_key` and cannot make account changes.
+- **Fallback (Aaron, 2026-11-16).** Where this checked fingerprint hits a blocker (a platform
+  whose chip cannot do it, the browser extension, a device with no chip), that spot may use the
+  easy kind instead: the app shows a fingerprint prompt and then proceeds, with nothing the box
+  can verify. Spots using the easy kind are listed here. **None so far.**
 
 ## 5. Sealed values
 

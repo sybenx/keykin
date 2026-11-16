@@ -4,6 +4,7 @@
 
 import * as F from '../src/frost.ts';
 import { answer } from '../src/round.ts';
+import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
@@ -52,6 +53,7 @@ export class Box {
       if (from.blocked) refuse('blocked');
       switch (body.op) {
         case 'sign': return this.#sign(s, from, body);
+        case 'ecdh': return this.#ecdh(s, from, body);
         case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, boxKey: this.state.key, members: s.members };
         case 'block': return this.#block(s, body.key);
         case 'unblock': return this.#unblock(s, from, req, body.key);
@@ -140,6 +142,13 @@ export class Box {
     const a = answer({ C: this.#C(s), i: s.i, share: BigInt('0x' + s.share) }, msg, c);
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
+  }
+
+  // The box's part of a shared secret with another person's key, for encrypting and decrypting
+  // messages. It is useless without the asking device's own part.
+  #ecdh(s: Account, from: Member, body: any) {
+    if (from.kind !== 'device') refuse('devices_only');
+    return { ok: true, i: s.i, part: ecdhPart(s.i, BigInt('0x' + s.share), from.i, body.peer) };
   }
 
   // --- The list -----------------------------------------------------------------------------

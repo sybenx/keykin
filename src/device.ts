@@ -7,6 +7,8 @@ import { eventId, type UnsignedEvent } from './event.ts';
 import { seal, type Signed, type Fingerprint } from './member.ts';
 import { sealTo, openFrom } from './seal.ts';
 import { commitmentFrom, scalarFrom, scalarHex, interpolate, mul, compHex } from './curve.ts';
+import { ecdhPart, ecdhShared, nip44Key } from './ecdh.ts';
+import { v2 as nip44 } from 'nostr-tools/nip44';
 import { refuse } from './bytes.ts';
 
 export type Send = (req: Signed) => Promise<any>;
@@ -86,4 +88,17 @@ export async function formNsec(me: Me, h: Held, send: Send, t = now()): Promise<
   const nsec = interpolate([[BigInt(h.piece.i), h.piece.share], [BigInt(r.i), boxShare]], 0n);
   if (compHex(mul(nsec)).slice(2) !== h.npub) refuse('bad_piece');
   return scalarHex(nsec);
+}
+
+/** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. */
+export async function conversationKey(me: Me, h: Held, peer: string, send: Send, t = now()): Promise<Uint8Array> {
+  const r = await call(send, await seal({ op: 'ecdh', peer }, me.sk, t));
+  return nip44Key(ecdhShared(ecdhPart(h.piece.i, h.piece.share, r.i, peer), r.part));
+}
+export async function nip44Encrypt(me: Me, h: Held, peer: string, text: string, send: Send, t = now()) {
+  return nip44.encrypt(text, await conversationKey(me, h, peer, send, t));
+}
+/** A wrong part from the box cannot forge a message: NIP-44's MAC check fails instead. */
+export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: string, send: Send, t = now()) {
+  return nip44.decrypt(payload, await conversationKey(me, h, peer, send, t));
 }

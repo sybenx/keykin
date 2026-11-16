@@ -10,6 +10,7 @@ import * as D from '../src/device.ts';
 import { Box } from '../box/box.ts';
 import { bytesToHex, hexToBytes, randomBytes, sha } from '../src/bytes.ts';
 import { mul, compHex } from '../src/curve.ts';
+import * as nip44 from 'nostr-tools/nip44';
 
 const NOW = 1_800_000_000;
 const valid = (sig: string, msg: string, npub: string) => schnorr.verify(hexToBytes(sig), hexToBytes(msg), hexToBytes(npub));
@@ -182,6 +183,22 @@ test('a second box gets a piece but may not ask for a signature', async () => {
   const a = box.state.account!;
   const mine = ask(h2.piece, msg);
   assert.ok(valid(finish(h2.piece, msg, mine, answer({ C: h2.piece.C, i: a.i, share: BigInt('0x' + a.share) }, msg, mine.commit)), msg, held.npub));
+});
+
+test('messages: two pieces make the same NIP-44 key the whole nsec would', async () => {
+  const { send, phone, held, add } = await setup();
+  const friendSk = randomBytes(32);
+  const friend = bytesToHex(schnorr.getPublicKey(friendSk));
+  const viaPieces = await D.conversationKey(phone, held, friend, send, NOW);
+  const nsec = await D.formNsec(phone, held, send, NOW);
+  assert.deepEqual(viaPieces, nip44.v2.utils.getConversationKey(hexToBytes(nsec), friend));
+  // The friend, with an ordinary key, reads what the pieces wrote and the reverse.
+  const friendKey = nip44.v2.utils.getConversationKey(friendSk, held.npub);
+  assert.equal(nip44.v2.decrypt(await D.nip44Encrypt(phone, held, friend, 'from pieces', send, NOW), friendKey), 'from pieces');
+  const laptop = await add('Laptop');
+  assert.equal(await D.nip44Decrypt(laptop.me, laptop.held, friend, nip44.v2.encrypt('to pieces', friendKey), send, NOW), 'to pieces');
+  await D.block(phone, laptop.me.key, send, NOW);
+  await assert.rejects(D.conversationKey(laptop.me, laptop.held, friend, send, NOW), /blocked/);
 });
 
 test('sealed values open only for the right pair and purpose', () => {

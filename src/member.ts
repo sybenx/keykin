@@ -19,10 +19,10 @@ export const MAX_SKEW = 60;
 export const newMemberKey = () => { const sk = randomBytes(32); return { sk: bytesToHex(sk), key: bytesToHex(schnorr.getPublicKey(sk)) }; };
 
 /** A software stand-in for the chip, for tests and for machines with no chip. */
-export function softwareChip() {
-  const sk = p256.utils.randomSecretKey();
+export function softwareChip(skHex?: string) {
+  const sk = skHex ? hexToBytes(skHex) : p256.utils.randomSecretKey();
   const fp: Fingerprint = (m) => bytesToHex(p256.sign(m, sk));
-  return { chip: bytesToHex(p256.getPublicKey(sk, true)), fp };
+  return { chip: bytesToHex(p256.getPublicKey(sk, true)), fp, chipSk: bytesToHex(sk) };
 }
 
 export async function seal<B extends object>(body: B, sk: string, now: number, fp?: Fingerprint): Promise<Signed<B & { ts: number; id: string }>> {

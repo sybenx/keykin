@@ -6,6 +6,7 @@ My devices and my box. Any two pieces sign.
 - `SPEC.md`: what the code does, and what is not built.
 - `src/`: the pieces, the signing round, member requests, the device side.
 - `box/`: the box (`box.ts`), its page (`page.ts`) and its HTTP server (`server.ts`).
+- `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 
 ```bash
@@ -21,3 +22,23 @@ npm run box
 ```
 
 The box prints its owner secret once, on first start. Open `http://127.0.0.1:7460` and log in with it.
+
+## Try it on one computer
+
+Start the box, log in to its page, and expand "No camera? Copy the code as text".
+
+```bash
+npm run box
+```
+
+Make the account from this computer, pasting that text:
+
+```bash
+npm run keykin -- create '<the text>' 'MacBook'
+```
+
+Sign in to a site: run this, then paste the link it prints into the site's remote signer sign-in.
+
+```bash
+npm run keykin -- bunker wss://your.relay
+```

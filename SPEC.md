@@ -54,7 +54,10 @@ A helper never signs a bare hash. Nonces are made per request and used once.
 - **Fallback (Aaron, 2026-11-16).** Where this checked fingerprint hits a blocker (a platform
   whose chip cannot do it, the browser extension, a device with no chip), that spot may use the
   easy kind instead: the app shows a fingerprint prompt and then proceeds, with nothing the box
-  can verify. Spots using the easy kind are listed here. **None so far.**
+  can verify. Spots using the easy kind:
+  - **The command-line device** (`cli/`). Its chip key is a software key in its state file, and
+    nothing prompts. The box still checks the signature, so the rule that a device with no chip
+    key cannot make account changes holds; what is missing is the fingerprint itself.
 
 ## 5. Sealed values
 
@@ -73,6 +76,7 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 |---|---|---|---|
 | `create1`, `create2` | The first device, with the code from the QR | No | Makes the key with the device. Once only |
 | `sign` | An unblocked device | No | Answers a signing round for an event of this account |
+| `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a) |
 | `members` | Any unblocked member | No | Returns the list |
 | `block` | Any unblocked member | No | Blocks a device. One press |
 | `unblock` | An unblocked device | **Yes** | Unblocks a device |
@@ -116,6 +120,43 @@ With a fingerprint, `reveal` hands the box's piece to the asking device. That de
 nsec from its own piece and the box's. This is the only place a whole key ever exists, and it
 exists only on the device that asked.
 
+## 8a. Messages
+
+Encrypting and decrypting (NIP-44) needs a shared secret between the account's key and another
+person's key `Q`. Two pieces make it without the key being whole: each gives `λ_i · s_i · Q`,
+and the two parts add up to `nsec · Q`. The device asks the box for its part with `ecdh`, adds
+its own, and derives the NIP-44 v2 conversation key. A wrong part from the box cannot forge a
+message; the NIP-44 check fails instead. The box does not see messages, only whose key they are
+with.
+
+## 8b. A new device learning where the box is
+
+Three short texts, shown as QRs or pasted:
+
+1. The new device shows an **invite**: `{ keykin: 2, invite: { key, name, chip } }`.
+2. A device in the account adds it (section 7) and shows the **join text**:
+   `{ keykin: 2, join: { addr, boxKey, npub } }`.
+3. The new device reads that, collects its two halves from the box, and checks the npub.
+
+## 8c. Signing in to sites (NIP-46)
+
+A device can run a remote signer ("bunker"). It has its own key for talking to sites, separate
+from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secret>`.
+
+- `connect` with the secret adds the site to the device's list. After that the site's requests
+  are answered with no prompt (tier 2).
+- Answered: `ping`, `get_public_key`, `sign_event`, `nip44_encrypt`, `nip44_decrypt`. Anything
+  else gets `unsupported`.
+- Every signature and every shared secret still goes through the box, so blocking the device
+  stops every site it serves.
+- The relay is whichever one the device is told to use. A site must be able to reach it.
+
+## 8d. The command-line device
+
+`cli/keykin.ts` makes a computer a device: `create`, `invite`, `add`, `join`, `status`, `sign`,
+`block`, `unblock`, `bunker`, `nsec`. Its state is one file, `~/.keykin/device.json`, readable
+only by its owner. The piece in it is not encrypted.
+
 ## 9. Not built yet
 
 - **QRST login to the box's page.** `DIRECTION.md` says login is by QRST. Today it is an owner
@@ -129,12 +170,12 @@ exists only on the device that asked.
 - **Devices refusing to help a blocked device.** Devices can read the list from the box, but
   device-to-device transport is not written.
 - **Cycling the keys** after a block, so the blocked piece is worthless.
-- **How a new device learns the box's address, key and the npub.** The code takes them as
-  inputs; the QR between two devices is not designed.
 - **Importing an existing nsec.** It would put a raw nsec on a device, which section 2 rules
   out. The splitting code exists and only tests use it.
-- **Encryption and decryption** (NIP-44, NIP-04) with two pieces.
-- **Apps:** Android, the browser extension, NIP-46, NIP-07, NIP-55.
+- **NIP-04** (old-style messages) and the other NIP-46 methods.
+- **Per-site limits and a way to sign a site out** of the remote signer.
+- **Removing a device or a box from the list.** Blocking is the only way to stop one.
+- **Apps:** Android (with NIP-55) and the browser extension (with NIP-07).
 - **Tier 3.** Not planned for now.
 
 ## 10. Known weak spots

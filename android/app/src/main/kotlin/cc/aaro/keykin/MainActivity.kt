@@ -49,6 +49,9 @@ class MainActivity : FragmentActivity() {
     private var busy by mutableStateOf(false)
     private var note by mutableStateOf<String?>(null)
     private var problem by mutableStateOf<String?>(null)
+    private var apps by mutableStateOf<List<String>>(emptyList())
+    private fun own(h: Held): Held { h.changed = { store.keep(it) }; store.keep(h); held = h; return h }
+    override fun onResume() { super.onResume(); if (::store.isInitialized) apps = Apps.all(this) }
 
     private val scanner = registerForActivityResult(ScanContract()) { r -> r.contents?.let(::handleText) }
     private fun scan(prompt: String) = scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt(prompt).setBeepEnabled(false).setOrientationLocked(false))
@@ -57,7 +60,8 @@ class MainActivity : FragmentActivity() {
         super.onCreate(b)
         store = Store(this)
         me = store.me(Build.MODEL ?: "Android device")
-        held = store.held()
+        held = store.held()?.also { it.changed = { h -> store.keep(h) } }
+        apps = Apps.all(this)
         screen = if (held != null) Screen.Home else Screen.Start
         if (held != null) refresh()
         // Dark icons on the light background and the reverse, so the status bar stays readable.
@@ -71,7 +75,8 @@ class MainActivity : FragmentActivity() {
     private fun debugText(i: Intent?) {
         if (!BuildConfig.DEBUG) return
         i?.getStringExtra("text64")?.let { handleText(String(Base64.decode(it, Base64.DEFAULT), Charsets.UTF_8)) }
-        when (i?.getStringExtra("do")) { "sign" -> signTest(); "nsec" -> showNsec(); "invite" -> screen = Screen.Invite }
+        when (i?.getStringExtra("do")) { "sign" -> signTest(); "nsec" -> showNsec(); "invite" -> screen = Screen.Invite; "cycle" -> cycle() }
+        i?.getStringExtra("grant")?.let { Apps.allow(this, it); apps = Apps.all(this) }
         i?.getStringExtra("block")?.let { n -> members.firstOrNull { it.name == n }?.let(::toggleBlock) }
     }
 
@@ -86,6 +91,8 @@ class MainActivity : FragmentActivity() {
         "cancelled" -> "Cancelled."
         "not_ready", "no_welcome" -> "The other device has not finished adding this one yet."
         "bad_qr", "bad_invite", "bad_join" -> "That is not a Keykin code."
+        "wrong_box" -> "That code is from a different box."
+        "pending_welcome" -> "A device you added has not finished joining yet. Finish that first."
         else -> "That did not work ($code)."
     }
     /** Runs `work` off the main thread, showing what went wrong in plain words. */
@@ -108,10 +115,13 @@ class MainActivity : FragmentActivity() {
                 Device.add(me, h, inv, fingerprint("Add ${inv.name}"))
                 screen = Screen.JoinCode(Texts.join(h), inv.name); loadMembers()
             } } ?: run { problem = "Add this device to an account first." }
-            t.contains("\"join\"") -> work { val h = Device.join(me, Texts.readJoin(t)); store.keep(h); held = h; screen = Screen.Home; loadMembers() }
+            t.contains("\"login\"") -> held?.let { h -> work {
+                Device.approveLogin(me, h, t, fingerprint("Log in to the box's page")); note = "That browser is logged in to the box."
+            } } ?: run { problem = "Add this device to an account first." }
+            t.contains("\"join\"") -> work { own(Device.join(me, Texts.readJoin(t))); screen = Screen.Home; loadMembers() }
             else -> work {
                 if (held != null) refuse("already_set_up")
-                val h = Device.create(me, Texts.qr(t)); store.keep(h); held = h; screen = Screen.Home; loadMembers()
+                own(Device.create(me, Texts.qr(t))); screen = Screen.Home; loadMembers()
             }
         }
     }
@@ -125,6 +135,9 @@ class MainActivity : FragmentActivity() {
         val ev = Device.sign(me, h, 1, "Signed by Keykin on ${me.name}")
         note = "Signed. Event ${ev.getString("id").take(12)}…"
         android.util.Log.i("Keykin", "signed " + ev.getString("id"))
+    } }
+    private fun cycle() = held?.let { h -> work {
+        Device.cycle(me, h, fingerprint("Remove blocked devices for good")); loadMembers(); note = "Done. Blocked devices are gone for good."
     } }
     private fun showNsec() = held?.let { h -> work { screen = Screen.Nsec(Device.formNsec(me, h, fingerprint("Form the whole key on this device"))) } }
     private fun copy(text: String) { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Keykin", text)) }
@@ -194,7 +207,7 @@ class MainActivity : FragmentActivity() {
         val h = held ?: return
         Card {
             Head("Your account")
-            Mono(h.npub)
+            Mono(Bech32.npub(h.npub))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Btn("Sign a test note", enabled = !busy) { signTest() }
                 Btn("Refresh", enabled = !busy) { refresh() }
@@ -211,8 +224,24 @@ class MainActivity : FragmentActivity() {
                     if (m.kind == "device" && m.key != me.key) Btn(if (m.blocked) "Unblock" else "Block", if (m.blocked) Kind.Plain else Kind.Danger, !busy) { toggleBlock(m) }
                 }
             }
+            if (members.any { it.blocked }) {
+                Dim("A blocked device still holds its old piece. Removing it makes that piece useless and takes it off the list.")
+                Btn("Remove blocked devices for good", Kind.Danger, !busy, Modifier.fillMaxWidth()) { cycle() }
+            }
             Btn("Add a device", Kind.Main, !busy, Modifier.fillMaxWidth()) { scan("Scan the invite code on the new device") }
             Btn("Paste an invite instead", enabled = !busy, modifier = Modifier.fillMaxWidth()) { screen = Screen.Paste(Screen.Home) }
+        }
+        Card {
+            Head("The box's page")
+            Dim("To log a browser in to the box's page, scan the code that page shows.")
+            Btn("Scan the page's code", enabled = !busy, modifier = Modifier.fillMaxWidth()) { scan("Scan the code on the box's page") }
+        }
+        if (apps.isNotEmpty()) Card {
+            Head("Apps that sign with this account")
+            for (pkg in apps) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Body(Apps.label(this@MainActivity, pkg), Modifier.weight(1f))
+                Btn("Sign out", enabled = !busy) { Apps.signOut(this@MainActivity, pkg); apps = Apps.all(this@MainActivity) }
+            }
         }
         Card {
             Head("The whole key")
@@ -235,10 +264,10 @@ class MainActivity : FragmentActivity() {
     @Composable private fun NsecScreen(s: Screen.Nsec) {
         BackHandler { screen = Screen.Home }
         Card {
-            Head("The whole key (hex)")
+            Head("The whole key")
             Warn("Anyone who gets this controls the account for good.")
-            Mono(s.nsec)
-            Btn("Copy", modifier = Modifier.fillMaxWidth()) { copy(s.nsec); note = "Copied." }
+            Mono(Bech32.nsec(s.nsec))
+            Btn("Copy", modifier = Modifier.fillMaxWidth()) { copy(Bech32.nsec(s.nsec)); note = "Copied." }
             Btn("Done", Kind.Main, modifier = Modifier.fillMaxWidth()) { screen = Screen.Home }
         }
     }

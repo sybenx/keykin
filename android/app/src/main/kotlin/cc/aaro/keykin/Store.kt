@@ -47,5 +47,5 @@ class Store(private val c: Context) {
         return Me(unhex(o.getString("sk")), o.getString("name"), Chip.publicKey(c))
     }
     fun held(): Held? = read()?.optJSONObject("held")?.let(Held::of)
-    fun keep(h: Held) { write((read() ?: error("no device")).put("held", h.json())) }
+    @Synchronized fun keep(h: Held) { write((read() ?: error("no device")).put("held", h.json())) }
 }

@@ -14,10 +14,14 @@ typealias Send = (JSONObject) -> JSONObject
 
 class Me(val sk: ByteArray, val name: String, val chip: String?) { val key: String = Secp.pub(sk) }
 /** What a device keeps once it is in an account. */
-data class Held(val piece: Piece, val npub: String, val boxKey: String, val addr: String) {
-    fun json(): JSONObject = JSONObject().put("commitment", JSONArray(piece.c)).put("i", piece.i).put("share", scalarHex(piece.share)).put("npub", npub).put("boxKey", boxKey).put("addr", addr)
+/** `piece` and `epoch` change when the keys are cycled; `changed` is told, so the app can save. */
+class Held(var piece: Piece, val npub: String, val boxKey: String, val addr: String, var epoch: Int = 0) {
+    var changed: (Held) -> Unit = {}
+    fun json(): JSONObject = JSONObject().put("commitment", JSONArray(piece.c)).put("i", piece.i).put("share", scalarHex(piece.share)).put("npub", npub).put("boxKey", boxKey).put("addr", addr).put("epoch", epoch)
+    override fun equals(other: Any?) = other is Held && other.json().toString() == json().toString()
+    override fun hashCode() = json().toString().hashCode()
     companion object {
-        fun of(o: JSONObject) = Held(Piece(o.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }, o.getInt("i"), BigInteger(o.getString("share"), 16)), o.getString("npub"), o.getString("boxKey"), o.getString("addr"))
+        fun of(o: JSONObject) = Held(Piece(o.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }, o.getInt("i"), BigInteger(o.getString("share"), 16)), o.getString("npub"), o.getString("boxKey"), o.getString("addr"), o.optInt("epoch", 0))
     }
 }
 data class Member(val key: String, val i: Int, val name: String, val kind: String, val chip: Boolean, val blocked: Boolean, val added: Long)
@@ -59,6 +63,30 @@ object Device {
     }
     private fun call(send: Send, req: JSONObject): JSONObject = send(req).also { if (it.has("error")) refuse(it.getString("error")) }
 
+    /**
+     * A request that depends on the current pieces. If the keys were cycled while this device was away, the
+     * box says `stale` and hands over the changes; the device applies them and asks again.
+     */
+    private fun current(me: Me, h: Held, send: Send, fp: Fingerprint? = null, body: () -> JSONObject): JSONObject {
+        var tries = 0
+        while (true) {
+            val r = send(seal(body().put("epoch", h.epoch), me, fp))
+            if (r.optString("error") != "stale" || tries++ > 0) { if (r.has("error")) refuse(r.getString("error")); return r }
+            var share = h.piece.share
+            val cs = r.getJSONArray("catchups")
+            for (k in 0 until cs.length()) cs.getJSONObject(k).let { c -> share = share.add(BigInteger(Seal.from(me.sk, c.getString("from"), "cycle", c.getString("sealed")), 16)).mod(N) }
+            val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
+            adopt(h, c, share, r.getInt("epoch"))
+            call(send, seal(JSONObject().put("op", "caught_up"), me))
+        }
+    }
+    /** Takes a new piece only if it lies on the new line of the same key: share·G = C0 + i·C1. */
+    private fun adopt(h: Held, c: List<String>, share: BigInteger, epoch: Int) {
+        if (c.size != 2 || c[0].substring(2) != h.npub) refuse("bad_piece")
+        if (Secp.mulG(share) != Secp.add(c[0], Secp.mul(BigInteger.valueOf(h.piece.i.toLong()), c[1]))) refuse("bad_piece")
+        h.piece = Piece(c, h.piece.i, share); h.epoch = epoch; h.changed(h)
+    }
+
     /** Talks to a box over HTTP. */
     fun http(addr: String): Send = { req ->
         val c = URL("$addr/keykin").openConnection() as HttpURLConnection
@@ -86,16 +114,17 @@ object Device {
     fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr)): JSONObject {
         val id = eventId(h.npub, createdAt, kind, tags, content)
         val ev = JSONObject().put("pubkey", h.npub).put("created_at", createdAt).put("kind", kind).put("tags", JSONArray(tags.map { JSONArray(it) })).put("content", content)
-        val mine = Frost.ask(h.piece, id)
-        val r = call(send, seal(JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()), me))
+        lateinit var mine: Frost.Asked
+        val r = current(me, h, send) { mine = Frost.ask(h.piece, id); JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()) }
         if (r.getString("id") != id) refuse("wrong_id")
         val c = r.getJSONObject("commit")
         return ev.put("id", id).put("sig", Frost.finish(h.piece, id, mine, Commit(c.getInt("i"), c.getString("D"), c.getString("E")), r.getString("z")))
     }
 
-    fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> {
-        val a = call(send, seal(JSONObject().put("op", "members"), me)).getJSONArray("members")
-        return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added")) } }
+    fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> = listing(me, send).first
+    private fun listing(me: Me, send: Send): Pair<List<Member>, Int> {
+        val r = call(send, seal(JSONObject().put("op", "members"), me)); val a = r.getJSONArray("members")
+        return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added")) } } to r.getInt("next")
     }
     fun block(me: Me, h: Held, key: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "block").put("key", key), me)) }
     /** Needs the fingerprint. */
@@ -103,12 +132,14 @@ object Device {
 
     /** Adds a device. Needs the fingerprint. This device and the box each give half of the newcomer's piece. */
     fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint, send: Send = http(h.addr)): Int {
-        val list = members(me, h, send)
-        val i = list.maxOf { it.i } + 1
+        val (list, i) = listing(me, send)
         val boxI = list.firstOrNull { it.key == h.boxKey }?.i ?: refuse("no_box")
-        val mine = Frost.repairDeltas(h.piece, listOf(h.piece.i, boxI).sorted(), i)
+        var mine = emptyMap<Int, String>()
         val member = JSONObject().put("key", inv.key).put("name", inv.name).put("kind", "device").put("i", i).apply { if (inv.chip != null) put("chip", inv.chip) }
-        val r = call(send, seal(JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!)), me, fp))
+        val r = current(me, h, send, fp) {
+            mine = Frost.repairDeltas(h.piece, listOf(h.piece.i, boxI).sorted(), i)
+            JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!))
+        }
         val sigma = Frost.repairSigma(listOf(mine[h.piece.i]!!, Seal.from(me.sk, h.boxKey, "repair-delta", r.getString("delta"))))
         call(send, seal(JSONObject().put("op", "welcome_put").put("key", inv.key).put("sigma", Seal.to(me.sk, inv.key, "repair-sigma", sigma)), me))
         return i
@@ -121,12 +152,12 @@ object Device {
         val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
         if (c.size != 2 || c[0].substring(2) != j.npub) refuse("wrong_account")
         val sigmas = listOf(Seal.from(me.sk, j.boxKey, "repair-sigma", r.getString("box")), Seal.from(me.sk, r.getString("from"), "repair-sigma", r.getString("device")))
-        return Held(Piece(c, r.getInt("i"), Frost.repairShare(c, sigmas, r.getInt("i"))), j.npub, j.boxKey, j.addr)
+        return Held(Piece(c, r.getInt("i"), Frost.repairShare(c, sigmas, r.getInt("i"))), j.npub, j.boxKey, j.addr, r.optInt("epoch", 0))
     }
 
     /** Falls back to the nsec. Needs the fingerprint. The only place a whole key ever exists. */
     fun formNsec(me: Me, h: Held, fp: Fingerprint, send: Send = http(h.addr)): String {
-        val r = call(send, seal(JSONObject().put("op", "reveal"), me, fp))
+        val r = current(me, h, send, fp) { JSONObject().put("op", "reveal") }
         val boxShare = BigInteger(Seal.from(me.sk, h.boxKey, "reveal", r.getString("share")), 16)
         val (x1, x2) = BigInteger.valueOf(h.piece.i.toLong()) to BigInteger.valueOf(r.getInt("i").toLong())
         // The line at 0 from its values at x1 and x2.
@@ -135,4 +166,38 @@ object Device {
         if (Secp.mulG(nsec).substring(2) != h.npub) refuse("bad_piece")
         return scalarHex(nsec)
     }
+
+    /** Cycles the keys. Needs the fingerprint. Blocked devices are dropped for good; the key does not change. */
+    fun cycle(me: Me, h: Held, fp: Fingerprint, send: Send = http(h.addr)) {
+        val list = members(me, h, send)
+        var b1 = BigInteger.ZERO
+        val r = current(me, h, send, fp) {
+            b1 = BigInteger(1, random(32)).mod(N)
+            val changes = JSONObject()
+            for (m in list) if (!m.blocked && m.key != me.key && m.key != h.boxKey) changes.put(m.key, Seal.to(me.sk, m.key, "cycle", scalarHex(b1.multiply(BigInteger.valueOf(m.i.toLong())))))
+            JSONObject().put("op", "cycle").put("b1", Seal.to(me.sk, h.boxKey, "cycle", scalarHex(b1))).put("changes", changes)
+        }
+        val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
+        adopt(h, c, h.piece.share.add(b1.multiply(BigInteger.valueOf(h.piece.i.toLong()))).mod(N), r.getInt("epoch"))
+    }
+
+    /** Logs a browser in to the box's page, from the code that page shows. Needs the fingerprint. */
+    fun approveLogin(me: Me, h: Held, text: String, fp: Fingerprint, send: Send = http(h.addr)) {
+        val q = try { JSONObject(text).getJSONObject("login") } catch (_: Exception) { refuse("bad_qr") }
+        if (q.optString("key") != h.boxKey) refuse("wrong_box")
+        call(send, seal(JSONObject().put("op", "login").put("code", q.getString("code")), me, fp))
+    }
+
+    /** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. */
+    fun conversationKey(me: Me, h: Held, peer: String, send: Send = http(h.addr)): ByteArray {
+        if (!Regex("^[0-9a-f]{64}$").matches(peer)) refuse("bad_peer")
+        val r = current(me, h, send) { JSONObject().put("op", "ecdh").put("peer", peer) }
+        // This piece's part: λ·share·Q, with λ = other / (other − i) for the pair of pieces taking part.
+        val (i, o) = BigInteger.valueOf(h.piece.i.toLong()) to BigInteger.valueOf(r.getInt("i").toLong())
+        val lambda = o.multiply(o.subtract(i).modInverse(N)).mod(N)
+        val mine = Secp.mul(lambda.multiply(h.piece.share).mod(N), "02$peer")
+        return Nip44.conversationKey(unhex(Secp.add(mine, r.getString("part")).substring(2)))
+    }
+    fun nip44Encrypt(me: Me, h: Held, peer: String, text: String, send: Send = http(h.addr)) = Nip44.encrypt(text, conversationKey(me, h, peer, send))
+    fun nip44Decrypt(me: Me, h: Held, peer: String, payload: String, send: Send = http(h.addr)) = Nip44.decrypt(payload, conversationKey(me, h, peer, send))
 }

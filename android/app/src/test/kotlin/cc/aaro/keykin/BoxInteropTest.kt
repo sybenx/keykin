@@ -62,5 +62,46 @@ class BoxInteropTest {
         Device.unblock(tablet, th, phone.key, tabletChip.fp)
         Device.sign(phone, held, 1, "back")
         assertEquals(listOf("Pixel (Kotlin)", "Box", "Tablet (Kotlin)"), Device.members(phone, held).map { it.name })
+
+        // Messages: two pieces make the conversation key the whole nsec would.
+        val friendSk = random(32); val friend = Secp.pub(friendSk)
+        val viaPieces = Device.conversationKey(phone, held, friend)
+        assertArrayEquals(Nip44.conversationKey(Secp.ecdhX(unhex(nsec), friend)), viaPieces)
+        val friendKey = Nip44.conversationKey(Secp.ecdhX(friendSk, held.npub))
+        assertEquals("to a friend é😀", Nip44.decrypt(Device.nip44Encrypt(tablet, th, friend, "to a friend é😀"), friendKey))
+
+        // Block, then cycle: the blocked device is gone, the other catches up by itself, the key is the same.
+        Device.block(phone, held, tablet.key)
+        Device.cycle(phone, held, chip.fp)
+        assertEquals(1, held.epoch)
+        assertEquals(listOf("Pixel (Kotlin)", "Box"), Device.members(phone, held).map { it.name })
+        assertEquals("unknown_member", assertThrows(KeykinException::class.java) { Device.sign(tablet, th, 1, "x") }.code)
+        assertEquals(nsec, Device.formNsec(phone, held, chip.fp))
+        // A device that was away during a cycle catches up on its next request.
+        val (watch, watchChip) = device("Watch (Kotlin)")
+        Device.add(phone, held, Texts.readInvite(Texts.invite(watch)), chip.fp)
+        val wh = Device.join(watch, Texts.readJoin(Texts.join(held)))
+        Device.sign(watch, wh, 1, "collected")
+        Device.cycle(phone, held, chip.fp)
+        assertEquals(1, wh.epoch)
+        val ev3 = Device.sign(watch, wh, 1, "after the cycle")
+        assertEquals(2, wh.epoch)
+        assertTrue(Secp.schnorrVerify(ev3.getString("sig"), unhex(ev3.getString("id")), held.npub))
+        assertEquals(nsec, Device.formNsec(watch, wh, watchChip.fp))
+    }
+
+    @Test fun nip44MatchesTheReference() {
+        // "<conversation key hex>|<nonce hex>|<plaintext>|<payload>", made by nostr-tools.
+        val v = (System.getenv("KEYKIN_NIP44_VECTOR") ?: "").split("|")
+        assumeTrue("set KEYKIN_NIP44_VECTOR", v.size == 4)
+        assertEquals(v[3], Nip44.encrypt(v[2], unhex(v[0]), unhex(v[1])))
+        assertEquals(v[2], Nip44.decrypt(v[3], unhex(v[0])))
+        for (n in listOf(1, 31, 32, 33, 64, 65, 255, 257, 1000, 5000)) { val t = "x".repeat(n); assertEquals(t, Nip44.decrypt(Nip44.encrypt(t, unhex(v[0])), unhex(v[0]))) }
+        assertThrows(KeykinException::class.java) { Nip44.decrypt(v[3].dropLast(4) + "AAAA", unhex(v[0])) }
+    }
+
+    @Test fun bech32MatchesNip19() {
+        assertEquals("npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg", Bech32.npub("7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"))
+        assertEquals("nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5", Bech32.nsec("67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa"))
     }
 }

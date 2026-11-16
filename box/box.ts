@@ -39,6 +39,8 @@ export class Box {
   #seen = new Map<string, number>();   // request id -> ts, for replay refusal
   #pending: { device: string; secret: string; pkg: string; name: string; chip?: string } | null = null;
   onChange: (s: BoxState) => void = () => {};
+  /** Set by the server: approves a login to the box's page that a device scanned. Returns false if unknown or expired. */
+  onLogin: (code: string, by: string) => boolean = () => false;
 
   constructor(state: BoxState | null = null) { this.state = state ?? { ...newMemberKey(), account: null }; }
 
@@ -73,6 +75,12 @@ export class Box {
         case 'welcome_put': return this.#welcomePut(s, from, body);
         case 'welcome': return this.#welcome(s, from);
         case 'reveal': return this.#reveal(s, from, req);
+        case 'login': {
+          // Logging in to the box's page gives the power to block and unblock anything, so it needs the fingerprint.
+          this.#needFingerprint(from, req);
+          if (typeof body.code !== 'string' || !this.onLogin(body.code, from.name)) refuse('bad_code');
+          return { ok: true };
+        }
         default: return refuse('unknown_op');
       }
     } catch (e) {

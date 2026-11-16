@@ -146,3 +146,11 @@ export async function cycle(me: Me, h: Held, send: Send, t = now()) {
   if (!mul(share).equals(derivePoint(C, BigInt(h.piece.i)))) refuse('bad_piece');
   h.piece = { C, i: h.piece.i, share }; h.epoch = r.epoch;
 }
+
+/** Logs a browser in to the box's page, from the code that page shows. Needs the fingerprint. */
+export async function approveLogin(me: Me, h: Held, text: string, send: Send, t = now()) {
+  let q: any; try { q = JSON.parse(text)?.login; } catch { return refuse('bad_qr'); }
+  if (!q || typeof q.code !== 'string') refuse('bad_qr');
+  if (q.key !== h.boxKey) refuse('wrong_box');          // only this account's own box
+  await call(send, await seal({ op: 'login', code: q.code }, me.sk, t, me.fp));
+}

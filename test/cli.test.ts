@@ -10,7 +10,7 @@ import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { startBox } from '../box/server.ts';
 import { main } from '../cli/keykin.ts';
-import { hexToBytes } from '../src/bytes.ts';
+import * as nip19 from 'nostr-tools/nip19';
 
 const tmp = (n: string) => mkdtempSync(join(tmpdir(), n));
 const closeBox = (b: any) => new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); });
@@ -45,7 +45,32 @@ test('two command-line devices: create, invite, add, join, sign, block, nsec', a
     await cli(mini, 'sign', '{}');
 
     const nsec = (await cli(mac, 'nsec')).text;
-    assert.equal(Buffer.from(schnorr.getPublicKey(hexToBytes(nsec))).toString('hex'), npub);
+    assert.match(nsec, /^nsec1/);
+    assert.equal(Buffer.from(schnorr.getPublicKey(nip19.decode(nsec).data as Uint8Array)).toString('hex'), npub);
+
+    // Block, then cycle: the blocked device is gone for good and the other still signs.
+    await cli(mac, 'block', 'Mac mini');
+    assert.match((await cli(mac, 'cycle')).text, /cycled/);
+    assert.doesNotMatch((await cli(mac, 'status')).text, /Mac mini/);
+    await assert.rejects(cli(mini, 'sign', '{}'), /unknown_member/);
+    assert.ok(verifyEvent(JSON.parse((await cli(mac, 'sign', '{"content":"after the cycle"}')).text)));
+
+    // Log a browser in to the box's page by "scanning" its code.
+    const base = `http://127.0.0.1:${b.port}`;
+    const first = await fetch(base + '/', { headers: { connection: 'close' } });
+    const page = await first.text();
+    const cookie = first.headers.get('set-cookie')!.split(';')[0];
+    const loginText = /id="logintext"[^>]*>([^<]+)</.exec(page)![1].replaceAll('&quot;', '"');
+    const code = JSON.parse(loginText).login.code;
+    const wait = () => fetch(`${base}/login/wait?code=${code}`, { headers: { connection: 'close', cookie } });
+    assert.deepEqual(await (await wait()).json(), { ok: false });
+    assert.equal((await fetch(`${base}/login/wait?code=${code}`, { headers: { connection: 'close' } })).status, 404);   // another browser
+    await cli(mac, 'login', loginText);
+    const done = await wait();
+    assert.deepEqual(await done.json(), { ok: true });
+    const session = done.headers.get('set-cookie')!.split(';')[0];
+    assert.match(await (await fetch(base + '/', { headers: { connection: 'close', cookie: session } })).text(), /Devices/);
+    assert.equal((await wait()).status, 404);                                                    // one use
   } finally { await closeBox(b); }
 });
 
@@ -84,6 +109,14 @@ test('a site signs in through the remote signer over a relay', { skip: spawnSync
     const stranger = BunkerSigner.fromBunker(generateSecretKey(), { ...(await parseBunkerInput(url))!, secret: 'wrong' });
     await assert.rejects(stranger.connect(), /bad_secret/);
     await stranger.close();
+
+    // Signing the site out: it is refused from then on, and the old link no longer lets it back in.
+    assert.match((await cli(home, 'sites')).text, new RegExp(getPublicKey(siteKey)));
+    assert.match((await cli(home, 'signout', getPublicKey(siteKey).slice(0, 12))).text, /Signed out 1 site/);
+    await assert.rejects(site.signEvent({ kind: 1, created_at: 1, tags: [], content: 'after sign-out' }), /not_connected/);
+    const again = BunkerSigner.fromBunker(siteKey, (await parseBunkerInput(url))!);
+    await assert.rejects(again.connect(), /bad_secret/);
+    await again.close();
   } finally {
     await site?.close(); bunker?.close(); await closeBox(b); relayProc.kill();
   }

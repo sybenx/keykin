@@ -40,17 +40,29 @@ const shell = (title: string, body: string, nonce = '', script = '') => `<!docty
 <meta name="robots" content="noindex"><title>${esc(title)}</title><style>${CSS}</style></head>
 <body><main>${body}</main>${script ? `<script nonce="${nonce}">${script}</script>` : ''}</body></html>`;
 
-export function loginPage(o: { error?: string }) {
+export function loginPage(o: { error?: string; qrText?: string; code?: string; nonce?: string }) {
+  let scan = '';
+  if (o.qrText) {
+    const qr = qrcode(0, 'M'); qr.addData(o.qrText); qr.make();
+    scan = `<div class="card">
+  <h2>Log in with your device</h2>
+  <p class="dim small">Open Keykin on a device in this account and scan this. It asks for your fingerprint.</p>
+  <div class="qr" role="img" aria-label="Login QR code">${qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true })}</div>
+  <details class="small"><summary class="dim">No camera? Copy the code as text</summary>
+    <p class="mono" id="logintext" style="margin-top:8px">${esc(o.qrText)}</p></details>
+</div>`;
+  }
   return shell('Keykin box', `
 <header><h1>Keykin box</h1></header>
+${scan}
 <form class="card" method="post" action="/login">
-  <h2>Log in</h2>
+  <h2>${o.qrText ? 'Or use the owner secret' : 'Log in'}</h2>
   <p class="dim small">For the person who runs this box.</p>
   ${o.error ? `<p class="err small" role="alert">${esc(o.error)}</p>` : ''}
   <label class="small dim" for="secret">Owner secret</label>
-  <input id="secret" name="secret" type="password" autocomplete="current-password" autofocus required>
-  <button class="go" type="submit">Log in</button>
-</form>`);
+  <input id="secret" name="secret" type="password" autocomplete="current-password" required>
+  <button class="${o.qrText ? '' : 'go'}" type="submit">Log in</button>
+</form>`, o.nonce ?? '', o.code ? `setInterval(async()=>{try{const r=await fetch('/login/wait?code=${o.code}');if(r.ok&&(await r.json()).ok)location.href='/'}catch{}},1500)` : '');
 }
 
 const top = (csrf: string) => `<header><h1>Keykin box</h1>

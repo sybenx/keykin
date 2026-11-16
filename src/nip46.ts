@@ -9,6 +9,12 @@ import * as D from './device.ts';
 import { KeykinError, hexToBytes, bytesToHex, randomBytes } from './bytes.ts';
 
 export interface BunkerState { sk: string; secret: string; clients: string[] }
+/** Signs one site out. The link's secret changes too, so an old link cannot be used to come back. */
+export function signOut(b: BunkerState, prefix: string): string[] {
+  const gone = b.clients.filter((c) => c.startsWith(prefix));
+  if (gone.length) { b.clients = b.clients.filter((c) => !c.startsWith(prefix)); b.secret = bytesToHex(randomBytes(16)); }
+  return gone;
+}
 export const newBunker = (): BunkerState => ({ sk: bytesToHex(randomBytes(32)), secret: bytesToHex(randomBytes(16)), clients: [] });
 export const bunkerUrl = (b: BunkerState, relay: string) =>
   `bunker://${getPublicKey(hexToBytes(b.sk))}?relay=${encodeURIComponent(relay)}&secret=${b.secret}`;
@@ -37,7 +43,7 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
 }
 
 /** Runs the bunker on one relay until `close()` is called. */
-export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held; send: D.Send; relay: string; onChange?: () => void; log?: (s: string) => void }) {
+export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held; send: D.Send; relay: string; onChange?: () => void; before?: () => void; log?: (s: string) => void }) {
   const sk = hexToBytes(o.bunker.sk), pub = getPublicKey(sk), log = o.log ?? (() => {});
   const relay = await Relay.connect(o.relay);
   const seen = new Set<string>();
@@ -48,6 +54,7 @@ export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held
       let req: { id: string; method: string; params: string[] };
       try { req = JSON.parse(nip44.decrypt(ev.content, key)); } catch { return; }
       let body: { id: string; result?: string; error?: string };
+      o.before?.();   // pick up sign-outs made while running
       try { body = { id: req.id, result: await answerRequest(o.bunker, o.me, o.held, o.send, ev.pubkey, req.method, req.params ?? [], o.onChange ?? (() => {})) }; }
       catch (e) { body = { id: req.id, error: e instanceof KeykinError ? e.code : 'failed' }; if (!(e instanceof KeykinError)) log(`bunker: ${String(e)}`); }
       log(`bunker: ${req.method} from ${ev.pubkey.slice(0, 8)} -> ${body.error ?? 'ok'}`);

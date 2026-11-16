@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Keykin",
+  "version": "0.1.0",
+  "description": "This browser as a Keykin device. Sites sign in with your account; the key is never whole.",
+  "action": { "default_popup": "popup.html", "default_title": "Keykin" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    { "matches": ["http://*/*", "https://*/*"], "js": ["inject.js"], "run_at": "document_start", "world": "MAIN" },
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_start" }
+  ],
+  "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }
+}

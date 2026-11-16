@@ -2,3 +2,4 @@ node_modules/
 frost/target/
 dist/
 box-data/
+ext/dist/

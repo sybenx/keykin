@@ -19,7 +19,10 @@
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
+    "@types/chrome": "^0.3.7",
     "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.60.0",
     "typescript": "^5.9.3"
   }
 }

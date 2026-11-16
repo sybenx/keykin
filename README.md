@@ -7,6 +7,7 @@ My devices and my box. Any two pieces sign.
 - `src/`: the pieces, the signing round, member requests, the device side.
 - `box/`: the box (`box.ts`), its page (`page.ts`) and its HTTP server (`server.ts`).
 - `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
+- `android/`: the phone app.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 
 ```bash
@@ -42,3 +43,17 @@ Sign in to a site: run this, then paste the link it prints into the site's remot
 ```bash
 npm run keykin -- bunker wss://your.relay
 ```
+
+## The Android app
+
+Build the FROST library for Android once (and again when `frost/` changes), then the app:
+
+```bash
+cd frost && ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/29.0.14206865 cargo ndk -t arm64-v8a -t x86_64 -P 30 -o ../android/app/src/main/jniLibs build --release --features jni
+```
+
+```bash
+cd android && JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew :app:assembleDebug
+```
+
+The Kotlin tests run against a real box. Build the library for this computer with `cargo build --release --features jni` in `frost/`, start a box, and pass its setup text in `KEYKIN_BOX_QR` to `./gradlew :app:testDebugUnitTest`. Without it the box test is skipped.

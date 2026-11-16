@@ -157,6 +157,25 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 `block`, `unblock`, `bunker`, `nsec`. Its state is one file, `~/.keykin/device.json`, readable
 only by its owner. The piece in it is not encrypted.
 
+## 8e. The Android app
+
+`android/` is the phone. Kotlin, with the same Rust FROST library as everything else and
+libsecp256k1 for the member key.
+
+- **Start:** scan the box's code (or paste it) to make an account, or show this phone's invite
+  to join one.
+- **Home:** the npub, the devices with Block and Unblock, Add a device, a test signature, and
+  Form the whole key.
+- **The chip key is real here.** A P-256 key in the Android Keystore that needs a strong
+  fingerprint or face for every signature and is thrown away if new fingerprints are enrolled.
+  Add a device, Unblock and Form the whole key each show the system fingerprint prompt, and the
+  box checks the result.
+- **A phone with no fingerprint set up has no chip key.** It signs, and cannot make account
+  changes. (A debug build makes a key that asks for nothing instead, for emulators.)
+- **Saved state** is one file in the app's no-backup folder, encrypted with a Keystore key.
+- A debug build also accepts codes as text through an intent, since an emulator has no camera
+  to point at a screen.
+
 ## 9. Not built yet
 
 - **QRST login to the box's page.** `DIRECTION.md` says login is by QRST. Today it is an owner
@@ -164,9 +183,12 @@ only by its owner. The piece in it is not encrypted.
   is a later step; the page is built so that only the login form changes.
 - **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
   `state.json`, start it, and read the new secret from its output.
-- **A real chip.** The box-side check is built and tested with a software P-256 key standing in.
-  The Android Keystore and Secure Enclave side is not written, and nothing proves to the box
-  that a chip key really lives in a chip.
+- **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the
+  public key on trust. iOS (Secure Enclave) is not written.
+- **Signing for other apps on the phone** (NIP-55) and the remote signer (NIP-46) in the
+  Android app. The command-line device has the remote signer; the phone does not yet.
+- **The camera scan on a real phone.** The scanner is wired in but was only exercised through
+  pasted and intent-fed codes on an emulator.
 - **Devices refusing to help a blocked device.** Devices can read the list from the box, but
   device-to-device transport is not written.
 - **Cycling the keys** after a block, so the blocked piece is worthless.
@@ -175,7 +197,7 @@ only by its owner. The piece in it is not encrypted.
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
 - **Per-site limits and a way to sign a site out** of the remote signer.
 - **Removing a device or a box from the list.** Blocking is the only way to stop one.
-- **Apps:** Android (with NIP-55) and the browser extension (with NIP-07).
+- **The browser extension** (with NIP-07).
 - **Tier 3.** Not planned for now.
 
 ## 10. Known weak spots

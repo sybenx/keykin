@@ -3,3 +3,4 @@ frost/target/
 dist/
 box-data/
 ext/dist/
+*.apk

@@ -5,7 +5,7 @@
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { randomBytes, sha, hexToBytes, bytesToHex, refuse } from './bytes.ts';
 import { W } from './wasm.ts';
-import { type Commitment, commitmentHex, idHex, mod, mul, N, scalarHex, compHex, G, Point } from './curve.ts';
+import { type Commitment, commitmentHex, idHex, mod, mul, N, scalarHex, scalarFrom, compHex, pointFrom, rebuildCommitment, G, Point } from './curve.ts';
 
 
 /** A signing commitment as it travels (§5.1). */
@@ -66,12 +66,36 @@ export function repairShare(C: Commitment, sigmas: string[], participant: number
 
 // --- Dealing a key someone already has (import, §11.2) -----------------------------------
 
+// --- Making the key together (no whole key anywhere) -------------------------------------
+
+const idNum = (h: string) => Number(BigInt('0x' + h));
+const pk = (m: [number, string][]) => JSON.stringify(m.map(([i, p]) => [idHex(i), p]));
+
+/** Key generation, part 1 for index `i` of `n`: a secret to keep and a package for everyone. */
+export function dkg1(i: number, n: number): { secret: string; pkg: string } {
+  const r = JSON.parse(W.dkgPart1(idHex(i), n, THRESHOLD, bytesToHex(randomBytes(32))));
+  return { secret: r.secret, pkg: r.package };
+}
+/** Part 2: from the others' part-1 packages, a secret package for each of them. */
+export function dkg2(secret: string, others: [number, string][]): { secret: string; pkgs: Map<number, string> } {
+  const r = JSON.parse(W.dkgPart2(secret, pk(others)));
+  return { secret: r.secret, pkgs: new Map(r.packages.map(([i, p]: [string, string]) => [idNum(i), p])) };
+}
+/** Part 3: this index's piece, the npub and the commitment, all in even-y form. */
+export function dkg3(secret2: string, r1: [number, string][], r2: [number, string][]): { share: bigint; npub: string; C: Commitment } {
+  const r = JSON.parse(W.dkgPart3(secret2, pk(r1), pk(r2)));
+  const C = rebuildCommitment(r.points.map(([i, P]: [string, string]) => [BigInt('0x' + i), pointFrom(P)]));
+  if (compHex(C[0]).slice(2) !== r.groupX) refuse('bad_keygen');
+  return { share: scalarFrom(r.share), npub: r.groupX, C };
+}
+
 /** Threshold of every Keykin v2 account: any two pieces sign. */
 export const THRESHOLD = 2;
 
 /**
- * Splits `secret` for a threshold of two: f(x) = a0 + a1·x, even y (BIP-340), so the npub is the
- * same as the nsec's. Whoever keeps `a1` (the primary device) can hand out a piece at any new index.
+ * Splits a whole `secret` for a threshold of two: f(x) = a0 + a1·x, even y (BIP-340). The main flow
+ * never calls this, because there the key is made in pieces (dkg1..3). Tests use it, and it is what
+ * importing an existing nsec would use.
  */
 export function deal(secret: bigint, rand: () => bigint = () => mod(BigInt('0x' + bytesToHex(randomBytes(32))))) {
   let a0 = mod(secret);

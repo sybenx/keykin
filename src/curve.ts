@@ -85,16 +85,17 @@ function polyMul(a: bigint[], b: bigint[]): bigint[] {
   return r;
 }
 
-/** Rebuild a degree-3 commitment from four points at distinct x (core §3.4 step 4: a device's
- *  own 3 share points plus the group point at x = 0). */
+/** Rebuild the commitment of a line (or any polynomial) from as many share points as it has
+ *  coefficients, at distinct x. Key generation hands back share points; signing needs this form. */
 export function rebuildCommitment(pts: [bigint, Point][]): Commitment {
-  if (pts.length !== 4) refuse('malformed', 'rebuild needs exactly four points');
-  const out: Point[] = [Point.ZERO, Point.ZERO, Point.ZERO, Point.ZERO];
+  const n = pts.length;
+  if (n < 2 || new Set(pts.map(([x]) => String(x))).size !== n) refuse('malformed', 'rebuild needs distinct points');
+  const out: Point[] = new Array(n).fill(Point.ZERO);
   for (const [xj, yj] of pts) {
     let basis = [1n], den = 1n;
     for (const [xk] of pts) if (xk !== xj) { basis = polyMul(basis, [mod(-xk), 1n]); den = mod(den * (xj - xk)); }
     const di = inv(den);
-    for (let k = 0; k < 4; k++) out[k] = out[k].add(mul(mod(basis[k] * di), yj));
+    for (let k = 0; k < n; k++) out[k] = out[k].add(mul(mod(basis[k] * di), yj));
   }
   return out;
 }

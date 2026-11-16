@@ -38,8 +38,8 @@ with home and away boxes, seats, the paper and the helper that this note held ea
 The whole thing in three lines (Aaron, 2026-11-16):
 
 - **I have devices, and they can sign together.**
-- **It is more secure than a raw nsec because most devices do not hold the full nsec.** Only
-  the primary device does.
+- **It is more secure than a raw nsec because most devices do not hold the full nsec.** After
+  the later change below, none does unless you ask for it with a fingerprint.
 - **I also have a magical login page that lives on a friend's box.**
 
 Build tiers 1 and 2 only. Tier 3 is not being built now.
@@ -58,19 +58,24 @@ Build tiers 1 and 2 only. Tier 3 is not being built now.
 | Two boxes | Signs |
 | One piece alone | Nothing |
 
-### Creating the key
+### Creating the key (changed later on 2026-11-16)
 
-- **The first device generates the nsec,** or imports one you already have, and splits it
-  into pieces. This is the primary device.
-- **The primary device keeps the whole nsec as a tier 1 QRST backup.** It is how the account
-  comes back if the pieces are lost.
-- **Forgetting the nsec is a choice,** made in settings on the primary device.
+- **You scan a QR on the box.** Your device and the box make the pieces together, right then.
+- **The nsec is never raw on any device.** Nobody generates it and nobody holds it. It exists
+  only as pieces.
+- **Falling back to the nsec needs a fingerprint.** The box then hands its piece to that
+  device, and the device forms the nsec. This is the only time a whole key exists.
+- **Adding a device never forms the key either.** An existing device and the box each give
+  half of the newcomer's piece.
+
+This replaces the earlier idea of a primary device that generates the nsec and keeps it.
 
 ### Who acts as central
 
-- **The primary device,** because it holds the full nsec.
 - **The box,** because it keeps the list of devices. Later, in tier 3, it would also
   coordinate the passkeys the other devices use.
+- **No device is special.** With no primary device holding the nsec, any device with a
+  fingerprint can add another.
 
 ### The box
 
@@ -101,7 +106,7 @@ Build tiers 1 and 2 only. Tier 3 is not being built now.
 
 | Tier | What it is | Who it protects against | Build now? |
 |---|---|---|---|
-| 1. QRST | The nsec, copied between devices | Nobody | Yes (exists) |
+| 1. QRST | The nsec, copied between devices. Reached from tier 2 only by a fingerprint | Nobody | Yes (exists) |
 | 2. Multi-device | Pieces on devices and boxes, no prompts | A stolen or hacked device, once blocked | Yes |
 | 3. Fingerprint | Tier 2, plus the box wants a fingerprint before it helps | A stolen unlocked phone, and malware that cannot touch the sensor | No, later |
 

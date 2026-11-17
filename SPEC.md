@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.3, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.4, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -285,6 +285,178 @@ Limits today:
 - **The `nc` fallback, the bounce page and same-phone links** of the profile are not built. A
   code opened in a browser instead of a signer just loads the site.
 - **`type` check level** (typing the digits) is not offered by Keykin's signers.
+
+## 11. Shared formats (settled 2026-11-17)
+
+These are fixed for both the Keykin work and the Marble app. `PLAN.md` says why they exist.
+Each one says whether the box already does it. Anything marked **not built** is the target the
+app should code against; the box will meet it.
+
+### 11.1 The login-page pointer
+
+A small replaceable event, signed by the account, that names its login page. It is the only
+thing `marble.syb.lol` reads to find where to send someone.
+
+```json
+{ "kind": 30078, "pubkey": "<account npub, hex>", "created_at": 1790000000,
+  "tags": [["d", "keykin/login"], ["url", "https://account.syb.lol"]],
+  "content": "" }
+```
+
+- Kind 30078 is NIP-78 application data, so no new kind is claimed. The `d` tag is exactly
+  `keykin/login`.
+- `url` is the page's origin, `https://` only, no path, query or fragment.
+- To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
+  wins. A reader checks the signature, shows the address to the person, and only then goes there.
+- To remove it, publish the same event with no `url` tag.
+- A device signs it like any other event (section 3). The account page offers to publish it.
+
+### 11.2 Accounts on a box, and how a request names its account
+
+A box holds many accounts. **An account's id is its npub in hex** (the x-only key of section 1).
+
+- Every device request names its account in the body: `"account": "<npub hex>"`. The box
+  answers `unknown_account` if it holds no such account.
+- The requests that come before an account exists (`ask`, `asked`, `create1`, `create2`,
+  `transfer1`, `transfer2`) carry `"request": "<request id>"` instead (section 11.4).
+- **Until every device is updated,** a box that holds exactly one account takes a body with no
+  `account` as meaning that account. With two or more it answers `need_account`.
+- One box has one member key, used in every account it holds. A device's member key may be in
+  more than one account; the `account` field is what tells them apart.
+- Codes that name the box gain nothing new: the setup code is still
+  `{ keykin: 2, addr, key, code }`, and `code` is now a request id the admin approved in advance.
+- The join text gains the account: `{ keykin: 2, join: { addr, boxKey, npub } }` is unchanged,
+  and `npub` is the account id.
+
+**Built:** not yet. Today's box holds one account and ignores `account`.
+
+### 11.3 Username and password
+
+They live on the box, per account. The box never sees the password.
+
+- **Username:** 3 to 32 of `a-z 0-9 . _ -`, lower case, unique on the box.
+- **Verifier:** `PBKDF2-HMAC-SHA256(password as UTF-8 after NFKC, salt, 600000 rounds, 32 bytes)`.
+  The salt is 16 random bytes. Whoever types the password computes the verifier: the device
+  when setting it, the login page's own script when logging in.
+- **Stored on the box:** the username, the salt, and `SHA-256("keykin2-pw" ‖ verifier)`.
+- **Setting or changing it** is an account change. A device sends
+  `{ op: "password_set", account, username, salt, check }` with a fingerprint, where `check` is
+  the stored hash above, hex. `{ op: "password_clear", account }` with a fingerprint removes it.
+- **Logging in** is two calls from the page to the box (section 11.6):
+  `pw_salt { username }` returns `{ salt }`, and `pw_login { username, verifier }` returns a page
+  session. For a username that does not exist, `pw_salt` returns a salt made from the username
+  and a secret of the box's, so it gives nothing away.
+- **Limits on guessing:** five wrong tries for one username lock it for 15 minutes, doubling each
+  time up to 24 hours; a right password clears the count. Across all usernames the box takes at
+  most 30 tries a minute.
+- **What a password is worth:** only what section 11.6 lists as needing no device.
+
+**Built:** not yet.
+
+### 11.4 Asking to make or transfer an account
+
+Anyone who can reach the box may ask. Nothing is made until the admin approves it on the box's
+admin page.
+
+**Asking.** A device sends `ask`, signed by its member key like any request:
+
+```json
+{ "op": "ask", "what": "make", "name": "Pixel 9a", "note": "Aaron's phone", "chip": "<chip key>" }
+```
+
+- `what` is `make` or `transfer`. A transfer also carries `"account": "<npub hex>"`.
+- `name` is the device's name, up to 60 characters. `note` is free text for the admin, up to 200.
+- The answer is `{ ok: true, request: "<id>" }`. One member key may have one request waiting.
+  The box keeps at most 50 waiting and drops those older than seven days.
+
+**Waiting.** The device sends `{ op: "asked", request }` to hear the state: `waiting`,
+`approved`, `refused` or `gone`. An approved request can be used for 24 hours.
+
+**What the admin sees:** the device's name, the note, `make` or `transfer` (with the npub for a
+transfer), when it was asked, and the first 8 characters of the device's member key. Buttons:
+Approve and Refuse. The admin can also make an approved request with no device asking; its id
+is the `code` in the setup code the admin page shows.
+
+**Making.** With an approved request the device runs section 2, sending `"request": "<id>"`
+with `create1` and `create2` in place of the old `code`. The first device is index 1 and the box
+is index 2, as before.
+
+**Transferring** moves an account to this box from another Keykin box without the key ever
+being whole. The account keeps its npub and its devices.
+
+1. On the old box, a device adds the new box as a member of kind `box` (section 7), using the
+   new box's member key from its setup code.
+2. The device sends the new box `{ op: "transfer1", request }`. The answer is a signed
+   `welcome` request, made by the new box for the old one.
+3. The device hands that to the old box and gets back the two halves of the new box's piece.
+4. The device sends the new box `{ op: "transfer2", request, welcome, account: { npub,
+   commitment, epoch, next, members } }` with a fingerprint. The new box builds its piece, checks
+   it against the commitment, and stores the account with the old box left out of the list.
+5. The device cycles the keys on the new box (section 8f). The old box gets no change, so its
+   piece stops fitting. Other devices are told the new address with a join text.
+
+**Built:** not yet. Today the admin page shows one setup code and nobody asks.
+
+### 11.5 What is signed in, and revoking it
+
+So that the account page can show every site and app using the account, and end any of them,
+each device tells the box what it has let in.
+
+- A **grant** is `{ id, kind, name, since }`. `id` is 16 random bytes, hex, made by the device.
+  `kind` is `site` (a site signed in through this device) or `app` (another app on the phone).
+  `name` is the site's origin or the app's name. `since` is unix seconds.
+- A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
+  changes. The box keeps the list per device.
+- When a device signs or makes a message key **for** a site or app, it names the grant:
+  `"grant": "<id>"` in the `sign` or `ecdh` body. Requests for the person's own use carry none.
+- **Revoking** is done on the box, from the account page or by any device:
+  `{ op: "revoke", account, grant }`. From then on the box answers `revoked` to any request
+  naming that grant, from any device. This is what makes a revoke stick even if the device that
+  let the site in is offline.
+- The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
+
+**Built:** not yet. Today each device keeps its own list and the box knows nothing of it.
+
+### 11.6 The account page's calls, and what needs a device
+
+Keykin Login is a public page with no piece and no list. It passes two kinds of thing to the
+box and nothing else: device requests (`POST /keykin`, unchanged), and the page's own calls
+(`POST /page`). The box is the one that knows who is logged in.
+
+**Logging in to the page** gives a page session, a random token the box issues for 12 hours:
+
+- by password (section 11.3), or
+- by a device: the page shows `{ keykin: 2, login: { addr, key, code } }`, a device sends
+  `{ op: "login", account, code }` with a fingerprint, and the page's next `login_wait { code }`
+  returns the session. (Section 6a, now per account.)
+
+Both give the same session. **How someone logged in never widens what the page can do.**
+
+| The page may, with a session alone | Needs a device's fingerprint |
+|---|---|
+| See devices, grants and the account's npub | Add a device |
+| Block a device | Unblock a device |
+| Revoke a grant | Sign anything, or make a message key |
+| End its own session, or all page sessions | Cycle the keys |
+| | Form the whole key |
+| | Set, change or clear the password |
+
+Everything in the left column only ever reduces access.
+
+**Things the page starts and a device finishes.** The page can leave a note for the account's
+devices, and a device that sees it asks the person and does it with a fingerprint:
+
+- `{ op: "notes", account }` from a device returns the waiting notes.
+- A note is `{ id, kind, text, at }`. `kind` is `nostrconnect` (a `nostrconnect://` code the
+  person pasted into the page: the device becomes that site's signer), `invite` (a new device's
+  invite text: the device adds it) or `bunker` (asking for a `bunker://` link: the device makes
+  one and answers).
+- A device answers with `{ op: "note_done", account, note, result }`. For `bunker` the result
+  is the link, which the page then shows.
+- Notes last 10 minutes. A `bunker://` or `nostrconnect://` sign-in made this way is a grant
+  (section 11.5) on the device that answered, and works while that device can be reached.
+
+**Built:** the device login of section 6a, for one account. The rest is not built.
 
 ## 9. Not built yet
 

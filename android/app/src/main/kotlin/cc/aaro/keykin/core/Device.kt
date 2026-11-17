@@ -14,8 +14,8 @@ typealias Send = (JSONObject) -> JSONObject
 
 class Me(val sk: ByteArray, val name: String, val chip: String?) { val key: String = Secp.pub(sk) }
 /** What a device keeps once it is in an account. */
-/** `piece` and `epoch` change when the keys are cycled; `changed` is told, so the app can save. */
-class Held(var piece: Piece, val npub: String, val boxKey: String, val addr: String, var epoch: Int = 0) {
+/** `piece` and `epoch` change when the keys are cycled, `boxKey` and `addr` when the account moves box; `changed` is told, so the app can save. */
+class Held(var piece: Piece, val npub: String, var boxKey: String, var addr: String, var epoch: Int = 0) {
     var changed: (Held) -> Unit = {}
     fun json(): JSONObject = JSONObject().put("commitment", JSONArray(piece.c)).put("i", piece.i).put("share", scalarHex(piece.share)).put("npub", npub).put("boxKey", boxKey).put("addr", addr).put("epoch", epoch)
     override fun equals(other: Any?) = other is Held && other.json().toString() == json().toString()
@@ -28,6 +28,8 @@ data class Member(val key: String, val i: Int, val name: String, val kind: Strin
 data class Qr(val addr: String, val key: String, val code: String)
 data class Invite(val key: String, val name: String, val chip: String?)
 data class JoinText(val addr: String, val boxKey: String, val npub: String)
+/** A site's nostrconnect:// code (NIP-46): its own key, the relays it listens on, the secret to echo, and what it calls itself. */
+data class ConnectCode(val client: String, val relays: List<String>, val secret: String, val name: String?, val url: String?)
 
 object Texts {
     private val KEY = Regex("^[0-9a-f]{64}$")
@@ -48,6 +50,25 @@ object Texts {
         if (!KEY.matches(j.getString("boxKey")) || !KEY.matches(j.getString("npub"))) refuse("bad_join")
         JoinText(j.getString("addr"), j.getString("boxKey"), j.getString("npub"))
     } catch (e: KeykinException) { throw e } catch (_: Exception) { refuse("bad_join") }
+
+    /** Reads a site's nostrconnect:// code. At most five relays, `ws://` or `wss://`; `url` is kept as its origin. */
+    fun nostrConnect(text: String): ConnectCode {
+        val t = text.trim()
+        if (!t.startsWith("nostrconnect://")) refuse("bad_code")
+        val rest = t.removePrefix("nostrconnect://")
+        val client = rest.substringBefore('?').substringBefore('/').lowercase()
+        if (!KEY.matches(client)) refuse("bad_code")
+        val params = rest.substringAfter('?', "").split('&').filter { it.contains('=') }.map {
+            java.net.URLDecoder.decode(it.substringBefore('='), "UTF-8") to java.net.URLDecoder.decode(it.substringAfter('='), "UTF-8")
+        }
+        val relays = params.filter { it.first == "relay" }.map { it.second.trim() }.filter { Regex("^wss?://\\S+$").matches(it) }.distinct().take(5)
+        val secret = params.firstOrNull { it.first == "secret" }?.second ?: ""
+        if (relays.isEmpty() || secret.isEmpty() || secret.length > 200) refuse("bad_code")
+        val url = params.firstOrNull { it.first == "url" }?.second?.let { u ->
+            try { java.net.URI(u).let { if (it.scheme == "https" || it.scheme == "http") "${it.scheme}://${it.authority}" else null } } catch (_: Exception) { null }
+        }
+        return ConnectCode(client, relays, secret, params.firstOrNull { it.first == "name" }?.second?.take(60)?.ifEmpty { null }, url)
+    }
 }
 
 object Device {
@@ -158,8 +179,9 @@ object Device {
     }
 
     fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> = listing(me, h, send).first
-    private fun listing(me: Me, h: Held, send: Send): Pair<List<Member>, Int> {
-        val r = call(send, seal(JSONObject().put("op", "members").put("account", h.npub), me)); val a = r.getJSONArray("members")
+    private fun listing(me: Me, h: Held, send: Send): Pair<List<Member>, Int> = listed(call(send, seal(JSONObject().put("op", "members").put("account", h.npub), me)))
+    private fun listed(r: JSONObject): Pair<List<Member>, Int> {
+        val a = r.getJSONArray("members")
         return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added"), if (m.has("addr")) m.getString("addr") else null) } } to r.getInt("next")
     }
     fun block(me: Me, h: Held, key: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "block").put("account", h.npub).put("key", key), me)) }
@@ -168,11 +190,12 @@ object Device {
 
     /** Adds a device. Needs the fingerprint. This device and the box each give half of the newcomer's piece. */
     /** `note`: a signed-in account page asked for this (SPEC 11.6); then no fingerprint is needed and `fp` may be null. */
-    fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint?, send: Send = http(h.addr), note: String? = null): Int {
+    /** `kind` is `box` for a second box (its member key from its setup code as `inv.key`). */
+    fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint?, send: Send = http(h.addr), note: String? = null, kind: String = "device"): Int {
         val (list, i) = listing(me, h, send)
         val boxI = list.firstOrNull { it.key == h.boxKey }?.i ?: refuse("no_box")
         var mine = emptyMap<Int, String>()
-        val member = JSONObject().put("key", inv.key).put("name", inv.name).put("kind", "device").put("i", i).apply { if (inv.chip != null) put("chip", inv.chip) }
+        val member = JSONObject().put("key", inv.key).put("name", inv.name).put("kind", kind).put("i", i).apply { if (inv.chip != null) put("chip", inv.chip) }
         val r = current(me, h, send, if (note != null) null else fp) {
             mine = Frost.repairDeltas(h.piece, listOf(h.piece.i, boxI).sorted(), i)
             JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!)).apply { if (note != null) put("note", note) }
@@ -275,6 +298,10 @@ object Device {
         return List(r.length()) { r.getString(it) }
     }
     fun revoke(me: Me, h: Held, grant: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "revoke").put("account", h.npub).put("grant", grant), me)) }
+    /** Limits a grant to posting (`"posts"`): the box then signs only posts for it and gives it no message keys. `null` lifts it. */
+    fun limit(me: Me, h: Held, grant: String, to: String?, send: Send = http(h.addr)) {
+        call(send, seal(JSONObject().put("op", "limit").put("account", h.npub).put("grant", grant).put("to", to ?: JSONObject.NULL), me))
+    }
 
     // --- Things the account page started for a device to finish (SPEC 11.6) --------------------------
 
@@ -286,6 +313,39 @@ object Device {
     fun noteRefuse(me: Me, h: Held, note: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "note_refuse").put("account", h.npub).put("note", note), me)) }
     fun noteDone(me: Me, h: Held, note: String, result: String, send: Send = http(h.addr)) {
         call(send, seal(JSONObject().put("op", "note_done").put("account", h.npub).put("note", note).put("result", result), me))
+    }
+
+    // --- Moving the account to another box (SPEC 11.4) -------------------------------------------------
+
+    /**
+     * Moves the account to another Keykin box. Needs the fingerprint. The key is never whole: this device and
+     * the old box give the new box its piece, then the keys are cycled on the new box so the old box's piece
+     * stops fitting. `h` then points at the new box (`changed` is told). Hand the other devices `Texts.join(h)`;
+     * they call `moved` with it and catch up on their next request.
+     */
+    fun transferToBox(me: Me, h: Held, newBox: Qr, fp: Fingerprint, oldSend: Send = http(h.addr), newSend: Send = http(newBox.addr)) {
+        if (newBox.key == h.boxKey) refuse("same_box")
+        val oldBox = h.boxKey
+        add(me, h, Invite(newBox.key, "New box", null), fp, oldSend, kind = "box")
+        val one = call(newSend, seal(JSONObject().put("op", "transfer1").put("request", newBox.code).put("account", h.npub), me))
+        val welcome = call(oldSend, one.getJSONObject("welcome"))
+        val list = call(oldSend, seal(JSONObject().put("op", "members").put("account", h.npub), me))
+        call(newSend, seal(JSONObject().put("op", "transfer2").put("request", newBox.code).put("welcome", welcome).put("oldBox", oldBox)
+            .put("members", list.getJSONArray("members")).put("next", list.getInt("next")), me))
+        h.boxKey = newBox.key; h.addr = newBox.addr; h.changed(h)
+        cycle(me, h, fp, newSend)          // the old box gets no change, so its piece is dead
+    }
+
+    /**
+     * Another device moved the account: from now on this one uses the box the join text names. Its piece does
+     * not change here; it catches up on its next request. Refuses a join text for another account, or an
+     * address whose box has another key.
+     */
+    fun moved(me: Me, h: Held, j: JoinText, send: Send = http(j.addr)) {
+        if (j.npub != h.npub) refuse("wrong_account")
+        val r = call(send, seal(JSONObject().put("op", "members").put("account", h.npub), me))
+        if (r.getString("boxKey") != j.boxKey) refuse("wrong_box")
+        h.boxKey = j.boxKey; h.addr = j.addr; h.changed(h)
     }
 }
 

@@ -22,11 +22,14 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 tasks.withType<Test>().configureEach {
-    // The unit tests talk to a real box (KEYKIN_BOX_QR) with the FROST library built for this computer.
+    // The unit tests talk to real boxes with the FROST library built for this computer. `node tools/kotlin-test.ts`
+    // starts the boxes and a relay, gives each test its own setup code, and runs them.
     systemProperty("keykin.frostlib", file("../../frost/target/release/libkeykin_frost.dylib").absolutePath)
     environment("KEYKIN_BOX_QR", System.getenv("KEYKIN_BOX_QR") ?: "")
     environment("KEYKIN_BOX_MANY", System.getenv("KEYKIN_BOX_MANY") ?: "")
     environment("KEYKIN_BOX_IMPORT", System.getenv("KEYKIN_BOX_IMPORT") ?: "")
+    environment("KEYKIN_BOX_TRANSFER", System.getenv("KEYKIN_BOX_TRANSFER") ?: "")
+    environment("KEYKIN_BOX_SITE", System.getenv("KEYKIN_BOX_SITE") ?: "")
     environment("KEYKIN_NIP44_VECTOR", System.getenv("KEYKIN_NIP44_VECTOR") ?: "")
     outputs.upToDateWhen { false }
     testLogging { events("passed", "failed", "skipped"); showStandardStreams = true; exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }

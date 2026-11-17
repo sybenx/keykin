@@ -81,12 +81,13 @@ ${scan}
 ${ownerForm(o.error, !!o.qrText)}`, o.nonce ?? '', o.code ? `setInterval(async()=>{try{const r=await fetch('/login/wait?code=${o.code}');if(r.ok&&(await r.json()).ok)location.href='/'}catch{}},1500)` : '');
 }
 
-const top = (csrf: string) => `<header><h1>Keykin box</h1>
-<form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(csrf)}"><button class="link small" type="submit">Log out</button></form></header>`;
+// No Log out button behind someone else's login: there is nothing of the box's own to log out of.
+const top = (csrf: string, logout = true) => `<header><h1>Keykin box</h1>${logout ? `
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(csrf)}"><button class="link small" type="submit">Log out</button></form>` : ''}</header>`;
 
-export function setupPage(o: { qrText: string; csrf: string; nonce: string }) {
+export function setupPage(o: { qrText: string; csrf: string; nonce: string; logout?: boolean }) {
   const qr = qrcode(0, 'M'); qr.addData(o.qrText); qr.make();
-  return shell('Keykin box: set up', `${top(o.csrf)}
+  return shell('Keykin box: set up', `${top(o.csrf, o.logout !== false)}
 <div class="card">
   <h2>Scan to start</h2>
   <p class="dim small">Scan this with the first device. The device and this box make the key together. The whole key never exists on either.</p>
@@ -100,7 +101,7 @@ export function setupPage(o: { qrText: string; csrf: string; nonce: string }) {
 
 const day = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
 
-export function devicesPage(o: { account: Account; csrf: string; notice?: string }) {
+export function devicesPage(o: { account: Account; csrf: string; notice?: string; logout?: boolean }) {
   const rows = o.account.members.map((m) => {
     const act = m.kind === 'box' ? '' : `<form method="post" action="/owner/${m.blocked ? 'unblock' : 'block'}">
       <input type="hidden" name="csrf" value="${esc(o.csrf)}"><input type="hidden" name="key" value="${esc(m.key)}">
@@ -108,7 +109,7 @@ export function devicesPage(o: { account: Account; csrf: string; notice?: string
     return `<li><div class="who"><div class="name">${esc(m.name)}${m.kind === 'box' ? '<span class="tag">this box</span>' : ''}${m.blocked ? '<span class="tag blocked">blocked</span>' : ''}</div>
       <div class="dim small">Added ${day(m.added)}${m.kind === 'device' && !m.chip ? ' · no fingerprint key' : ''}</div></div>${act}</li>`;
   }).join('');
-  return shell('Keykin box', `${top(o.csrf)}
+  return shell('Keykin box', `${top(o.csrf, o.logout !== false)}
 ${o.notice ? `<p class="small" role="status">${esc(o.notice)}</p>` : ''}
 <div class="card"><h2>Account</h2><div class="mono dim">${esc(o.account.npub)}</div></div>
 <div class="card"><h2>Devices</h2>

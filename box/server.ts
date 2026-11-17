@@ -4,6 +4,9 @@
 //   KEYKIN_PORT  port (default 7460)
 //   KEYKIN_URL   the address devices reach this box at, for the codes its page shows. Set it when the page
 //                is opened through a proxy; otherwise the page uses the address the browser used.
+//   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the page already asks who you are (the Umbrel
+//                login, say). The page then asks for nothing itself and makes no owner secret. Use it only
+//                when the page cannot be reached any other way.
 //   KEYKIN_RELAYS  relays (comma separated, wss://) the box page uses for sign-in by a scanned code (QRST).
 //                  Without any, the page falls back to its own scan-to-log-in.
 // On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
@@ -21,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; url?: string; relays?: string[]; log?: (s: string) => void }) {
+export function startBox(o: { dir: string; addr?: string; port?: number; url?: string; behindLogin?: boolean; relays?: string[]; log?: (s: string) => void }) {
   const relays = (o.relays ?? []).filter(Boolean);
   const signinJs = join(fileURLToPath(new URL('.', import.meta.url)), 'static/signin.js');
   const log = o.log ?? console.log;
@@ -34,7 +37,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
 
   // The owner secret is shown once, here. Only its hash is kept.
   let ownerSecret: string | null = null;
-  if (!box.state.owner) {
+  if (!box.state.owner && !o.behindLogin) {
     ownerSecret = bytesToHex(randomBytes(16)).match(/.{4}/g)!.join('-');
     box.state.owner = bytesToHex(sha('keykin2-owner', ownerSecret));
     log(`keykin box: owner secret (shown once, keep it): ${ownerSecret}`);
@@ -59,7 +62,10 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
   const nowS = () => Math.floor(Date.now() / 1000);
   const where = () => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
 
+  // Behind someone else's login, whoever gets through is the owner. The form token still guards every button.
+  const proxied = { token: 'behind-login', until: Infinity, csrf: bytesToHex(randomBytes(16)) };
   const session = (req: IncomingMessage) => {
+    if (o.behindLogin) return proxied;
     const m = /(?:^|;\s*)kk=([0-9a-f]{64})/.exec(req.headers.cookie ?? '');
     const s = m && sessions.get(m[1]);
     if (!s || !m) return null;
@@ -122,9 +128,9 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
         const nonce = bytesToHex(randomBytes(16));
         // The QR names the address the owner's browser used, since a device can likely reach that too.
         const addr = o.url || (req.headers.host ? `http://${req.headers.host}` : where());
-        return html(res, 200, setupPage({ qrText: box.qr(addr)!, csrf: s.csrf, nonce }), nonce);
+        return html(res, 200, setupPage({ qrText: box.qr(addr)!, csrf: s.csrf, nonce, logout: !o.behindLogin }), nonce);
       }
-      return html(res, 200, devicesPage({ account: box.state.account, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined }));
+      return html(res, 200, devicesPage({ account: box.state.account, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin }));
     }
     if (method === 'GET' && path === '/signin.js' && existsSync(signinJs)) {
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -178,7 +184,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
       if (!s) return go(res, '/');
       const form = new URLSearchParams(await readBody(req, 4096));
       if (form.get('csrf') !== s.csrf) return html(res, 403, loginPage({ error: 'That page was out of date. Log in again.' }));
-      if (path === '/logout') { sessions.delete(s.token); return go(res, '/', 'kk=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); }
+      if (path === '/logout') { if (o.behindLogin) return go(res, '/'); sessions.delete(s.token); return go(res, '/', 'kk=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); }
       try {
         const key = form.get('key') ?? '';
         const name = box.state.account?.members.find((m) => m.key === key)?.name ?? 'Device';
@@ -203,5 +209,5 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startBox({ dir: process.env.KEYKIN_DIR ?? './box-data', addr: process.env.KEYKIN_ADDR, port: Number(process.env.KEYKIN_PORT ?? 7460), url: process.env.KEYKIN_URL?.replace(/\/+$/, ''), relays: (process.env.KEYKIN_RELAYS ?? '').split(',').map((r) => r.trim()) });
+  startBox({ dir: process.env.KEYKIN_DIR ?? './box-data', addr: process.env.KEYKIN_ADDR, port: Number(process.env.KEYKIN_PORT ?? 7460), url: process.env.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: process.env.KEYKIN_BEHIND_LOGIN === '1', relays: (process.env.KEYKIN_RELAYS ?? '').split(',').map((r) => r.trim()) });
 }

@@ -116,6 +116,9 @@ box itself, nothing loaded from elsewhere.
   fingerprint, sends `login` with the code. The page, which has been asking the box whether its
   code was approved, is then logged in. A code lasts three minutes, works once, and only for the
   browser that was shown it. A device accepts a login code only from its own box.
+- **Behind another login** (`KEYKIN_BEHIND_LOGIN=1`), the page asks for nothing itself and the box
+  makes no owner secret. This is for a box whose page can only be reached through something
+  that already asks who you are, such as an Umbrel app's login.
 - **Or log in** with the owner secret. This is the only way before an account exists, and the
   way back if every device is lost or blocked. The box prints it once, on its first start, and keeps only
   its hash. Five wrong tries in a minute are refused for the rest of that minute. A session lasts

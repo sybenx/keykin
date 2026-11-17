@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startBox } from '../box/server.ts';
@@ -84,5 +84,34 @@ test('the owner secret is shown only on the first start', async () => {
     assert.equal(b.ownerSecret, null);
     const r = await fetch(`http://127.0.0.1:${b.port}/login`, { method: 'POST', body: new URLSearchParams({ secret }), headers: H, redirect: 'manual' });
     assert.ok(r.headers.get('set-cookie'));
+  } finally { await new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); }); }
+});
+
+test('behind another login, the page asks for nothing and makes no owner secret', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'keykin-page-'));
+  const b = await startBox({ dir, port: 0, behindLogin: true, url: 'http://box.example:8711', log: () => {} });
+  const base = `http://127.0.0.1:${b.port}`;
+  try {
+    assert.equal(b.ownerSecret, null);
+    assert.equal(b.box.state.owner, undefined);
+    assert.equal(existsSync(join(dir, 'owner-secret.txt')), false);
+    // Straight to the setup code, which names the outside address, with no Log out button.
+    let page = await (await fetch(base + '/', { headers: H })).text();
+    assert.match(page, /Scan to start/); assert.doesNotMatch(page, /Log out/); assert.doesNotMatch(page, /Owner secret/);
+    assert.match(page, /http:\/\/box\.example:8711/);
+    const qrText = /id="qrtext"[^>]*>([^<]+)</.exec(page)![1].replaceAll('&quot;', '"');
+    const send: D.Send = async (r) => (await fetch(`${base}/keykin`, { method: 'POST', body: JSON.stringify(r), headers: H })).json();
+    const phone: D.Me = { ...newMemberKey(), name: 'Phone', ...softwareChip() };
+    const held = await D.createWithBox(phone, D.readQr(qrText), send);
+    const laptop: D.Me = { ...newMemberKey(), name: 'Laptop', ...softwareChip() };
+    await D.addMember(phone, held, { key: laptop.key, name: 'Laptop', kind: 'device', chip: laptop.chip }, send);
+    page = await (await fetch(base + '/', { headers: H })).text();
+    assert.match(page, /Devices/); assert.match(page, /Laptop/);
+    const csrf = /name="csrf" value="([0-9a-f]+)"/.exec(page)![1];
+    // Buttons still need the page's own token.
+    const post = (form: Record<string, string>) => fetch(base + '/owner/block', { method: 'POST', body: new URLSearchParams(form), headers: H, redirect: 'manual' });
+    assert.equal((await post({ key: laptop.key, csrf: 'wrong' })).status, 403);
+    assert.match(decodeURIComponent((await post({ key: laptop.key, csrf })).headers.get('location')!), /is blocked/);
+    assert.equal(b.box.state.account!.members.find((m) => m.name === 'Laptop')!.blocked, true);
   } finally { await new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); }); }
 });

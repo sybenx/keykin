@@ -2,6 +2,8 @@
 //   KEYKIN_DIR   where state.json lives (default ./box-data)
 //   KEYKIN_ADDR  address to listen on (default 127.0.0.1; use the tailnet address to be reachable)
 //   KEYKIN_PORT  port (default 7460)
+//   KEYKIN_URL   the address devices reach this box at, for the codes its page shows. Set it when the page
+//                is opened through a proxy; otherwise the page uses the address the browser used.
 //   KEYKIN_RELAYS  relays (comma separated, wss://) the box page uses for sign-in by a scanned code (QRST).
 //                  Without any, the page falls back to its own scan-to-log-in.
 // On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
@@ -19,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; relays?: string[]; log?: (s: string) => void }) {
+export function startBox(o: { dir: string; addr?: string; port?: number; url?: string; relays?: string[]; log?: (s: string) => void }) {
   const relays = (o.relays ?? []).filter(Boolean);
   const signinJs = join(fileURLToPath(new URL('.', import.meta.url)), 'static/signin.js');
   const log = o.log ?? console.log;
@@ -112,14 +114,14 @@ export function startBox(o: { dir: string; addr?: string; port?: number; relays?
         if (logins.size > 200) return html(res, 200, loginPage({ error }));
         const code = bytesToHex(randomBytes(16)), browser = bytesToHex(randomBytes(16)), nonce = bytesToHex(randomBytes(16));
         logins.set(code, { until: t + LOGIN_SECONDS, browser, approved: false });
-        const addr = req.headers.host ? `http://${req.headers.host}` : where();
+        const addr = o.url || (req.headers.host ? `http://${req.headers.host}` : where());
         const qrText = JSON.stringify({ keykin: 2, login: { addr, key: box.state.key, code } });
         return html(res, 200, loginPage({ error, qrText, code, nonce }), nonce, `kkl=${browser}; HttpOnly; SameSite=Strict; Path=/login; Max-Age=${LOGIN_SECONDS}`);
       }
       if (!box.state.account) {
         const nonce = bytesToHex(randomBytes(16));
         // The QR names the address the owner's browser used, since a device can likely reach that too.
-        const addr = req.headers.host ? `http://${req.headers.host}` : where();
+        const addr = o.url || (req.headers.host ? `http://${req.headers.host}` : where());
         return html(res, 200, setupPage({ qrText: box.qr(addr)!, csrf: s.csrf, nonce }), nonce);
       }
       return html(res, 200, devicesPage({ account: box.state.account, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined }));
@@ -201,5 +203,5 @@ export function startBox(o: { dir: string; addr?: string; port?: number; relays?
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startBox({ dir: process.env.KEYKIN_DIR ?? './box-data', addr: process.env.KEYKIN_ADDR, port: Number(process.env.KEYKIN_PORT ?? 7460), relays: (process.env.KEYKIN_RELAYS ?? '').split(',').map((r) => r.trim()) });
+  startBox({ dir: process.env.KEYKIN_DIR ?? './box-data', addr: process.env.KEYKIN_ADDR, port: Number(process.env.KEYKIN_PORT ?? 7460), url: process.env.KEYKIN_URL?.replace(/\/+$/, ''), relays: (process.env.KEYKIN_RELAYS ?? '').split(',').map((r) => r.trim()) });
 }

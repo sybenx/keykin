@@ -9,7 +9,8 @@
 //   keykin add '<invite>'                                on a device in the account: add it, print the join text
 //   keykin join '<join text>'                            on the new device: collect its piece
 //   keykin status                                        the account and its devices
-//   keykin sign '<event json>'                           sign one event
+//   keykin sign '<event json>' [label]                   sign one event, as the account or as the child key for a label
+//   keykin child [label]                                 make the child key for a label and print its npub, or list them
 //   keykin block <name> | unblock <name>
 //   keykin cycle                                         after a block: drop blocked devices for good
 //   keykin serve <port> <address others reach>           stay on and help other devices when the box is off
@@ -52,6 +53,14 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
   const byName = async (name: string) => {
     const list = await D.members(me, box(), undefined, s.held?.npub);
     return list.members.find((m: any) => m.name === name || m.key.startsWith(name))?.key ?? fail(`No device called "${name}".`);
+  };
+  // The child key for a label (SPEC 8k): from this device's list, or made with the box and then kept.
+  const childOf = async (label: string, held: D.Held): Promise<D.Child> => {
+    const known = s.children?.[label];
+    if (known) return { label, ...known };
+    const c = await D.makeChild(me, held, label, box());
+    (s.children ??= {})[label] = { t: c.t, npub: c.npub };
+    return c;
   };
   switch (cmd) {
     case 'create': {
@@ -129,8 +138,24 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       return;
     }
     case 'sign': {
+      // `sign '<event>' [label]`: with a label, signs as that child key (SPEC 8k), making it first if need be.
       const held = heldOf(s), e = JSON.parse(a);
-      try { return out(JSON.stringify(await D.signEvent(me, held, { pubkey: held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box()))); }
+      try {
+        const child = argv[2] === undefined ? undefined : await childOf(argv[2], held);
+        return out(JSON.stringify(await D.signEvent(me, held, { pubkey: child?.npub ?? held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box(), undefined, undefined, undefined, child)));
+      }
+      finally { keep(s, held, s.addr!); save(file, s); }
+    }
+    case 'child': {
+      // `child <label>` makes the child key for a label and prints its npub. `child` alone lists them.
+      if (a === undefined) {
+        const cs = Object.entries(s.children ?? {});
+        if (!cs.length) return out('No child keys yet. Make one with: keykin child <label>');
+        for (const [l, c] of cs) out(`  ${l}  ${npubEncode(c.npub)}`);
+        return;
+      }
+      const held = heldOf(s);
+      try { const c = await childOf(a, held); out(`Child key "${a}".`); out(`npub: ${npubEncode(c.npub)}`); return out(`npub (hex): ${c.npub}`); }
       finally { keep(s, held, s.addr!); save(file, s); }
     }
     case 'block': await D.block(me, await byName(a), box(), undefined, s.held?.npub); return out(`${a} is blocked.`);

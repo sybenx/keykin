@@ -311,3 +311,23 @@ test('a site signs in through the remote signer over a relay', { skip: spawnSync
     await site?.close(); bunker?.close(); await closeBox(b); relayProc.kill();
   }
 });
+
+test('command line: a child key signs as its own npub, on either device', async () => {
+  const b = await startBox({ dir: tmp('kk-box-'), port: 0, log: () => {} });
+  try {
+    const [mac, mini] = [tmp('kk-mac-'), tmp('kk-mini-')];
+    const npub = /npub \(hex\): ([0-9a-f]{64})/.exec((await cli(mac, 'create', b.qr()!, 'MacBook')).text)![1];
+    assert.match((await cli(mac, 'child')).text, /No child keys yet/);
+    const child = /npub \(hex\): ([0-9a-f]{64})/.exec((await cli(mac, 'child', 'home')).text)![1];
+    assert.notEqual(child, npub);
+    assert.match((await cli(mac, 'child')).text, /home\s+npub1/);
+    const ev = JSON.parse((await cli(mac, 'sign', '{"content":"from home"}', 'home')).text);
+    assert.ok(verifyEvent(ev)); assert.equal(ev.pubkey, child);
+    // Signing with no label is still the account.
+    assert.equal(JSON.parse((await cli(mac, 'sign', '{"content":"me"}')).text).pubkey, npub);
+    // A second device gets the same child without being told anything about it.
+    await cli(mini, 'join', (await cli(mac, 'add', (await cli(mini, 'invite', 'Mac mini')).text)).text);
+    const ev2 = JSON.parse((await cli(mini, 'sign', '{"content":"also home"}', 'home')).text);
+    assert.ok(verifyEvent(ev2)); assert.equal(ev2.pubkey, child);
+  } finally { await closeBox(b); }
+});

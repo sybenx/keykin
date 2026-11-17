@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.10, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.11, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -96,8 +96,8 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `op` | From | Fingerprint | Does |
 |---|---|---|---|
 | `create1`, `create2` | The first device, with the code from the QR | No | Makes the key with the device. Once only |
-| `sign` | An unblocked device | No | Answers a signing round for an event of this account |
-| `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a) |
+| `sign` | An unblocked device | No | Answers a signing round for an event of this account, or of one of its child keys (section 8k) |
+| `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a), as the account or as a child key |
 | `members` | Any unblocked member | No | Returns the list, the epoch and the next unused index |
 | `cycle` | An unblocked device | **Yes** | Moves every piece to a new line and drops blocked members (section 8f) |
 | `caught_up` | Any unblocked member | No | Says it has applied the changes left for it |
@@ -223,7 +223,7 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 ## 8d. The command-line device
 
 `cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `add`,
-`join`, `status`, `sign`, `block`, `unblock`, `cycle`, `serve`, `agent`, `bunker`, `scan`, `sites`,
+`join`, `status`, `sign`, `child`, `block`, `unblock`, `cycle`, `serve`, `agent`, `bunker`, `scan`, `sites`,
 `signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
 readable only by its owner. The piece in it is not encrypted.
 
@@ -348,6 +348,41 @@ Limits today:
 - **The `nc` fallback, the bounce page and same-phone links** of the profile are not built. A
   code opened in a browser instead of a signer just loads the site.
 - **`type` check level** (typing the digits) is not offered by Keykin's signers.
+
+## 8k. Child keys
+
+One account can sign as many npubs. Each extra one is a **child key**, named by a label such as
+`home` or `work`. A child is an ordinary Nostr key to everyone else: any app and any relay takes
+it, and nothing about it says which account it belongs to.
+
+- **A child is the account's key plus a number**, the tweak `t`. Its nsec would be `a0 + t`, in
+  the even-y form. Like the account's nsec, it is never whole anywhere.
+- **Every piece of the account is also a piece of the child.** A holder adds `t` to its piece, and
+  `t·G` to `C0`. If the child's key then has odd y, it negates its piece and the whole commitment.
+  From there signing (section 3) and messages (section 8a) run unchanged, so any two pieces of the
+  account sign as the child. No new pieces are made, stored or backed up.
+- **Two pieces make the tweak together.** The label hashes to a point `Q`:
+  `SHA-256("keykin2-child-point" ‖ n ‖ label)` for the first byte `n = 0, 1, …` that is the x of a
+  point. The device asks for `ecdh` with `Q` as the peer, as the account, and gets the shared x of
+  section 8a. Then `t = SHA-256("keykin2-child" ‖ shared x ‖ label) mod n`.
+- **So a child can always be made again.** Any two pieces give the same `t` for the same label, on
+  any device, before and after the keys are cycled (the nsec does not change). One piece alone
+  cannot work `t` out. A device keeps the children it has made to save asking, and the box keeps
+  nothing about them.
+- **Asking as a child.** `sign` and `ecdh` take `child: <t, 32 bytes hex>`. The box moves its own
+  piece by `t` and, for `sign`, refuses an event whose `pubkey` is not that child's
+  (`wrong_account`). A `t` that is zero, out of range or not hex is `bad_child`. Everything else
+  about the request is as before: the epoch, grants, limits and the tap for hard-to-undo events.
+  A device helping when the box is off (section 8g) does the same.
+- **A label** is 1 to 100 bytes of UTF-8. Children are made from the account only, never from
+  another child.
+- **Never form a child's nsec.** A child's nsec together with its `t` gives the account's nsec.
+  There is no request that forms one, and there must not be. A child is used through pieces only.
+- **The link is private until the person shows it.** Nothing published ties a child to the
+  account. Tying them together on purpose (an attestation signed by both) is not built.
+
+Built in the TypeScript core, the box and the command line: `keykin child <label>` makes one and
+prints its npub, and `keykin sign '<event>' <label>` signs as it.
 
 ## 11. Shared formats (settled 2026-11-17)
 
@@ -629,6 +664,9 @@ last used. The page shows them.
 - **QRST sign-in to the account page.** It signs in by Keykin's own device login or a password.
 - **Firefox and Safari.** The extension is Chromium only.
 - **Release builds.** The Android app is a debug build and the extension is unpacked.
+- **Child keys beyond the command line** (section 8k). The Android core, the app, the extension and
+  the remote signer do not know them yet. So a site or an app cannot be signed in as a child.
+- **Showing that a child belongs to the account.** No attestation, in either direction.
 - **Tier 3.** Not planned for now.
 
 ## 10. Known weak spots
@@ -646,6 +684,12 @@ last used. The page shows them.
   same box would log that browser in.
 - A device that listens for others trusts the list it last saw. If the box is off, it cannot
   learn of a new block.
+- **A box that lies can hand out a wrong child key** (section 8k). A device cannot check the box's
+  part of the tweak, so a wrong part gives a key that signs today and cannot be made again later
+  with an honest helper. Making the child once more with a second device as the helper, and
+  comparing, would catch it. Nothing does that yet.
+- **A request for a child names the account and the child together**, so whoever can read the
+  traffic to the box, and the box itself, can tie them.
 - The box's piece sits in its state file unencrypted.
 - Requests travel as plain HTTP. The address is meant to be a tailnet one. Secrets inside
   requests are sealed (section 5), so an open network would expose the member list and the

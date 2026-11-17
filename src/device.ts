@@ -11,6 +11,8 @@ import { randomBytes, bytesToHex, hexToBytes, shaHex } from './bytes.ts';
 import { ecdhPart, ecdhShared, nip44Key } from './ecdh.ts';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { refuse } from './bytes.ts';
+import { type Child, childPiece, childNpub, labelPoint, tweakFrom, tweakOf } from './child.ts';
+export type { Child };
 
 export type Send = (req: Signed) => Promise<any>;
 /** This device: its member key, and its chip (fingerprint) if it has one. */
@@ -74,12 +76,28 @@ export async function importWithBox(me: Me, qr: { key: string; code: string }, n
   return { piece: { C, i: 1, share: F.pieceAt(a0, a1, 1) }, npub, boxKey: qr.key, epoch: 0 };
 }
 
-export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean) {
+/** The piece to use: the account's own, or this holder's piece of a child (SPEC 8k). Read after any catch-up. */
+const pieceFor = (h: Held, child?: Child): Piece => (child ? childPiece(h.piece, tweakOf(child.t)) : h.piece);
+
+/** `child`: sign as that child key instead of the account's. The event's `pubkey` must be the child's. */
+export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean, child?: Child) {
   const id = eventId(ev);
-  let mine = ask(h.piece, id);
-  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(h.piece, id)).commit, grant, tapped }));
+  let mine = ask(pieceFor(h, child), id);
+  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(pieceFor(h, child), id)).commit, grant, tapped, child: child?.t }));
   if (r.id !== id) refuse('wrong_id');
-  return { ...ev, id, sig: finish(h.piece, id, mine, { commit: r.commit, z: r.z }) };
+  return { ...ev, id, sig: finish(pieceFor(h, child), id, mine, { commit: r.commit, z: r.z }) };
+}
+
+/**
+ * Makes (or makes again) the child key for a label (SPEC 8k). This device and the box work out the
+ * tweak together; neither could alone, and any two pieces give the same child. Nothing is stored at
+ * the box. The caller keeps the result to save asking again.
+ */
+export async function makeChild(me: Me, h: Held, label: string, send: Send, t = now()): Promise<Child> {
+  const peer = labelPoint(label);
+  const r = await current(me, h, send, t, () => ({ op: 'ecdh', peer }));
+  const tweak = tweakFrom(ecdhShared(ecdhPart(h.piece.i, h.piece.share, r.i, peer), r.part), label);
+  return { label, t: tweak, npub: childNpub(h.piece.C, BigInt('0x' + tweak)) };
 }
 
 export async function members(me: Me, send: Send, t = now(), account?: string) { return call(send, await seal({ op: 'members', account }, me.sk, t)); }
@@ -128,17 +146,18 @@ export async function formNsec(me: Me, h: Held, send: Send, t = now()): Promise<
   return scalarHex(nsec);
 }
 
-/** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. */
-export async function conversationKey(me: Me, h: Held, peer: string, send: Send, t = now(), grant?: string): Promise<Uint8Array> {
-  const r = await current(me, h, send, t, () => ({ op: 'ecdh', peer, grant }));
-  return nip44Key(ecdhShared(ecdhPart(h.piece.i, h.piece.share, r.i, peer), r.part));
+/** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. `child`: as that child key. */
+export async function conversationKey(me: Me, h: Held, peer: string, send: Send, t = now(), grant?: string, child?: Child): Promise<Uint8Array> {
+  const r = await current(me, h, send, t, () => ({ op: 'ecdh', peer, grant, child: child?.t }));
+  const p = pieceFor(h, child);
+  return nip44Key(ecdhShared(ecdhPart(p.i, p.share, r.i, peer), r.part));
 }
-export async function nip44Encrypt(me: Me, h: Held, peer: string, text: string, send: Send, t = now(), grant?: string) {
-  return nip44.encrypt(text, await conversationKey(me, h, peer, send, t, grant));
+export async function nip44Encrypt(me: Me, h: Held, peer: string, text: string, send: Send, t = now(), grant?: string, child?: Child) {
+  return nip44.encrypt(text, await conversationKey(me, h, peer, send, t, grant, child));
 }
 /** A wrong part from the box cannot forge a message: NIP-44's MAC check fails instead. */
-export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: string, send: Send, t = now(), grant?: string) {
-  return nip44.decrypt(payload, await conversationKey(me, h, peer, send, t, grant));
+export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: string, send: Send, t = now(), grant?: string, child?: Child) {
+  return nip44.decrypt(payload, await conversationKey(me, h, peer, send, t, grant, child));
 }
 
 /**

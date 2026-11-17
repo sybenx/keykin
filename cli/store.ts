@@ -14,6 +14,8 @@ export interface Saved {
   bunker?: BunkerState;
   /** The whole key (hex), kept as a backup after `import` until the person runs `forget-key`. */
   nsec?: string;
+  /** Child keys this device has made (SPEC 8k), by label. They can always be made again. */
+  children?: Record<string, { t: string; npub: string }>;
   /** The device list as last seen at the box, for when the box is off. */
   list?: { key: string; i: number; name: string; kind: string; blocked: boolean; addr?: string }[];
 }

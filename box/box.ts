@@ -3,13 +3,14 @@
 // takes a request and the time, and `state` is plain JSON the server file saves.
 
 import * as F from '../src/frost.ts';
-import { answer } from '../src/round.ts';
+import { answer, type Piece } from '../src/round.ts';
+import { childPiece, tweakOf } from '../src/child.ts';
 import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
 import { destructive } from '../src/destructive.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
-import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, type Commitment } from '../src/curve.ts';
+import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, xOnly, type Commitment } from '../src/curve.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha, jcsBytes } from '../src/bytes.ts';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
@@ -452,16 +453,24 @@ export class Box {
 
   // --- Signing ------------------------------------------------------------------------------
 
+  /** The box's piece for this request: of the account, or of the child the request names (SPEC 8k). */
+  #piece(s: Account, body: any): Piece {
+    const mine = { C: this.#C(s), i: s.i, share: BigInt('0x' + s.share) };
+    return body.child === undefined ? mine : childPiece(mine, tweakOf(body.child));
+  }
+
   #sign(s: Account, from: Member, body: any) {
     if (from.kind !== 'device') refuse('devices_only');
     const ev = body.event as UnsignedEvent;
     const msg = eventId(ev);
-    if (ev.pubkey !== s.npub) refuse('wrong_account');
+    const piece = this.#piece(s, body);
+    // The event must be by the key being asked for: the account's, or the child's.
+    if (ev.pubkey !== xOnly(piece.C[0])) refuse('wrong_account');
     // Hard to undo: the device must have asked the person, and says so.
     if (destructive(ev) && body.tapped !== true) refuse('needs_tap');
     const c = body.commit;
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
-    const a = answer({ C: this.#C(s), i: s.i, share: BigInt('0x' + s.share) }, msg, c);
+    const a = answer(piece, msg, c);
     this.#used(s, from, body.grant);
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
@@ -471,7 +480,8 @@ export class Box {
   // messages. It is useless without the asking device's own part.
   #ecdh(s: Account, from: Member, body: any) {
     if (from.kind !== 'device') refuse('devices_only');
-    const part = ecdhPart(s.i, BigInt('0x' + s.share), from.i, body.peer);
+    const piece = this.#piece(s, body);
+    const part = ecdhPart(piece.i, piece.share, from.i, body.peer);
     this.#used(s, from, body.grant);
     return { ok: true, i: s.i, part };
   }

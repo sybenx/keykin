@@ -8,6 +8,8 @@ import { eventId, type UnsignedEvent } from './event.ts';
 import { open, type Signed, MAX_SKEW } from './member.ts';
 import { KeykinError, refuse } from './bytes.ts';
 import type { Held } from './device.ts';
+import { childPiece, tweakOf } from './child.ts';
+import { xOnly } from './curve.ts';
 
 export interface Listed { key: string; i: number; kind: string; blocked: boolean }
 
@@ -31,15 +33,17 @@ export class DeviceHelper {
       if (from.kind !== 'device' || from.key === this.myKey) refuse('devices_only');
       // Both must hold pieces of the same line. A device that missed a cycle needs the box to catch up.
       if (body.epoch !== h.epoch) refuse('stale');
+      // The account's piece, or this device's piece of the child the request names (SPEC 8k).
+      const piece = body.child === undefined ? h.piece : childPiece(h.piece, tweakOf(body.child));
       if (body.op === 'sign') {
         const ev = body.event as UnsignedEvent, msg = eventId(ev);
-        if (ev.pubkey !== h.npub) refuse('wrong_account');
+        if (ev.pubkey !== xOnly(piece.C[0])) refuse('wrong_account');
         const c = body.commit;
         if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
-        const a = answer(h.piece, msg, c);
+        const a = answer(piece, msg, c);
         return { ok: true, id: msg, commit: a.commit, z: a.z };
       }
-      if (body.op === 'ecdh') return { ok: true, i: h.piece.i, part: ecdhPart(h.piece.i, h.piece.share, from.i, body.peer) };
+      if (body.op === 'ecdh') return { ok: true, i: piece.i, part: ecdhPart(piece.i, piece.share, from.i, body.peer) };
       return refuse('needs_box');
     } catch (e) {
       if (e instanceof KeykinError) return { error: e.code };

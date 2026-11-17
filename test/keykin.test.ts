@@ -260,3 +260,83 @@ test('state survives a restart, waiting welcomes included', async () => {
   await D.addMember(late, h, { key: slow.key, name: 'Slow', kind: 'device', chip: slow.chip }, send2, NOW);
   await assert.rejects(D.cycle(late, h, send2, NOW), /pending_welcome/);
 });
+
+// --- Child keys (SPEC 8k) -------------------------------------------------------------------------
+
+test('child keys: the same two pieces sign as a different npub, and the box checks which', async () => {
+  const { box, send, phone, held, add } = await setup();
+  const home = await D.makeChild(phone, held, 'home', send, NOW);
+  const work = await D.makeChild(phone, held, 'work', send, NOW);
+  assert.notEqual(home.npub, held.npub); assert.notEqual(home.npub, work.npub);
+  // The child is the account's key plus the tweak, in its even-y form: nobody holds it, but the test can form it.
+  const nsec = BigInt('0x' + await D.formNsec(phone, held, send, NOW));
+  const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const sk = ((nsec + BigInt('0x' + home.t)) % N).toString(16).padStart(64, '0');
+  assert.equal(bytesToHex(schnorr.getPublicKey(hexToBytes(sk))), home.npub);
+
+  const signed = await D.signEvent(phone, held, note(home.npub, 'from home'), send, NOW, undefined, undefined, home);
+  assert.ok(valid(signed.sig, signed.id, home.npub));
+  assert.ok(!valid(signed.sig, signed.id, held.npub));
+  // The event must be by the key that was asked for, either way round.
+  await assert.rejects(D.signEvent(phone, held, note(held.npub), send, NOW, undefined, undefined, home), /wrong_account/);
+  await assert.rejects(D.signEvent(phone, held, note(home.npub), send, NOW), /wrong_account/);
+  await assert.rejects(D.signEvent(phone, held, note(work.npub), send, NOW, undefined, undefined, home), /wrong_account/);
+  // A tweak that is not a number in range is refused before any maths.
+  for (const t of ['00'.repeat(32), 'ff'.repeat(32), 'xyz', 7]) {
+    await assert.rejects(D.signEvent(phone, held, note(home.npub), send, NOW, undefined, undefined, { ...home, t: t as any }), /bad_child/);
+    // And the box refuses it too, from a device that did not check.
+    const ev = note(home.npub), commit = ask(held.piece, eventId(ev)).commit;
+    assert.equal((await send(await seal({ op: 'sign', event: ev, commit, child: t, epoch: held.epoch, account: held.npub }, phone.sk, NOW))).error, 'bad_child');
+    assert.equal((await send(await seal({ op: 'ecdh', peer: home.npub, child: t, epoch: held.epoch, account: held.npub }, phone.sk, NOW))).error, 'bad_child');
+  }
+  // Hard-to-undo events still need the tap.
+  await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 62 }, send, NOW, undefined, undefined, home), /needs_tap/);
+
+  // Another device makes the same child on its own, and nothing about children is stored at the box.
+  const mac = await add('Mac');
+  assert.deepEqual(await D.makeChild(mac.me, mac.held, 'home', send, NOW), home);
+  assert.ok(!JSON.stringify(box.state).includes(home.t) && !JSON.stringify(box.state).includes(home.npub));
+
+  // After the keys are cycled the child is the same key, and a device that was away catches up while signing as it.
+  await D.cycle(phone, held, send, NOW);
+  assert.deepEqual(await D.makeChild(phone, held, 'home', send, NOW), home);
+  const later = await D.signEvent(mac.me, mac.held, note(home.npub, 'after the cycle'), send, NOW, undefined, undefined, home);
+  assert.ok(valid(later.sig, later.id, home.npub));
+});
+
+test('child keys: many labels, both parities, signing and messages', async () => {
+  const { send, phone, held } = await setup();
+  const other = bytesToHex(randomBytes(32)), otherPub = bytesToHex(schnorr.getPublicKey(hexToBytes(other)));
+  const nsec = BigInt('0x' + await D.formNsec(phone, held, send, NOW));
+  const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  let flipped = 0;
+  for (let n = 0; n < 12; n++) {
+    const c = await D.makeChild(phone, held, `house ${n} \u{1F3E0}`, send, NOW);
+    if (mul((nsec + BigInt('0x' + c.t)) % N).toAffine().y % 2n === 1n) flipped++;
+    const ev = await D.signEvent(phone, held, note(c.npub, `post ${n}`), send, NOW, undefined, undefined, c);
+    assert.ok(valid(ev.sig, ev.id, c.npub));
+    // Messages: the other person, holding a whole key, reads what the child wrote, and the account's own key cannot stand in.
+    const payload = await D.nip44Encrypt(phone, held, otherPub, `hi ${n}`, send, NOW, undefined, c);
+    assert.equal(nip44.v2.decrypt(payload, nip44.v2.utils.getConversationKey(hexToBytes(other), c.npub)), `hi ${n}`);
+    assert.throws(() => nip44.v2.decrypt(payload, nip44.v2.utils.getConversationKey(hexToBytes(other), held.npub)));
+    assert.equal(await D.nip44Decrypt(phone, held, otherPub, nip44.v2.encrypt('back', nip44.v2.utils.getConversationKey(hexToBytes(other), c.npub)), send, NOW, undefined, c), 'back');
+  }
+  assert.ok(flipped > 0 && flipped < 12, `both parities met (${flipped} of 12 turned over)`);
+  await assert.rejects(D.makeChild(phone, held, '', send, NOW), /bad_label/);
+  await assert.rejects(D.makeChild(phone, held, 'x'.repeat(101), send, NOW), /bad_label/);
+});
+
+test('child keys: a device helps another device sign as a child when the box is off', async () => {
+  const { send, phone, held, add } = await setup();
+  const mac = await add('Mac');
+  const child = await D.makeChild(phone, held, 'home', send, NOW);
+  const { DeviceHelper } = await import('../src/helper.ts');
+  const helper = new DeviceHelper(() => mac.held, mac.me.key);
+  helper.list = (await D.members(phone, send, NOW)).members;
+  const viaMac: D.Send = async (r) => helper.handle(JSON.parse(JSON.stringify(r)), NOW);
+  const ev = await D.signEvent(phone, held, note(child.npub), viaMac, NOW, undefined, undefined, child);
+  assert.ok(valid(ev.sig, ev.id, child.npub));
+  await assert.rejects(D.signEvent(phone, held, note(held.npub), viaMac, NOW, undefined, undefined, child), /wrong_account/);
+  // The Mac alone can also make the child with the phone's help: no box needed.
+  assert.deepEqual(await D.makeChild(phone, held, 'home', viaMac, NOW), child);
+});

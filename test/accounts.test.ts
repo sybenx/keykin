@@ -350,3 +350,44 @@ test('bringing in a key the person already has: same npub, in pieces from then o
   assert.ok(box.only()!.log!.some((l) => /existing key/.test(l.text)));
   assert.ok(call);
 });
+
+test('moving an account to another box: same npub, the key never whole, the old box left behind', async () => {
+  const oldW = world(), newW = world();
+  const phone = device('Phone'), laptop = device('Laptop');
+  const held = await D.createWithBox(phone, D.readQr(oldW.box.qr('http://old')!), oldW.send, NOW);
+  await D.addMember(phone, held, { key: laptop.key, name: 'Laptop', kind: 'device', chip: laptop.chip }, oldW.send, NOW);
+  const lh = await D.join(laptop, held.boxKey, held.npub, oldW.send, NOW);
+  const npub = held.npub, oldKey = oldW.box.state.key, before = await D.formNsec(phone, held, oldW.send, NOW);
+  // The new box already holds someone else's account, so this needs its admin's yes.
+  await D.createWithBox(device('Someone else'), D.readQr(newW.box.qr('http://new')!), newW.send, NOW);
+  const id = await D.askBox(phone, 'transfer', 'moving from my old box', newW.send, NOW, npub);
+  const target = { key: newW.box.state.key, code: id };
+  await assert.rejects(D.transferToBox({ ...phone, fp: undefined }, held, oldW.send, target, newW.send, NOW), /needs_fingerprint/);
+  assert.equal(held.boxKey, oldKey);
+  const fresh = D.readQr(oldW.box.qr('x') ?? JSON.stringify({ keykin: 2, addr: 'x', key: oldKey, code: 'x' }));
+  assert.ok(fresh);
+  newW.box.decide(id, true, NOW);
+
+  await D.transferToBox(phone, held, oldW.send, target, newW.send, NOW);
+  assert.equal(held.boxKey, newW.box.state.key); assert.equal(held.npub, npub);
+  const a = newW.box.state.accounts[npub];
+  assert.deepEqual(a.members.map((m) => [m.name, m.kind]).sort(), [['Box', 'box'], ['Laptop', 'device'], ['Phone', 'device']]);
+  assert.ok(!a.members.some((m) => m.key === oldKey));
+  // The phone signs with the new box at once. The same key as before.
+  const ev = await D.signEvent(phone, held, note(npub), newW.send, NOW);
+  assert.ok(valid(ev)); assert.equal(ev.pubkey, npub);
+  assert.equal(await D.formNsec(phone, held, newW.send, NOW), before);
+  // The laptop is told the new box, and catches up on its first request there.
+  lh.boxKey = newW.box.state.key;
+  assert.ok(valid(await D.signEvent(laptop, lh, note(npub), newW.send, NOW)));
+  // The old box's piece no longer fits with anyone's: it cannot help the phone sign any more.
+  const old = oldW.box.state.accounts[npub];
+  const msg = eventId(note(npub));
+  const { ask, answer, finish } = await import('../src/round.ts');
+  const { commitmentFrom } = await import('../src/curve.ts');
+  const mine = ask(held.piece, msg);
+  assert.throws(() => finish(held.piece, msg, mine, answer({ C: commitmentFrom(old.commitment), i: old.i, share: BigInt('0x' + old.share) }, msg, mine.commit)), /bad_partial|bad_signature/);
+  // The other account on the new box is untouched, and a request cannot be used twice.
+  assert.equal(newW.box.accounts().length, 2);
+  await assert.rejects(D.transferToBox(phone, held, newW.send, target, newW.send, NOW), /bad_code|already_listed|bad_member/);
+});

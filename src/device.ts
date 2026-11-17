@@ -277,3 +277,20 @@ export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: stri
   }
   return did;
 }
+
+/**
+ * Moves the account to another Keykin box (SPEC 11.4). Needs the fingerprint. The key is never whole:
+ * this device and the old box give the new box its piece, then the keys are cycled on the new box so the
+ * old box's piece stops fitting. `h` ends up pointing at the new box. Other devices then need the new
+ * box's address and key (a join text) and catch up on their next request.
+ */
+export async function transferToBox(me: Me, h: Held, oldSend: Send, newBox: { key: string; code: string }, newSend: Send, t = now()) {
+  const oldBox = h.boxKey;
+  await addMember(me, h, { key: newBox.key, name: 'New box', kind: 'box' }, oldSend, t);
+  const one = await call(newSend, await seal({ op: 'transfer1', request: newBox.code, account: h.npub }, me.sk, t));
+  const welcome = await call(oldSend, one.welcome);
+  const list = await members(me, oldSend, t, h.npub);
+  await call(newSend, await seal({ op: 'transfer2', request: newBox.code, welcome, oldBox, members: list.members, next: list.next }, me.sk, t));
+  h.boxKey = newBox.key;
+  await cycle(me, h, newSend, t);          // the old box gets no change, so its piece is dead
+}

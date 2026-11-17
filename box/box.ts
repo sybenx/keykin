@@ -10,7 +10,8 @@ import { destructive } from '../src/destructive.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, type Commitment } from '../src/curve.ts';
-import { KeykinError, refuse, randomBytes, bytesToHex } from '../src/bytes.ts';
+import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha, jcsBytes } from '../src/bytes.ts';
+import { schnorr } from '@noble/curves/secp256k1.js';
 
 /** `addr` is where a device that can listen answers other devices when the box is off. */
 export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; addr?: string; blocked: boolean; added: number;
@@ -121,9 +122,10 @@ export class Box {
   /** The request a `create` or `transfer` names, if it may be used by this device now. */
   #usable(id: unknown, device: string, what: 'make' | 'transfer'): string {
     if (typeof id !== 'string') refuse('bad_code');
-    if (id === this.setupCode && what === 'make') { if (this.accounts().length) refuse('already_set_up'); return id as string; }
+    if (id === this.setupCode) { if (this.accounts().length) refuse('already_set_up'); return id as string; }
     const r = this.state.requests[id as string];
-    if (!r || r.what !== what) refuse('bad_code');
+    // A code the admin made (no asking device) is good for either; one that was asked for is good for what was asked.
+    if (!r || (r.key && r.what !== what)) refuse('bad_code');
     if (r.state !== 'approved') refuse(r.state === 'waiting' ? 'not_approved' : 'refused');
     if (r.key && r.key !== device) refuse('bad_code');
     return id as string;
@@ -149,6 +151,8 @@ export class Box {
       if (body.op === 'create1') return this.#create1(body, req.key);
       if (body.op === 'create2') return this.#create2(body, req.key, now);
       if (body.op === 'import') return this.#import(body, req.key, now);
+      if (body.op === 'transfer1') return this.#transfer1(body, req.key, now);
+      if (body.op === 'transfer2') return this.#transfer2(body, req, now);
       const s = this.#accountOf(body);
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
       if (from.blocked) refuse('blocked');
@@ -351,6 +355,51 @@ export class Box {
     };
     this.happened(npub, 'The account was brought here from an existing key', now);
     return { ok: true, npub };
+  }
+
+  // --- Moving an account here from another Keykin box (SPEC 11.4). The key is never whole. ----------
+  //
+  // On the old box the device has already added this box as a member (kind box), so the old box and the
+  // device each hold half of this box's new piece, sealed to this box's key. Step 1 hands the device a
+  // request, signed by this box, to collect those halves from the old box. Step 2 brings them here.
+
+  #moving = new Map<string, { device: string; account: string }>();      // by request id
+  #transfer1(body: any, device: string, now: number) {
+    const id = this.#usable(body.request ?? body.code, device, 'transfer');
+    if (!HEX64.test(body.account ?? '')) refuse('bad_request');
+    if (this.state.accounts[body.account]) refuse('already_here');
+    this.#moving.set(id, { device, account: body.account });
+    // What this box asks the old one: "give me what is waiting for me in that account".
+    const full = { op: 'welcome', account: body.account, ts: now, id: bytesToHex(randomBytes(16)) };
+    return { ok: true, welcome: { body: full, key: this.state.key, sig: bytesToHex(schnorr.sign(sha(jcsBytes(full)), hexToBytes(this.state.sk))) } };
+  }
+  #transfer2(body: any, req: Signed, now: number) {
+    const device = req.key;
+    const id = this.#usable(body.request ?? body.code, device, 'transfer');
+    const m = this.#moving.get(id);
+    if (!m || m.device !== device) refuse('no_transfer');
+    const w = body.welcome;
+    if (!w || w.npub !== m!.account || !HEX64.test(body.oldBox ?? '')) refuse('bad_request');
+    let C: Commitment, share: bigint;
+    try {
+      C = commitmentFrom(w.commitment);
+      const sigmas = [openFrom(this.state.sk, body.oldBox, 'repair-sigma', w.box), openFrom(this.state.sk, w.from, 'repair-sigma', w.device)];
+      share = F.repairShare(C, sigmas, w.i);                                // checked against the commitment
+    } catch (e) { if (e instanceof KeykinError && e.code === 'bad_seal') throw e; return refuse('bad_piece'); }
+    if (commitmentHex(C)[0].slice(2) !== m!.account) refuse('wrong_account');
+    // The list as the old box had it, with the old box left out and this box in its place.
+    const list: Member[] = (Array.isArray(body.members) ? body.members : []).filter((x: any) => x && HEX64.test(x.key) && Number.isInteger(x.i) && x.key !== body.oldBox && x.key !== this.state.key)
+      .map((x: any) => ({ key: x.key, i: x.i, name: String(x.name ?? 'Device').slice(0, 60), kind: x.kind === 'box' ? 'box' : 'device', chip: CHIP.test(x.chip ?? '') ? x.chip : undefined, blocked: !!x.blocked, added: Number.isInteger(x.added) ? x.added : now }));
+    const me = list.find((x) => x.key === device);
+    if (!me || me.blocked || me.kind !== 'device' || list.some((x) => x.i === w.i)) refuse('bad_member');
+    list.push({ key: this.state.key, i: w.i, name: 'Box', kind: 'box', blocked: false, added: now });
+    this.#moving.delete(id); delete this.state.requests[id];
+    this.state.accounts[m!.account] = {
+      commitment: commitmentHex(C), npub: m!.account, i: w.i, share: scalarHex(share), members: list,
+      welcomes: {}, catchups: {}, epoch: Number.isInteger(w.epoch) ? w.epoch : 0, next: Math.max(Number.isInteger(body.next) ? body.next : 0, ...list.map((x) => x.i + 1)),
+    };
+    this.happened(m!.account, 'The account was moved to this box', now);
+    return { ok: true, npub: m!.account, i: w.i };
   }
 
   #create2(body: any, device: string, now: number) {

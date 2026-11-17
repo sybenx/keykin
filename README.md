@@ -9,6 +9,8 @@ My devices and my box. Any two pieces sign.
 - `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
 - `android/`: the phone app.
 - `ext/`: the browser extension. `node ext/build.mjs`, then load `ext/dist` in Chrome with Load unpacked.
+- `site/`: sign-in by a scanned code for web pages (QRST signer-ticket). `node tools/build-site.mjs`.
+- `vendor/qrst.js`: the QRST library, bundled from the `qr-secret-transfer` repo by `node tools/build-qrst.mjs`.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 
 ```bash
@@ -58,3 +60,5 @@ cd android && JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew :app:assembleD
 ```
 
 The Kotlin tests run against a real box. Build the library for this computer with `cargo build --release --features jni` in `frost/`, start a box, and pass its setup text in `KEYKIN_BOX_QR` to `./gradlew :app:testDebugUnitTest`. Without it the box test is skipped.
+
+The Android app also builds the QRST Kotlin library from `../qr-secret-transfer/kotlin`, so that repo must be checked out beside this one.

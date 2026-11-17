@@ -28,13 +28,13 @@ class Store(private val c: Context) {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).build())
         }.generateKey()
     }
-    private fun read(): JSONObject? {
+    @Synchronized private fun read(): JSONObject? {
         if (!file.exists()) return null
         val b = file.readBytes()
         val plain = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, b, 0, 12)) }.doFinal(b, 12, b.size - 12)
         return JSONObject(String(plain, Charsets.UTF_8))
     }
-    private fun write(o: JSONObject) {
+    @Synchronized private fun write(o: JSONObject) {
         val ci = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         val tmp = File(file.path + ".tmp")
         tmp.writeBytes(ci.iv + ci.doFinal(o.toString().toByteArray(Charsets.UTF_8)))
@@ -47,6 +47,9 @@ class Store(private val c: Context) {
         return Me(unhex(o.getString("sk")), o.getString("name"), Chip.publicKey(c))
     }
     fun held(): Held? = read()?.optJSONObject("held")?.let(Held::of)
+    /** The site signer's saved state: its own key, the sites signed in, and tickets waiting. */
+    @Synchronized fun signerState(): org.json.JSONObject = read()?.optJSONObject("signer") ?: cc.aaro.keykin.core.SiteSigner.fresh().also { keepSigner(it) }
+    @Synchronized fun keepSigner(st: org.json.JSONObject) { read()?.let { write(it.put("signer", st)) } }
     /** Where other devices listen, as last seen at the box: used when the box is off. */
     fun helpers(): List<String> = read()?.optJSONArray("helpers")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
     @Synchronized fun keepHelpers(addrs: List<String>) { read()?.let { write(it.put("helpers", org.json.JSONArray(addrs))) } }

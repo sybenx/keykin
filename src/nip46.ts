@@ -8,11 +8,21 @@ import { Relay } from 'nostr-tools/relay';
 import * as D from './device.ts';
 import { KeykinError, hexToBytes, bytesToHex, randomBytes } from './bytes.ts';
 
-export interface BunkerState { sk: string; secret: string; clients: string[] }
+export interface BunkerState {
+  sk: string; secret: string; clients: string[];
+  /** The relay the signer listens on, so a ticket can name it. */
+  relay?: string;
+  /** Sign-in tickets handed out and not yet used (QRST signer-ticket). Each works once, until `expires`. */
+  tickets?: { t: string; expires: number; origin?: string }[];
+  /** Which site each signed-in client key belongs to, when it came in by a ticket. */
+  origins?: Record<string, string>;
+}
 /** Signs one site out. The link's secret changes too, so an old link cannot be used to come back. */
 export function signOut(b: BunkerState, prefix: string): string[] {
   const gone = b.clients.filter((c) => c.startsWith(prefix));
-  if (gone.length) { b.clients = b.clients.filter((c) => !c.startsWith(prefix)); b.secret = bytesToHex(randomBytes(16)); }
+  const named = Object.entries(b.origins ?? {}).filter(([, o]) => o === prefix || o.includes(prefix)).map(([k]) => k);
+  for (const k of named) if (!gone.includes(k)) gone.push(k);
+  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) delete b.origins?.[k]; b.secret = bytesToHex(randomBytes(16)); }
   return gone;
 }
 export const newBunker = (): BunkerState => ({ sk: bytesToHex(randomBytes(32)), secret: bytesToHex(randomBytes(16)), clients: [] });
@@ -23,8 +33,17 @@ export const bunkerUrl = (b: BunkerState, relay: string) =>
 export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D.Send, client: string, method: string, params: string[], onChange: () => void): Promise<string> {
   if (method === 'connect') {
     const known = b.clients.includes(client);
-    if (!known && params[1] !== b.secret) throw new KeykinError('bad_secret');
-    if (!known) { b.clients.push(client); onChange(); }
+    if (!known) {
+      const now = Math.floor(Date.now() / 1000);
+      b.tickets = (b.tickets ?? []).filter((x) => x.expires > now);
+      const ticket = b.tickets.find((x) => x.t === params[1]);
+      if (!ticket && params[1] !== b.secret) throw new KeykinError('bad_secret');
+      if (ticket) {            // a ticket works once, and the site's key is tied to the origin the person approved
+        b.tickets = b.tickets.filter((x) => x !== ticket);
+        if (ticket.origin) (b.origins ??= {})[client] = ticket.origin;
+      }
+      b.clients.push(client); onChange();
+    }
     return params[1] ? params[1] : 'ack';
   }
   if (!b.clients.includes(client)) throw new KeykinError('not_connected');
@@ -46,6 +65,7 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
 export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held; send: D.Send; relay: string; onChange?: () => void; before?: () => void; log?: (s: string) => void }) {
   const sk = hexToBytes(o.bunker.sk), pub = getPublicKey(sk), log = o.log ?? (() => {});
   const relay = await Relay.connect(o.relay);
+  if (o.bunker.relay !== o.relay) { o.bunker.relay = o.relay; o.onChange?.(); }
   const seen = new Set<string>();
   const sub = relay.subscribe([{ kinds: [24133], '#p': [pub], since: Math.floor(Date.now() / 1000) - 10 }], {
     onevent: async (ev: Event) => {

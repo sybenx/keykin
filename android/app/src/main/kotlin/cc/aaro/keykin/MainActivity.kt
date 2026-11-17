@@ -38,6 +38,8 @@ sealed interface Screen {
     data class Paste(val back: Screen) : Screen
     data class JoinCode(val text: String, val name: String) : Screen   // shown to the device just added
     data class Nsec(val nsec: String) : Screen
+    data class SiteAsk(val params: cc.aaro.qrst.core.PairingParams, val viaCamera: Boolean) : Screen   // a site's sign-in code was read
+    data class SiteDigits(val digits: String, val origin: String) : Screen
 }
 
 class MainActivity : FragmentActivity() {
@@ -53,7 +55,9 @@ class MainActivity : FragmentActivity() {
     private fun own(h: Held): Held { h.changed = { store.keep(it) }; store.keep(h); held = h; return h }
     override fun onResume() { super.onResume(); if (::store.isInitialized) apps = Apps.all(this) }
 
-    private val scanner = registerForActivityResult(ScanContract()) { r -> r.contents?.let(::handleText) }
+    private var sites by mutableStateOf<List<cc.aaro.keykin.core.SiteSigner.Site>>(emptyList())
+    private var digitsAnswer: java.util.concurrent.SynchronousQueue<Boolean>? = null
+    private val scanner = registerForActivityResult(ScanContract()) { r -> r.contents?.let { handleText(it, viaCamera = true) } }
     private fun scan(prompt: String) = scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt(prompt).setBeepEnabled(false).setOrientationLocked(false))
 
     override fun onCreate(b: Bundle?) {
@@ -63,7 +67,7 @@ class MainActivity : FragmentActivity() {
         held = store.held()?.also { it.changed = { h -> store.keep(h) } }
         apps = Apps.all(this)
         screen = if (held != null) Screen.Home else Screen.Start
-        if (held != null) refresh()
+        if (held != null) { refresh(); refreshSites() }
         // Dark icons on the light background and the reverse, so the status bar stays readable.
         val dark = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
         androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply { isAppearanceLightStatusBars = !dark; isAppearanceLightNavigationBars = !dark }
@@ -76,6 +80,7 @@ class MainActivity : FragmentActivity() {
         if (!BuildConfig.DEBUG) return
         i?.getStringExtra("text64")?.let { handleText(String(Base64.decode(it, Base64.DEFAULT), Charsets.UTF_8)) }
         when (i?.getStringExtra("do")) { "sign" -> signTest(); "nsec" -> showNsec(); "invite" -> screen = Screen.Invite; "cycle" -> cycle() }
+        i?.getStringExtra("nip44")?.let { v -> val p = v.split("|"); try { android.util.Log.i("Keykin", "nip44 check: " + Nip44.decrypt(p[1], unhex(p[0]))) } catch (e: Throwable) { android.util.Log.i("Keykin", "nip44 check failed: " + e.javaClass.name + " " + e.message) } }
         i?.getStringExtra("grant")?.let { Apps.allow(this, it); apps = Apps.all(this) }
         i?.getStringExtra("block")?.let { n -> members.firstOrNull { it.name == n }?.let(::toggleBlock) }
     }
@@ -92,6 +97,10 @@ class MainActivity : FragmentActivity() {
         "not_ready", "no_welcome" -> "The other device has not finished adding this one yet."
         "bad_qr", "bad_invite", "bad_join" -> "That is not a Keykin code."
         "wrong_box" -> "That code is from a different box."
+        "site_silent" -> "The site did not answer. Show its code again and retry."
+        "site_declined" -> "The site did not take the sign-in."
+        "digits_differ" -> "The digits differed, so nothing was sent."
+        "site_wants_typing" -> "That site asks for the digits to be typed, which Keykin does not do yet."
         "pending_welcome" -> "A device you added has not finished joining yet. Finish that first."
         else -> "That did not work ($code)."
     }
@@ -107,9 +116,11 @@ class MainActivity : FragmentActivity() {
     private fun fingerprint(title: String): Fingerprint = { m -> Chip.sign(this, title, m) }
 
     /** Any Keykin code, scanned or pasted: the box's setup code, another device's invite, or a join code. */
-    private fun handleText(text: String) {
+    private fun handleText(text: String, viaCamera: Boolean = false) {
         val t = text.trim()
+        val site = Sites.read(t)
         when {
+            site != null -> if (held != null) screen = Screen.SiteAsk(site, viaCamera) else problem = "Add this device to an account first."
             t.contains("\"invite\"") -> held?.let { h -> work {
                 val inv = Texts.readInvite(t)
                 Device.add(me, h, inv, fingerprint("Add ${inv.name}"))
@@ -136,6 +147,19 @@ class MainActivity : FragmentActivity() {
         note = "Signed. Event ${ev.getString("id").take(12)}…"
         android.util.Log.i("Keykin", "signed " + ev.getString("id"))
     } }
+    private fun refreshSites() { if (held != null) sites = Sites.signer(this).sites() }
+    /** The person said yes to a site: hand it a ticket. If the camera did not read the code, the digits are compared first. */
+    private fun allowSite(a: Screen.SiteAsk) = work {
+        val origin = a.params.origin ?: "that site"
+        screen = Screen.Home
+        note = "Reaching $origin…"
+        Sites.answer(this, a.params, a.viaCamera) { digits ->
+            val q = java.util.concurrent.SynchronousQueue<Boolean>(); digitsAnswer = q
+            screen = Screen.SiteDigits(digits, origin)
+            q.take().also { screen = Screen.Home }
+        }
+        refreshSites(); note = "$origin can now sign as you."
+    }
     private fun cycle() = held?.let { h -> work {
         Device.cycle(me, h, fingerprint("Remove blocked devices for good")); loadMembers(); note = "Done. Blocked devices are gone for good."
     } }
@@ -156,6 +180,8 @@ class MainActivity : FragmentActivity() {
                 is Screen.Paste -> PasteScreen(s)
                 is Screen.JoinCode -> JoinCodeScreen(s)
                 is Screen.Nsec -> NsecScreen(s)
+                is Screen.SiteAsk -> SiteAskScreen(s)
+                is Screen.SiteDigits -> SiteDigitsScreen(s)
             }
         }
     }
@@ -236,6 +262,15 @@ class MainActivity : FragmentActivity() {
             Dim("To log a browser in to the box's page, scan the code that page shows.")
             Btn("Scan the page's code", enabled = !busy, modifier = Modifier.fillMaxWidth()) { scan("Scan the code on the box's page") }
         }
+        Card {
+            Head("Sites")
+            Dim("To sign in to a site that shows a code, scan it.")
+            for (site in sites) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Body(site.origin ?: (site.key.take(12) + "…"), Modifier.weight(1f))
+                Btn("Sign out", enabled = !busy) { Sites.signer(this@MainActivity).signOut(site.key); refreshSites() }
+            }
+            Btn("Scan a site's code", enabled = !busy, modifier = Modifier.fillMaxWidth()) { scan("Scan the code the site shows") }
+        }
         if (apps.isNotEmpty()) Card {
             Head("Apps that sign with this account")
             for (pkg in apps) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -258,6 +293,29 @@ class MainActivity : FragmentActivity() {
             QrImage(s.text, "Join code for ${s.name}")
             Btn("Copy as text", modifier = Modifier.fillMaxWidth()) { copy(s.text); note = "Copied." }
             Btn("Done", Kind.Main, modifier = Modifier.fillMaxWidth()) { screen = Screen.Home }
+        }
+    }
+
+    @Composable private fun SiteAskScreen(s: Screen.SiteAsk) {
+        BackHandler { screen = Screen.Home }
+        val origin = s.params.origin ?: "A site"
+        Card {
+            Head("Let $origin sign as you?")
+            Dim("It gets access of its own. You remove it under Sites here. Removing it stops future signing, not what was already signed.")
+            if (!s.viaCamera) Dim("This code was pasted, not scanned, so you will compare five digits with the site next.")
+            Btn("Let $origin sign as me", Kind.Main, !busy, Modifier.fillMaxWidth()) { allowSite(s) }
+            Btn("Don’t allow", Kind.Danger, !busy, Modifier.fillMaxWidth()) { screen = Screen.Home }
+        }
+    }
+
+    @Composable private fun SiteDigitsScreen(s: Screen.SiteDigits) {
+        BackHandler { digitsAnswer?.offer(false) }
+        Card {
+            Head("Does ${s.origin} show these digits?")
+            androidx.compose.foundation.text.BasicText(s.digits, style = TextStyle(color = palette().text, fontSize = 40.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, letterSpacing = 6.sp))
+            Dim("If the site shows different digits, someone else's code got in the way. Say no.")
+            Btn("Yes, the same", Kind.Main, modifier = Modifier.fillMaxWidth()) { digitsAnswer?.offer(true) }
+            Btn("No, different", Kind.Danger, modifier = Modifier.fillMaxWidth()) { digitsAnswer?.offer(false) }
         }
     }
 

@@ -33,6 +33,11 @@ ul.devices li:first-child { border-top:0; padding-top:4px; } ul.devices li:last-
 .tag { font-size:12px; padding:1px 7px; border-radius:99px; border:1px solid var(--line); color:var(--dim); margin-left:6px; font-weight:400; }
 .tag.blocked { color:var(--danger); border-color:var(--danger); }
 .err { color:var(--danger); }
+.kk-qr { background:#fff; padding:12px; border-radius:8px; width:min(100%, 300px); margin:8px auto 12px; } .kk-qr svg { display:block; width:100%; height:auto; }
+.kk-dim { color:var(--dim); font-size:13px; } .kk-err { color:var(--danger); font-size:13px; }
+.kk-digits { font:600 34px/1.2 ui-monospace, Menlo, monospace; letter-spacing:.18em; margin:4px 0 8px; }
+.kk-go { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+@media (prefers-color-scheme: dark) { .kk-go { color:#0c0c0c; } }
 `;
 
 const shell = (title: string, body: string, nonce = '', script = '') => `<!doctype html>
@@ -40,8 +45,26 @@ const shell = (title: string, body: string, nonce = '', script = '') => `<!docty
 <meta name="robots" content="noindex"><title>${esc(title)}</title><style>${CSS}</style></head>
 <body><main>${body}</main>${script ? `<script nonce="${nonce}">${script}</script>` : ''}</body></html>`;
 
-export function loginPage(o: { error?: string; qrText?: string; code?: string; nonce?: string }) {
+const ownerForm = (error: string | undefined, second: boolean) => `<form class="card" method="post" action="/login">
+  <h2>${second ? 'Or use the owner secret' : 'Log in'}</h2>
+  <p class="dim small">For the person who runs this box.</p>
+  ${error ? `<p class="err small" role="alert">${esc(error)}</p>` : ''}
+  <label class="small dim" for="secret">Owner secret</label>
+  <input id="secret" name="secret" type="password" autocomplete="current-password" required>
+  <button class="${second ? '' : 'go'}" type="submit">Log in</button>
+</form>`;
+
+export function loginPage(o: { error?: string; qrText?: string; code?: string; nonce?: string; relays?: string[] }) {
   let scan = '';
+  // With relays set, the account signs in to this page the way it signs in to any site: by a scanned code (QRST).
+  if (o.relays?.length) {
+    return shell('Keykin box', `
+<header><h1>Keykin box</h1></header>
+<div class="card"><h2>Sign in with your signer</h2>
+  <p class="dim small">Scan the code with a device in this box’s account.</p>
+  <div id="signin" data-relays="${esc(JSON.stringify(o.relays))}"></div></div>
+${ownerForm(o.error, true)}<script src="/signin.js"></script>`);
+  }
   if (o.qrText) {
     const qr = qrcode(0, 'M'); qr.addData(o.qrText); qr.make();
     scan = `<div class="card">
@@ -55,14 +78,7 @@ export function loginPage(o: { error?: string; qrText?: string; code?: string; n
   return shell('Keykin box', `
 <header><h1>Keykin box</h1></header>
 ${scan}
-<form class="card" method="post" action="/login">
-  <h2>${o.qrText ? 'Or use the owner secret' : 'Log in'}</h2>
-  <p class="dim small">For the person who runs this box.</p>
-  ${o.error ? `<p class="err small" role="alert">${esc(o.error)}</p>` : ''}
-  <label class="small dim" for="secret">Owner secret</label>
-  <input id="secret" name="secret" type="password" autocomplete="current-password" required>
-  <button class="${o.qrText ? '' : 'go'}" type="submit">Log in</button>
-</form>`, o.nonce ?? '', o.code ? `setInterval(async()=>{try{const r=await fetch('/login/wait?code=${o.code}');if(r.ok&&(await r.json()).ok)location.href='/'}catch{}},1500)` : '');
+${ownerForm(o.error, !!o.qrText)}`, o.nonce ?? '', o.code ? `setInterval(async()=>{try{const r=await fetch('/login/wait?code=${o.code}');if(r.ok&&(await r.json()).ok)location.href='/'}catch{}},1500)` : '');
 }
 
 const top = (csrf: string) => `<header><h1>Keykin box</h1>

@@ -38,6 +38,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.ui:ui")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("cc.aaro.qrst:qrst")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.19.0")

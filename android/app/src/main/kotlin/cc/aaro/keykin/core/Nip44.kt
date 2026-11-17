@@ -4,9 +4,7 @@
 package cc.aaro.keykin.core
 
 import java.util.Base64
-import javax.crypto.Cipher
 import javax.crypto.Mac
-import javax.crypto.spec.ChaCha20ParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object Nip44 {
@@ -24,8 +22,33 @@ object Nip44 {
         val chunk = if (next <= 256) 32 else next / 8
         return chunk * ((len - 1) / chunk + 1)
     }
-    private fun chacha(key: ByteArray, nonce: ByteArray, data: ByteArray): ByteArray =
-        Cipher.getInstance("ChaCha20").run { init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "ChaCha20"), ChaCha20ParameterSpec(nonce, 0)); doFinal(data) }
+    // ChaCha20 (RFC 8439, block counter from 0), written out here. The platform's "ChaCha20" cipher gave a
+    // different keystream on Android than on a desktop JVM, so this does not depend on it.
+    private fun le(b: ByteArray, o: Int) = (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8) or ((b[o + 2].toInt() and 0xff) shl 16) or ((b[o + 3].toInt() and 0xff) shl 24)
+    private fun chacha(key: ByteArray, nonce: ByteArray, data: ByteArray): ByteArray {
+        val init = IntArray(16)
+        init[0] = 0x61707865; init[1] = 0x3320646e; init[2] = 0x79622d32; init[3] = 0x6b206574
+        for (i in 0 until 8) init[4 + i] = le(key, i * 4)
+        for (i in 0 until 3) init[13 + i] = le(nonce, i * 4)
+        val out = ByteArray(data.size); val x = IntArray(16); val block = ByteArray(64)
+        fun qr(a: Int, b: Int, c: Int, d: Int) {
+            x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 16)
+            x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 12)
+            x[a] += x[b]; x[d] = Integer.rotateLeft(x[d] xor x[a], 8)
+            x[c] += x[d]; x[b] = Integer.rotateLeft(x[b] xor x[c], 7)
+        }
+        var counter = 0; var pos = 0
+        while (pos < data.size) {
+            init[12] = counter++
+            init.copyInto(x)
+            repeat(10) { qr(0, 4, 8, 12); qr(1, 5, 9, 13); qr(2, 6, 10, 14); qr(3, 7, 11, 15); qr(0, 5, 10, 15); qr(1, 6, 11, 12); qr(2, 7, 8, 13); qr(3, 4, 9, 14) }
+            for (i in 0 until 16) { val w = x[i] + init[i]; for (k in 0 until 4) block[i * 4 + k] = (w ushr (8 * k)).toByte() }
+            val n = minOf(64, data.size - pos)
+            for (i in 0 until n) out[pos + i] = (data[pos + i].toInt() xor block[i].toInt()).toByte()
+            pos += n
+        }
+        return out
+    }
 
     fun encrypt(text: String, convKey: ByteArray, nonce: ByteArray = random(32)): String {
         val plain = utf8(text)
@@ -40,10 +63,10 @@ object Nip44 {
         if (b.size < 99 || b[0].toInt() != 2) refuse("bad_message")
         val nonce = b.copyOfRange(1, 33); val ct = b.copyOfRange(33, b.size - 32); val mac = b.copyOfRange(b.size - 32, b.size)
         val keys = expand(convKey, nonce, 76)
-        if (!java.security.MessageDigest.isEqual(mac, hmac(keys.copyOfRange(44, 76), nonce, ct))) refuse("bad_message")
+        if (!java.security.MessageDigest.isEqual(mac, hmac(keys.copyOfRange(44, 76), nonce, ct))) refuse("bad_message", "mac")
         val padded = chacha(keys.copyOfRange(0, 32), keys.copyOfRange(32, 44), ct)
         val len = ((padded[0].toInt() and 0xff) shl 8) or (padded[1].toInt() and 0xff)
-        if (len == 0 || padded.size != 2 + paddedLen(len)) refuse("bad_message")
+        if (len == 0 || padded.size != 2 + paddedLen(len)) refuse("bad_message", "padding")
         return String(padded, 2, len, Charsets.UTF_8)
     }
 }

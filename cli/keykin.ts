@@ -11,7 +11,8 @@
 //   keykin cycle                                         after a block: drop blocked devices for good
 //   keykin serve <port> <address others reach>           stay on and help other devices when the box is off
 //   keykin bunker <relay url>                            sign in to sites (NIP-46)
-//   keykin sites | signout <site key prefix>             the sites signed in through the bunker
+//   keykin scan '<a site's sign-in code>' [--yes]         sign in to a site that shows a code (the bunker must be running)
+//   keykin sites | signout <site or key prefix>          the sites signed in through the bunker
 //   keykin login '<text from the box page>'              log a browser in to the box's page
 //   keykin nsec                                          form the whole nsec here and print it
 //
@@ -24,6 +25,9 @@ import { createServer } from 'node:http';
 import { load, save, meOf, heldOf, keep, sender } from './store.ts';
 import { DeviceHelper } from '../src/helper.ts';
 import { newBunker, runBunker, signOut, bunkerUrl } from '../src/nip46.ts';
+import { readCode, answerCode, newTicket } from '../src/ticket.ts';
+import { getPublicKey } from 'nostr-tools/pure';
+import { createInterface } from 'node:readline/promises';
 import { nsecEncode, npubEncode } from 'nostr-tools/nip19';
 import { hexToBytes } from '../src/bytes.ts';
 
@@ -111,7 +115,27 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
     case 'cycle': { const held = heldOf(s); await D.cycle(me, held, box()); keep(s, held, s.addr!); save(file, s); return out('Keys cycled. Blocked devices are gone for good.'); }
     case 'nsec': { const held = heldOf(s); const n = await D.formNsec(me, held, box()); keep(s, held, s.addr!); save(file, s); return out(nsecEncode(hexToBytes(n))); }
     case 'login': await D.approveLogin(me, heldOf(s), a, box()); return out('That browser is logged in to the box.');
-    case 'sites': { const cs = s.bunker?.clients ?? []; if (!cs.length) return out('No site is signed in.'); for (const c of cs) out(`  ${c}`); return; }
+    case 'scan': {
+      const held = heldOf(s);
+      if (!s.bunker?.relay) fail('Start the signer first: keykin bunker <relay>. Leave it running, then scan.');
+      const params = readCode(a);
+      const yes = argv.includes('--yes');
+      const ask = async (q: string) => { if (yes) return true; const rl = createInterface({ input: process.stdin, output: process.stdout }); try { return /^y/i.test(await rl.question(`${q} (y/n) `)); } finally { rl.close(); } };
+      await answerCode({
+        params, viaCamera: false,
+        consent: (origin) => ask(`Let ${origin ?? 'that site'} sign as you? It gets access of its own, which you remove with "keykin signout".`),
+        mint: (origin) => {
+          const fresh = load(file); const bunker = fresh.bunker!;
+          const t = newTicket(held.npub, getPublicKey(hexToBytes(bunker.sk)), [bunker.relay!]);
+          (bunker.tickets ??= []).push({ t: t.t, expires: t.expires, ...(origin ? { origin } : {}) });
+          save(file, fresh);
+          return t;
+        },
+        sameDigits: (digits) => { out(`Digits: ${digits}`); return ask(`Does the site show ${digits}?`); },
+      });
+      return out(`${params.origin ?? 'That site'} can now sign as you.`);
+    }
+    case 'sites': { const cs = s.bunker?.clients ?? []; if (!cs.length) return out('No site is signed in.'); for (const c of cs) out(`  ${c}${s.bunker?.origins?.[c] ? `  ${s.bunker.origins[c]}` : ''}`); return; }
     case 'signout': {
       if (!s.bunker || !a) fail('Give the start of a site key from "keykin sites".');
       const gone = signOut(s.bunker!, a); save(file, s);
@@ -122,11 +146,11 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       const held = heldOf(s);
       if (!s.bunker) { s.bunker = newBunker(); save(file, s); }
       const run = await runBunker({ bunker: s.bunker, me, held, send: box(), relay: a, onChange: () => { keep(s, held, s.addr!); save(file, s); },
-        before: () => { const fresh = load(file).bunker; if (fresh) { s.bunker!.clients = fresh.clients; s.bunker!.secret = fresh.secret; } }, log: out });
+        before: () => { const fresh = load(file).bunker; if (fresh) Object.assign(s.bunker!, { clients: fresh.clients, secret: fresh.secret, tickets: fresh.tickets, origins: fresh.origins }); }, log: out });
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, sites, signout, login, nsec'); return;
+    default: out('Commands: create, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

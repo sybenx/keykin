@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.2, 2026-11-16. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.3, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -105,7 +105,13 @@ and the box is what recovers from it.
 What the person who runs the box sees in a browser, at the box's address. Plain HTML from the
 box itself, nothing loaded from elsewhere.
 
-- **Log in by scanning.** Once there is an account, the login page shows a code:
+- **Sign in with your signer (QRST).** When the box is given relays (`KEYKIN_RELAYS`), its login
+  page is a site like any other: it shows a sign-in code (section 8j), a device in the account
+  answers it, and the page then has the account sign the box's challenge (a kind 22242 event
+  naming this page's origin and a one-time challenge tied to this browser). The box logs the
+  browser in if that signature is by this box's own account. Any other account is refused.
+- **Log in by scanning, without relays.** With no relays set, the login page shows a code of
+  Keykin's own instead:
   `{ keykin: 2, login: { addr, key, code } }`. A device in the account scans it and, after a
   fingerprint, sends `login` with the code. The page, which has been asking the box whether its
   code was approved, is then logged in. A code lasts three minutes, works once, and only for the
@@ -237,16 +243,55 @@ The Android app answers `nostrsigner:` requests: `get_public_key`, `sign_event`,
 always allowed is answered silently through the content provider, and can be signed out on the
 app's home screen.
 
+## 8j. Signing in to a site by scanning its code (QRST `signer-ticket`)
+
+This is the `signer-ticket` profile of QR Secret Transfer (`qr-secret-transfer/profiles/
+signer-ticket.md`), followed as written. What moves is a single-use ticket, never a key.
+
+1. The site shows a QRST code (Flow A, `mode=offer`). The site is the Receiver.
+2. A Keykin device reads it and asks **"Let *origin* sign as you?"**, saying that the site gets
+   access of its own and where it is removed.
+3. On yes the device joins the QRST session. If its own camera read the code, the check level is
+   `none`. If the code was pasted or handed over, it is `compare`: the device shows five digits
+   and asks whether the site shows the same. Different digits end it and nothing is sent.
+4. Only then is the ticket made: `{ v: 1, pubkey, signer, relays, t, expires }`, with `expires`
+   15 minutes ahead. It is released to the site, sealed, through QRST.
+5. The site asks **"Sign in as …, through your signer … on …?"**, and on yes sends NIP-46
+   `connect` to `signer` on `relays` with `t` as the secret.
+6. The signer accepts `t` once, records the site's own key against the origin the person
+   approved, and from then on answers it (section 8c). Signing the site out refuses its key.
+
+Who does what:
+
+| Part | Where |
+|---|---|
+| The ticket format and both halves | `src/ticket.ts`, over the QRST library bundled as `vendor/qrst.js` |
+| A site's widget, `KeykinSignIn.start(element, { relays })` | `site/signin.ts`, built to `site/dist/keykin-signin.js` |
+| The box page as a site | `site/box-login.ts`, built to `box/static/signin.js` |
+| Command-line signer | `keykin bunker <relay>` running, then `keykin scan '<code>'` |
+| Phone signer | The Android app: scan or paste a site's code. Sites are listed on the home screen with Sign out |
+
+Limits today:
+
+- **The phone's signer listens only while the app's process is alive.** There is no background
+  service yet, so a site signed in through the phone stops getting answers once Android ends the app.
+- **The phone listens on the relays the site's code names.** Nothing else is configured.
+- **Relays must be `wss://`.** A relay on this machine or a private network over `ws://` is
+  accepted only by the command-line signer, a debug build of the app, and a page given such a
+  relay by its own operator.
+- **The `nc` fallback, the bounce page and same-phone links** of the profile are not built. A
+  code opened in a browser instead of a signer just loads the site.
+- **`type` check level** (typing the digits) is not offered by Keykin's signers.
+
 ## 9. Not built yet
 
-- **The QRST protocol itself for the box's page.** Logging in by scanning with a device is
-  built (section 6a), but it is Keykin's own exchange with the box, not the QRST protocol.
+- **A background service for the phone's site signer** (section 8j).
 - **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
   `state.json`, start it, and read the new secret from its output.
 - **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the
   public key on trust. iOS (Secure Enclave) is not written.
-- **The remote signer (NIP-46) in the Android app.** The command-line device has it. On the
-  phone, other apps use NIP-55 and sites in a desktop browser use the extension.
+- **A pasted bunker link on the phone.** The phone's remote signer takes sites in by a scanned
+  code only.
 - **A phone or a browser helping when the box is off.** Only the command-line device listens.
 - **The camera scan on a real phone.** The scanner is wired in but was only exercised through
   pasted and intent-fed codes on an emulator.

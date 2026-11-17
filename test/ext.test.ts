@@ -45,7 +45,7 @@ test('the extension: set up with the box, a site signs in, signs and encrypts, t
     await popup.click('#create');
     const npubText = await popup.textContent('#npub');
     const npub = nip19.decode(npubText!).data as string;
-    assert.equal(npub, b.box.state.account!.npub);
+    assert.equal(npub, b.box.only()!.npub);
     assert.match((await popup.textContent('#app'))!, /Browser \(this browser\)/);
 
     // A site asks to sign in. The first time, Keykin asks; nothing is answered before Allow.
@@ -88,7 +88,7 @@ test('the extension: set up with the box, a site signs in, signs and encrypts, t
     const asked4 = approval(ctx);
     const back = site.evaluate(() => (window as any).nostr.getPublicKey());
     await (await asked4).click('#allow'); await back;
-    b.box.ownerBlock(b.box.state.account!.members.find((m) => m.name === 'Browser')!.key);
+    b.box.ownerBlock(b.box.only()!.members.find((m) => m.name === 'Browser')!.key);
     assert.equal(await site.evaluate(() => (window as any).nostr.signEvent({ kind: 1, content: 'x' }).then(() => 'signed', (e: Error) => e.message)), 'This browser is blocked.');
   } finally {
     await ctx.close();
@@ -129,7 +129,7 @@ test('the extension joins an account a phone made', { skip: !exe && 'no Chromium
     const ev = await signed;
     assert.ok(verifyEvent(ev)); assert.equal(ev.pubkey, held.npub);
     // The browser has no fingerprint key, so the box does not let it make account changes.
-    assert.equal(b.box.state.account!.members.find((m) => m.name === 'Browser')!.chip, undefined);
+    assert.equal(b.box.only()!.members.find((m) => m.name === 'Browser')!.chip, undefined);
   } finally {
     await ctx.close();
     await new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); });

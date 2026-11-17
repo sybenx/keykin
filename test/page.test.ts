@@ -112,6 +112,6 @@ test('behind another login, the page asks for nothing and makes no owner secret'
     const post = (form: Record<string, string>) => fetch(base + '/owner/block', { method: 'POST', body: new URLSearchParams(form), headers: H, redirect: 'manual' });
     assert.equal((await post({ key: laptop.key, csrf: 'wrong' })).status, 403);
     assert.match(decodeURIComponent((await post({ key: laptop.key, csrf })).headers.get('location')!), /is blocked/);
-    assert.equal(b.box.state.account!.members.find((m) => m.name === 'Laptop')!.blocked, true);
+    assert.equal(b.box.only()!.members.find((m) => m.name === 'Laptop')!.blocked, true);
   } finally { await new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); }); }
 });

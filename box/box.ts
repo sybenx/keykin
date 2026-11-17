@@ -26,27 +26,85 @@ export interface Account {
   welcomes: Record<string, Welcome>;
   catchups: Record<string, Catchup[]>;
 }
-/** `owner` is the hash of the owner secret that logs in to the page. */
-export interface BoxState { sk: string; key: string; owner?: string; account: Account | null }
+/** Someone asking to make an account here or move one here (SPEC 11.4). The admin decides. */
+export interface Ask {
+  id: string; what: 'make' | 'transfer';
+  key?: string;                        // the asking device's member key; none for a code the admin made
+  name?: string; note?: string; chip?: string; account?: string;
+  asked: number; state: 'waiting' | 'approved' | 'refused'; decided?: number;
+}
+/** `owner` is the hash of the owner secret that logs in to the admin page. Accounts are keyed by npub, hex. */
+export interface BoxState { sk: string; key: string; owner?: string; accounts: Record<string, Account>; requests: Record<string, Ask> }
 
 const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
+const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
 
 export class Box {
   state: BoxState;
-  /** Shown as a QR while the box has no account. A fresh one each start. */
+  /** The code an empty box shows, so its first account needs no approval. A fresh one each start. */
   readonly setupCode = bytesToHex(randomBytes(16));
   #seen = new Map<string, number>();   // request id -> ts, for replay refusal
-  #pending: { device: string; secret: string; pkg: string; name: string; chip?: string } | null = null;
+  #pending = new Map<string, { device: string; secret: string; pkg: string; name: string; chip?: string }>();   // by request id
   onChange: (s: BoxState) => void = () => {};
   /** Set by the server: approves a login to the box's page that a device scanned. Returns false if unknown or expired. */
-  onLogin: (code: string, by: string) => boolean = () => false;
+  onLogin: (code: string, account: string, by: string) => boolean = () => false;
 
-  constructor(state: BoxState | null = null) { this.state = state ?? { ...newMemberKey(), account: null }; }
+  constructor(state: BoxState | null = null) {
+    const s: any = state ?? { ...newMemberKey() };
+    // A state file from when a box held one account.
+    if (!s.accounts) { s.accounts = s.account ? { [s.account.npub]: s.account } : {}; delete s.account; }
+    s.requests ??= {};
+    this.state = s;
+  }
 
-  /** What the QR on an empty box says. `addr` is where devices reach it. */
-  qr(addr: string) { return this.state.account ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode }); }
+  /** The accounts, oldest first. */
+  accounts(): Account[] { return Object.values(this.state.accounts); }
+  /** The account when there is exactly one to speak of: the first, or null on an empty box. */
+  only(): Account | null { return this.accounts()[0] ?? null; }
+
+  /** What the QR on an empty box says. `addr` is where devices reach it. Null once it holds an account. */
+  qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode }); }
+
+  /** The admin makes room for one more account: a request approved in advance, as a setup code. */
+  newSetupCode(addr: string, now: number): string {
+    const id = bytesToHex(randomBytes(16));
+    this.state.requests[id] = { id, what: 'make', asked: now, state: 'approved', decided: now };
+    this.#save();
+    return JSON.stringify({ keykin: 2, addr, key: this.state.key, code: id });
+  }
+  /** The admin's answer to someone asking (SPEC 11.4). */
+  decide(id: string, approve: boolean, now: number) {
+    const r = this.state.requests[id] ?? refuse('gone');
+    if (r.state !== 'waiting') refuse('already_decided');
+    r.state = approve ? 'approved' : 'refused'; r.decided = now;
+    this.#save();
+  }
+  /** The admin removes an account and its piece, for good. */
+  removeAccount(npub: string) {
+    if (!this.state.accounts[npub]) refuse('unknown_account');
+    delete this.state.accounts[npub];
+    this.#save();
+  }
+  #tidyRequests(now: number) {
+    let changed = false;
+    for (const r of Object.values(this.state.requests)) {
+      const dead = r.state === 'approved' ? now - (r.decided ?? r.asked) > APPROVED_HOURS * 3600 : now - r.asked > ASK_DAYS * 86400;
+      if (dead) { delete this.state.requests[r.id]; this.#pending.delete(r.id); changed = true; }
+    }
+    if (changed) this.#save();
+  }
+  /** The request a `create` or `transfer` names, if it may be used by this device now. */
+  #usable(id: unknown, device: string, what: 'make' | 'transfer'): string {
+    if (typeof id !== 'string') refuse('bad_code');
+    if (id === this.setupCode && what === 'make') { if (this.accounts().length) refuse('already_set_up'); return id as string; }
+    const r = this.state.requests[id as string];
+    if (!r || r.what !== what) refuse('bad_code');
+    if (r.state !== 'approved') refuse(r.state === 'waiting' ? 'not_approved' : 'refused');
+    if (r.key && r.key !== device) refuse('bad_code');
+    return id as string;
+  }
 
   /** Every request comes through here. Returns `{ ok, ... }` or `{ error }`. */
   handle(req: Signed, now: number): any {
@@ -55,9 +113,12 @@ export class Box {
       for (const [id, ts] of this.#seen) if (now - ts > 2 * MAX_SKEW) this.#seen.delete(id);
       if (this.#seen.has(body.id)) refuse('replay');
       this.#seen.set(body.id, body.ts);
+      this.#tidyRequests(now);
+      if (body.op === 'ask') return this.#ask(body, req.key, now);
+      if (body.op === 'asked') return { ok: true, state: this.state.requests[body.request]?.state ?? 'gone' };
       if (body.op === 'create1') return this.#create1(body, req.key);
       if (body.op === 'create2') return this.#create2(body, req.key, now);
-      const s = this.state.account ?? refuse('not_set_up');
+      const s = this.#accountOf(body);
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
       if (from.blocked) refuse('blocked');
       // A device still on the old pieces is told so, and handed what it needs to catch up.
@@ -86,7 +147,7 @@ export class Box {
         case 'login': {
           // Logging in to the box's page gives the power to block and unblock anything, so it needs the fingerprint.
           this.#needFingerprint(from, req);
-          if (typeof body.code !== 'string' || !this.onLogin(body.code, from.name)) refuse('bad_code');
+          if (typeof body.code !== 'string' || !this.onLogin(body.code, s.npub, from.name)) refuse('bad_code');
           return { ok: true };
         }
         default: return refuse('unknown_op');
@@ -97,15 +158,45 @@ export class Box {
     }
   }
 
-  /** The box owner's Block button (the login page calls this once the owner is logged in). */
-  ownerBlock(key: string) { return this.#block(this.state.account ?? refuse('not_set_up'), key); }
+  // Which account a request is about (SPEC 11.2). A box with one account takes a request that names none.
+  #accountOf(body: any): Account {
+    if (body.account !== undefined) return (typeof body.account === 'string' ? this.state.accounts[body.account] : undefined) ?? refuse('unknown_account');
+    const all = this.accounts();
+    if (!all.length) refuse('not_set_up');
+    if (all.length > 1) refuse('need_account');
+    return all[0];
+  }
+  /** The account a member key is in, for the admin's buttons. `npub` picks one if the key is in several. */
+  #holding(key: string, npub?: string): Account {
+    const found = this.accounts().filter((a) => (!npub || a.npub === npub) && a.members.some((m) => m.key === key));
+    return found[0] ?? refuse('unknown_member');
+  }
+
+  // Someone asks to make an account here, or to move one here. It waits for the admin.
+  #ask(body: any, device: string, now: number) {
+    if (body.what !== 'make' && body.what !== 'transfer') refuse('bad_request');
+    if (body.what === 'transfer' && !HEX64.test(body.account ?? '')) refuse('bad_request');
+    if (body.chip !== undefined && !CHIP.test(body.chip)) refuse('bad_chip_key');
+    const all = Object.values(this.state.requests);
+    const mine = all.find((r) => r.key === device && r.state === 'waiting');
+    if (mine) return { ok: true, request: mine.id };
+    if (all.filter((r) => r.state === 'waiting').length >= MAX_WAITING) refuse('too_many');
+    const id = bytesToHex(randomBytes(16));
+    this.state.requests[id] = { id, what: body.what, key: device, name: String(body.name ?? 'Device').slice(0, 60), note: String(body.note ?? '').slice(0, 200),
+      chip: body.chip, account: body.account, asked: now, state: 'waiting' };
+    this.#save();
+    return { ok: true, request: id };
+  }
+
+  /** The admin's Block button. */
+  ownerBlock(key: string, npub?: string) { return this.#block(this.#holding(key, npub), key); }
 
   /**
    * The box owner's Unblock button. This is the way back when a thief with an unlocked phone has
    * blocked every other device: the owner logs in to the box, blocks the phone and unblocks the rest.
    */
-  ownerUnblock(key: string) {
-    const s = this.state.account ?? refuse('not_set_up');
+  ownerUnblock(key: string, npub?: string) {
+    const s = this.#holding(key, npub);
     const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
     m.blocked = false;
     this.#save();
@@ -125,18 +216,19 @@ export class Box {
   // --- Making the key with the first device. Neither side ever holds the whole key. ---------
 
   #create1(body: any, device: string) {
-    if (this.state.account) refuse('already_set_up');
-    if (typeof body.code !== 'string' || body.code !== this.setupCode) refuse('bad_code');
+    // `request` is the name now; `code` is what older devices send for the same thing.
+    const id = this.#usable(body.request ?? body.code, device, 'make');
     if (typeof body.pkg !== 'string') refuse('bad_keygen');
     if (body.chip !== undefined && !CHIP.test(body.chip)) refuse('bad_chip_key');
     const mine = F.dkg1(BOX_I, 2);
-    this.#pending = { device, secret: mine.secret, pkg: body.pkg, name: String(body.name ?? 'First device'), chip: body.chip };
+    this.#pending.set(id, { device, secret: mine.secret, pkg: body.pkg, name: String(body.name ?? 'First device'), chip: body.chip });
     return { ok: true, pkg: mine.pkg };
   }
 
   #create2(body: any, device: string, now: number) {
-    if (this.state.account) refuse('already_set_up');
-    const p = this.#pending;
+    // An older device sends no request id with the second step: it is the one keygen this device has open.
+    const id = body.request ?? body.code ?? [...this.#pending].find(([, v]) => v.device === device)?.[0];
+    const p = this.#pending.get(id);
     if (!p || p.device !== device) refuse('no_keygen');
     const theirs: [number, string][] = [[DEVICE_I, p!.pkg]];
     let out;
@@ -145,8 +237,9 @@ export class Box {
       const done = F.dkg3(two.secret, theirs, [[DEVICE_I, openFrom(this.state.sk, device, 'keygen', body.pkg2)]]);
       out = { done, forDevice: two.pkgs.get(DEVICE_I)! };
     } catch (e) { if (e instanceof KeykinError) throw e; return refuse('bad_keygen'); }
-    this.#pending = null;
-    this.state.account = {
+    this.#pending.delete(id);
+    delete this.state.requests[id];
+    this.state.accounts[out.done.npub] = {
       commitment: commitmentHex(out.done.C), npub: out.done.npub, i: BOX_I, share: scalarHex(out.done.share),
       members: [
         { key: device, i: DEVICE_I, name: p!.name, kind: 'device', chip: p!.chip, blocked: false, added: now },

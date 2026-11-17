@@ -53,7 +53,7 @@ test('the signing maths: any two pieces of a line sign, one cannot', () => {
 
 test('scan the QR: device and box make the key together, then sign', async () => {
   const { box, send, phone, held } = await setup();
-  const acct = box.state.account!;
+  const acct = box.only()!;
   assert.equal(acct.npub, held.npub);
   assert.equal(box.qr('http://box'), null);                       // no QR once there is an account
   // Each side holds one piece of the same line, and they are different pieces.
@@ -80,7 +80,7 @@ test('a device given the wrong box key in the QR cannot finish creating', async 
   const send: D.Send = async (r) => box.handle(r, NOW);
   const qr = D.readQr(box.qr('http://box')!);
   await assert.rejects(D.createWithBox(device('Phone'), { ...qr, key: newMemberKey().key }, send, NOW), /bad_seal/);
-  assert.equal(box.state.account, null);
+  assert.equal(box.only(), null);
 });
 
 test('adding a device: it gets a working piece and nobody held the key', async () => {
@@ -118,7 +118,7 @@ test('account changes need the fingerprint', async () => {
   const real = await seal({ op: 'unblock', key: laptop.me.key }, phone.sk, NOW, phone.fp);
   const moved = await seal({ op: 'reveal', epoch: 0 }, phone.sk, NOW); moved.fp = real.fp;
   assert.deepEqual(box.handle(moved, NOW), { error: 'needs_fingerprint' });
-  assert.equal(box.state.account!.members.length, 4);
+  assert.equal(box.only()!.members.length, 4);
 });
 
 test('falling back to the nsec: a fingerprint forms it on the device, and it is the same key', async () => {
@@ -170,7 +170,7 @@ test('cycling the keys: a blocked piece stops fitting, the rest catch up, the np
   await assert.rejects(D.cycle({ ...phone, fp: undefined }, held, send, NOW), /needs_fingerprint/);
   const before = await D.formNsec(phone, held, send, NOW);
   await D.cycle(phone, held, send, NOW);
-  const a = box.state.account!;
+  const a = box.only()!;
   assert.equal(a.epoch, 1);
   assert.deepEqual(a.members.map((m) => m.name), ['Phone', 'Box', 'Laptop', 'Tablet']);     // the blocked one is gone
   // The stolen piece no longer fits with the box's new piece, even if the box were to answer it.
@@ -217,7 +217,7 @@ test('a second box gets a piece but may not ask for a signature', async () => {
   await assert.rejects(D.signEvent(box2, h2, note(held.npub), send, NOW), /devices_only/);
   // But two boxes can sign between themselves (the maths), which is how a second box is a backup.
   const msg = eventId(note(held.npub));
-  const a = box.state.account!;
+  const a = box.only()!;
   const mine = ask(h2.piece, msg);
   assert.ok(valid(finish(h2.piece, msg, mine, answer({ C: h2.piece.C, i: a.i, share: BigInt('0x' + a.share) }, msg, mine.commit)), msg, held.npub));
 });
@@ -254,7 +254,7 @@ test('state survives a restart, waiting welcomes included', async () => {
   const send2: D.Send = async (r) => again.handle(r, NOW);
   const h = await D.join(late, held.boxKey, held.npub, send2, NOW);
   assert.ok(valid((await D.signEvent(late, h, note(held.npub), send2, NOW)).sig, eventId(note(held.npub)), held.npub));
-  assert.deepEqual(again.state.account!.welcomes, {});             // cleared once it has signed
+  assert.deepEqual(again.only()!.welcomes, {});             // cleared once it has signed
   // A newcomer that has not collected its piece holds up a cycle, so it is never stranded.
   const slow = device('Slow');
   await D.addMember(late, h, { key: slow.key, name: 'Slow', kind: 'device', chip: slow.chip }, send2, NOW);

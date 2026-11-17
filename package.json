@@ -8,7 +8,8 @@
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc",
     "box": "node box/server.ts",
-    "keykin": "node cli/keykin.ts"
+    "keykin": "node cli/keykin.ts",
+    "login": "node login/server.ts"
   },
   "dependencies": {
     "@noble/ciphers": "^2.4.0",

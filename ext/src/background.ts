@@ -114,7 +114,7 @@ async function fromUi(m: any): Promise<unknown> {
     case 'state': {
       if (!s.held) return { account: false, invite: JSON.stringify({ keykin: 2, invite: { key: me.key, name: me.name } }) };
       let members: any[] = [], problem: string | undefined;
-      try { members = (await D.members(me, sender(s.addr!))).members; } catch (e) { problem = say(e); }
+      try { members = (await D.members(me, sender(s.addr!), undefined, s.held.npub)).members; } catch (e) { problem = say(e); }
       if (!problem) await reportSites();           // picks up revokes made on the account page
       return { account: true, npub: npubEncode(s.held.npub), me: me.key, members, sites: (await load()).sites ?? [], problem };
     }
@@ -129,7 +129,7 @@ async function fromUi(m: any): Promise<unknown> {
       const h = await D.join(me, j.boxKey, j.npub, sender(j.addr));
       keep(s, h, j.addr); await save(s); return {};
     }
-    case 'block': await D.block(me, m.key, sender(s.addr!)); return {};
+    case 'block': await D.block(me, m.key, sender(s.addr!), undefined, s.held?.npub); return {};
     case 'signout': dropSite(s, m.origin); await save(s); await reportSites(); return {};
     case 'decide': {
       if (m.allow) {

@@ -21,6 +21,8 @@
 //   keykin sites | signout <site or key prefix>          the sites signed in through the bunker
 //   keykin login '<text from the box page>'              log a browser in to the box's page
 //   keykin nsec                                          form the whole nsec here and print it
+//   keykin transfer '<setup code from the new box>'      move the account to another box; prints a join text
+//   keykin moved '<join text>'                           on the other devices: use the new box from now on
 //
 // State lives in $KEYKIN_HOME/device.json (default ~/.keykin).
 
@@ -45,10 +47,10 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
   // The box first; if it cannot be reached, other devices that listen (from the list last seen at the box).
   const box = () => D.withHelpers(sender(s.addr ?? fail('This device does not know a box yet.')),
     (s.list ?? []).filter((m) => m.addr && m.key !== me.key && !m.blocked).map((m) => sender(m.addr!)));
-  const remember = async () => { try { s.list = (await D.members(me, sender(s.addr!))).members; save(file, s); } catch { /* box off: keep the old list */ } };
+  const remember = async () => { try { s.list = (await D.members(me, sender(s.addr!), undefined, s.held?.npub)).members; save(file, s); } catch { /* box off: keep the old list */ } };
   if (s.held && cmd !== 'status') await remember();
   const byName = async (name: string) => {
-    const list = await D.members(me, box());
+    const list = await D.members(me, box(), undefined, s.held?.npub);
     return list.members.find((m: any) => m.name === name || m.key.startsWith(name))?.key ?? fail(`No device called "${name}".`);
   };
   switch (cmd) {
@@ -101,11 +103,11 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
         try {
           // Any catch-up after a cycle happens on a request that needs the current pieces; a message key to itself is the cheapest.
           await D.conversationKey(me, held, held.npub, sender(s.addr!)); keep(s, held, s.addr!);
-          helper.list = (await D.members(me, sender(s.addr!))).members; s.list = helper.list as any; save(file, s);
+          helper.list = (await D.members(me, sender(s.addr!), undefined, held.npub)).members; s.list = helper.list as any; save(file, s);
         } catch (e: any) { if (e?.code === 'blocked' || e?.code === 'unknown_member') helper.list = []; else if (!helper.list.length) helper.list = (s.list ?? []) as any; }
       };
       await refresh();
-      await D.setAddress(me, b, sender(s.addr!)).catch(() => out('The box is not reachable now; it will learn this address later.'));
+      await D.setAddress(me, b, sender(s.addr!), undefined, held.npub).catch(() => out('The box is not reachable now; it will learn this address later.'));
       const server = createServer((req, res) => {
         const chunks: Buffer[] = []; let size = 0;
         req.on('data', (c: Buffer) => { size += c.length; if (size > 256 * 1024) req.destroy(); else chunks.push(c); });
@@ -120,7 +122,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       return { close: () => { clearInterval(timer); server.close(); server.closeAllConnections(); }, refresh };
     }
     case 'status': {
-      const list = await D.members(me, sender(s.addr ?? fail('This device does not know a box yet.')));
+      const list = await D.members(me, sender(s.addr ?? fail('This device does not know a box yet.')), undefined, s.held?.npub);
       out(`${npubEncode(list.npub)}`);
       out(`npub (hex): ${list.npub}`);
       for (const m of list.members) out(`  ${m.i}  ${m.name}${m.key === me.key ? ' (this device)' : ''}${m.kind === 'box' ? ' (box)' : ''}${m.blocked ? '  BLOCKED' : ''}`);
@@ -131,11 +133,32 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       try { return out(JSON.stringify(await D.signEvent(me, held, { pubkey: held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box()))); }
       finally { keep(s, held, s.addr!); save(file, s); }
     }
-    case 'block': await D.block(me, await byName(a), box()); return out(`${a} is blocked.`);
-    case 'unblock': await D.unblock(me, await byName(a), box()); return out(`${a} is unblocked.`);
+    case 'block': await D.block(me, await byName(a), box(), undefined, s.held?.npub); return out(`${a} is blocked.`);
+    case 'unblock': await D.unblock(me, await byName(a), box(), undefined, s.held?.npub); return out(`${a} is unblocked.`);
     case 'cycle': { const held = heldOf(s); await D.cycle(me, held, box()); keep(s, held, s.addr!); save(file, s); return out('Keys cycled. Blocked devices are gone for good.'); }
     case 'nsec': { const held = heldOf(s); const n = await D.formNsec(me, held, box()); keep(s, held, s.addr!); save(file, s); return out(nsecEncode(hexToBytes(n))); }
     case 'login': await D.approveLogin(me, heldOf(s), a, box()); return out('That browser is logged in to the box.');
+    case 'transfer': {
+      // The old box is the one this device uses now; the new one is named by its setup code (an approved request).
+      const held = heldOf(s), qr = D.readQr(a ?? fail('Give the setup code the new box shows.'));
+      if (qr.key === held.boxKey) fail('That is the box this account is on already.');
+      const oldAddr = s.addr!;
+      try { await D.transferToBox(me, held, sender(oldAddr), { key: qr.key, code: qr.code }, sender(qr.addr)); }
+      finally { keep(s, held, held.boxKey === qr.key ? qr.addr : oldAddr); delete s.list; save(file, s); }
+      out(`The account is on the new box now. On each other device, run: keykin moved '<the text below>'`);
+      return out(JSON.stringify({ keykin: 2, join: { addr: qr.addr, boxKey: qr.key, npub: held.npub } }));
+    }
+    case 'moved': {
+      // Another device moved the account. Only the address and the box key change here; the piece catches up on the next request.
+      const held = heldOf(s);
+      let j: any; try { j = JSON.parse(a).join; } catch { j = null; }
+      if (!j || typeof j.addr !== 'string' || !/^[0-9a-f]{64}$/.test(j.boxKey ?? '')) fail('That is not a join text.');
+      if (j.npub !== held.npub) fail('That join text is for another account.');
+      const list = await D.members(me, sender(j.addr), undefined, held.npub);
+      if (list.boxKey !== j.boxKey) fail('The box at that address has another key. Check the join text.');
+      s.addr = j.addr; s.held!.boxKey = j.boxKey; s.list = list.members; save(file, s);
+      return out('This device uses the new box now.');
+    }
     case 'scan': {
       const held = heldOf(s);
       if (!s.bunker?.relay) fail('Start the signer first: keykin bunker <relay>. Leave it running, then scan.');
@@ -197,7 +220,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, import, forget-key, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
+    default: out('Commands: create, import, forget-key, invite, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

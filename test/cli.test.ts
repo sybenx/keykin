@@ -80,6 +80,47 @@ test('importing a key keeps the whole key as a backup until the person forgets i
   } finally { await closeBox(b); }
 });
 
+test('moving the account to another box: transfer on one device, moved on the others', async () => {
+  const [b1, b2] = [await startBox({ dir: tmp('kk-box-'), port: 0, log: () => {} }), await startBox({ dir: tmp('kk-box2-'), port: 0, log: () => {} })];
+  try {
+    const [mac, mini, other] = [tmp('kk-mac-'), tmp('kk-mini-'), tmp('kk-other-')];
+    const npub = /npub \(hex\): ([0-9a-f]{64})/.exec((await cli(mac, 'create', b1.qr()!, 'MacBook')).text)![1];
+    await cli(mini, 'join', (await cli(mac, 'add', (await cli(mini, 'invite', 'Mac mini')).text)).text);
+    const before = (await cli(mac, 'nsec')).text;
+    // The new box already holds someone else's account, so its admin makes a code for this one.
+    await cli(other, 'create', b2.qr()!, 'Someone else');
+    const code = b2.box.newSetupCode(`http://127.0.0.1:${b2.port}`, Math.floor(Date.now() / 1000));
+    await assert.rejects(cli(mac, 'transfer', b1.box.newSetupCode(`http://127.0.0.1:${b1.port}`, Math.floor(Date.now() / 1000))), /already/);
+
+    const moved = (await cli(mac, 'transfer', code)).text;
+    const joinText = moved.split('\n').pop()!;
+    assert.deepEqual(JSON.parse(joinText).join, { addr: `http://127.0.0.1:${b2.port}`, boxKey: b2.box.state.key, npub });
+    const saved = JSON.parse(readFileSync(join(mac, 'device.json'), 'utf8'));
+    assert.equal(saved.addr, `http://127.0.0.1:${b2.port}`); assert.equal(saved.held.boxKey, b2.box.state.key);
+    assert.ok(verifyEvent(JSON.parse((await cli(mac, 'sign', '{"content":"on the new box"}')).text)));
+    assert.equal((await cli(mac, 'nsec')).text, before);                         // the same key
+    assert.match((await cli(mac, 'status')).text, /Mac mini/);
+    assert.equal(b2.box.accounts().length, 2);
+    assert.ok(!b2.box.state.accounts[npub].members.some((m) => m.key === b1.box.state.key));
+
+    // The mini is told, checks the new box, and catches up on its first request there.
+    await assert.rejects(cli(mini, 'moved', joinText.replace(npub, 'f'.repeat(64))), /another account/);
+    await assert.rejects(cli(mini, 'moved', joinText.replace(b2.box.state.key, b1.box.state.key)), /another key/);
+    assert.match((await cli(mini, 'moved', joinText)).text, /new box now/);
+    const piece = JSON.parse(readFileSync(join(mini, 'device.json'), 'utf8')).held.share;
+    const signed = JSON.parse((await cli(mini, 'sign', '{"content":"caught up"}')).text);
+    assert.ok(verifyEvent(signed)); assert.equal(signed.pubkey, npub);
+    const after = JSON.parse(readFileSync(join(mini, 'device.json'), 'utf8')).held;
+    assert.notEqual(after.share, piece); assert.equal(after.epoch, 1);
+    // The old box's piece no longer fits: the mini cannot sign with it.
+    const old = JSON.parse(readFileSync(join(mini, 'device.json'), 'utf8'));
+    old.addr = `http://127.0.0.1:${b1.port}`; old.held.boxKey = b1.box.state.key;
+    const stale = tmp('kk-stale-');
+    (await import('node:fs')).writeFileSync(join(stale, 'device.json'), JSON.stringify(old));
+    await assert.rejects(cli(stale, 'sign', '{"content":"with the old box"}'), /bad_piece/);
+  } finally { await closeBox(b1); await closeBox(b2); }
+});
+
 test('with the box off, a computer that stays on helps the other devices sign', async () => {
   const dir = tmp('kk-box-');
   let b = await startBox({ dir, port: 0, log: () => {} });

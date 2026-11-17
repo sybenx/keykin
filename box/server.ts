@@ -105,7 +105,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
       if (!s) return html(res, 200, loginPage({ error: url.searchParams.has('e') ? (url.searchParams.get('e') === 'wait' ? 'Too many tries. Wait a minute.' : 'That is not the owner secret.') : undefined }));
       const first = box.qr(addr());
       if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0, where: whereIs }), nonce); }
-      return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, where: whereIs,
+      return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), boxKey: box.state.key, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, where: whereIs,
         door: { url: o.url, seen: sideSeen, side: o.sidePort !== undefined }, now: nowS() }));
     }
     if (method === 'GET' && path === '/admin/state') return s ? json(res, 200, { accounts: box.accounts().length }) : json(res, 401, { error: 'login' });

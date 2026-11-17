@@ -236,6 +236,8 @@ export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send,
   return (await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t))).revoked;
 }
 export async function revoke(me: Me, h: Held, grant: string, send: Send, t = now()) { await call(send, await seal({ op: 'revoke', account: h.npub, grant }, me.sk, t)); }
+/** Limits a grant to posting (`posts`): the box then signs only posts for it and gives it no message keys. `null` lifts the limit. */
+export async function limit(me: Me, h: Held, grant: string, to: 'posts' | null, send: Send, t = now()) { await call(send, await seal({ op: 'limit', account: h.npub, grant, to: to ?? null }, me.sk, t)); }
 
 // --- Things the account page started for a device to finish (SPEC 11.6) ----------------------------
 

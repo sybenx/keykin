@@ -35,6 +35,8 @@ export interface Account {
   grants?: Record<string, Grant[]>;
   /** Grants that were revoked. The box refuses any request naming one. */
   revoked?: string[];
+  /** Grants the person limited (SPEC 11.5): `posts` lets that site or app post and nothing else. */
+  limits?: Record<string, 'posts'>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
 }
@@ -59,6 +61,8 @@ const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creat
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
+/** What a grant limited to `posts` may still sign: notes, reposts, reactions, comments, zap requests, media posts, and site logins (NIP-42). */
+export const POST_KINDS = new Set([1, 6, 7, 16, 1111, 9734, 20, 21, 22, 22242]);
 
 export class Box {
   state: BoxState;
@@ -160,7 +164,11 @@ export class Box {
       if (EPOCH_OPS.has(body.op) && body.epoch !== s.epoch) {
         return { error: 'stale', epoch: s.epoch, commitment: s.commitment, catchups: s.catchups[from.key] ?? [] };
       }
-      if ((body.op === 'sign' || body.op === 'ecdh') && body.grant !== undefined && (s.revoked ?? []).includes(body.grant)) refuse('revoked');
+      if ((body.op === 'sign' || body.op === 'ecdh') && body.grant !== undefined) {
+        if ((s.revoked ?? []).includes(body.grant)) refuse('revoked');
+        // A grant limited to posting signs only posts, and gets no message keys: it cannot read messages.
+        if (s.limits?.[body.grant] === 'posts' && (body.op === 'ecdh' || !POST_KINDS.has(body.event?.kind))) refuse('not_allowed');
+      }
       switch (body.op) {
         case 'cycle': return this.#cycle(s, from, req, body);
         case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
@@ -204,6 +212,7 @@ export class Box {
           return { ok: true, revoked: clean.filter((g) => revoked.has(g.id)).map((g) => g.id) };
         }
         case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
+        case 'limit': this.limitGrant(s.npub, body.grant, body.to); return { ok: true };
         case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap }) => ({ id, kind, text, at, tap })) };
         case 'note_refuse': if (from.kind !== 'device' || !this.onNoteRefused(s.npub, body.note)) refuse('gone'); this.happened(s.npub, `${from.name} said No to a request from the account page`, now); return { ok: true };
         case 'note_done': {
@@ -263,6 +272,16 @@ export class Box {
     if (!r.includes(grant as string)) r.push(grant as string);
     if (r.length > 2000) r.splice(0, r.length - 2000);
     for (const k of Object.keys(s.grants ?? {})) s.grants![k] = s.grants![k].filter((g) => g.id !== grant);
+    if (s.limits) delete s.limits[grant as string];
+    this.#save();
+  }
+  /** Limits a grant to posting (`posts`), or lifts the limit (`null`). From a device or the account page. */
+  limitGrant(npub: string, grant: unknown, to: unknown) {
+    const s = this.state.accounts[npub] ?? refuse('unknown_account');
+    if (typeof grant !== 'string' || !/^[0-9a-f]{32}$/.test(grant) || (to !== 'posts' && to !== null)) refuse('bad_request');
+    const l = (s.limits ??= {});
+    if (to === 'posts') { l[grant as string] = 'posts'; if (Object.keys(l).length > 2000) delete l[Object.keys(l)[0]]; }
+    else delete l[grant as string];
     this.#save();
   }
   /** Saves after the page API changed something in the state (a password try count, say). */
@@ -456,10 +475,11 @@ export class Box {
 
   // --- The list -----------------------------------------------------------------------------
 
-  // Blocking is one press and anyone on the list may do it. Undoing it is the hard direction.
+  // Blocking is one press and anyone on the list may do it. Undoing it is the hard direction. Another box
+  // in the account (a backup, say) can be blocked and then cycled away like a device; this box cannot.
   #block(s: Account, key: string) {
     const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
-    if (m.kind === 'box') refuse('cannot_block_box');
+    if (m.key === this.state.key) refuse('cannot_block_box');
     m.blocked = true; m.blockedAt = Math.floor(Date.now() / 1000);
     delete s.welcomes[m.key];
     this.#save();

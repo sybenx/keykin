@@ -118,7 +118,7 @@ export function codePage(o: { qrText: string; csrf: string; nonce: string; logou
 }
 
 /** `door`: the public address if one is set, and when Keykin Login last reached the box (0 if never). */
-export function adminPage(o: { accounts: Account[]; requests: Ask[]; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number }) {
+export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number }) {
   const waiting = o.requests.filter((r) => r.state === 'waiting');
   const asks = `<div class="card"><h2>Waiting for your answer</h2>
   <p class="sub">${waiting.length ? 'Nothing is made until you approve.' : 'Nobody is asking for an account.'}</p>
@@ -136,10 +136,12 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; csrf: strin
 
   const accounts = o.accounts.map((a) => {
     const rows = [...a.members.filter((m) => m.kind === 'device'), ...a.members.filter((m) => m.kind === 'box')].map((m) => {
-      const act = m.kind === 'box' ? '' : `<form method="post" action="/admin/${m.blocked ? 'unblock' : 'block'}">${hidden(o.csrf, { key: m.key, account: a.npub })}
+      // Every row but this box's own has a button: another box in the account is blocked and cycled away like a device.
+      const self = m.key === o.boxKey;
+      const act = self ? '' : `<form method="post" action="/admin/${m.blocked ? 'unblock' : 'block'}">${hidden(o.csrf, { key: m.key, account: a.npub })}
       <button class="${m.blocked ? '' : 'danger'}" type="submit" aria-label="${m.blocked ? 'Unblock' : 'Block'} ${esc(m.name)}">${m.blocked ? 'Unblock' : 'Block'}</button></form>`;
-      return `<div class="item"><div class="who"><div class="name">${esc(m.name)}${m.kind === 'box' ? '<span class="tag">this box</span>' : ''}${m.blocked ? '<span class="tag bad">Blocked</span>' : ''}</div>
-      ${m.kind === 'box' ? '' : `<div class="dim small">Added ${day(m.added)}${!m.chip ? ' · no fingerprint key' : ''}</div>`}</div>${act}</div>`;
+      return `<div class="item"><div class="who"><div class="name">${esc(m.name)}${self ? '<span class="tag">this box</span>' : m.kind === 'box' ? '<span class="tag">another box</span>' : ''}${m.blocked ? '<span class="tag bad">Blocked</span>' : ''}</div>
+      ${self ? '' : `<div class="dim small">Added ${day(m.added)}${m.kind === 'device' && !m.chip ? ' · no fingerprint key' : ''}</div>`}</div>${act}</div>`;
     }).join('');
     return `<div class="card acct"><div class="acct-head"><h2>${a.login ? esc(a.login.username) : 'No username'}</h2><div class="mono small" title="${esc(npubEncode(a.npub))}">${esc(shortNpub(a.npub))}</div></div>
   ${rows}

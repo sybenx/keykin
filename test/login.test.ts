@@ -120,6 +120,11 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await D.addMember(phone, held, { key: laptop.key, name: 'MacBook', kind: 'device', chip: laptop.chip }, w.send);
     const lh = await D.join(laptop, held.boxKey, held.npub, w.send);
     await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    // A second box holds a piece too, as a backup. It collects its piece the way a box does, signing its own request.
+    const backup = newMemberKey();
+    await D.addMember(phone, held, { key: backup.key, name: 'Backup box', kind: 'box' }, w.send);
+    const { seal } = await import('../src/member.ts');
+    assert.equal((await w.send(await seal({ op: 'welcome', account: held.npub }, backup.sk, Math.floor(Date.now() / 1000)))).ok, true);
     const jumble = D.newGrant('site', 'https://jumble.social'), amethyst = D.newGrant('app', 'Amethyst');
     await D.reportGrants(laptop, lh, [jumble], w.send);
     await D.reportGrants(phone, held, [amethyst], w.send);
@@ -155,6 +160,10 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.click('nav >> text=Devices');
     await page.waitForSelector('text=Fingerprint key');
     await shot('devices');
+    // Every row has a button except the box this page belongs to.
+    assert.equal(await page.locator('button[aria-label="Block Backup box"]').count(), 1);
+    assert.equal(await page.locator('button[aria-label="Block Box"]').count(), 0);
+    await page.waitForSelector('text=Another box');
     page.once('dialog', (d) => d.accept());
     await page.click('button[aria-label="Block MacBook"]');
     await page.waitForSelector('text=MacBook is blocked.');
@@ -190,6 +199,16 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.click('nav >> text=Sites and apps');
     await page.waitForSelector('text=App on Pixel 9a');
     await shot('sites');
+    // Posts only: the site may still post, and nothing else.
+    await page.check('input[aria-label="Posts only for https://jumble.social"]');
+    await page.waitForSelector('text=jumble.social can only post now.');
+    assert.ok(await page.isChecked('input[aria-label="Posts only for https://jumble.social"]'));
+    const follows = { pubkey: held.npub, created_at: 1700000000, kind: 3, tags: [['p', 'a'.repeat(64)]], content: '' };
+    await assert.rejects(D.signEvent(work, wh, follows, w.send, undefined, jumble.id), /not_allowed/);
+    assert.ok(verifyEvent(await D.signEvent(work, wh, note(held.npub), w.send, undefined, jumble.id)));
+    await page.uncheck('input[aria-label="Posts only for https://jumble.social"]');
+    await page.waitForSelector('text=jumble.social can do everything again.');
+    assert.ok(verifyEvent(await D.signEvent(work, wh, follows, w.send, undefined, jumble.id)));
     await page.click('button[aria-label="Revoke Amethyst"]');
     await page.waitForSelector('text=Amethyst is revoked.');
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);

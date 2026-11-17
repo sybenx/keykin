@@ -76,6 +76,12 @@ export class PageApi {
           const g = Object.values(a.grants ?? {}).flat().find((x) => x.id === body.grant);
           this.box.revokeGrant(a.npub, body.grant); this.box.happened(a.npub, `${g?.name ?? 'A sign-in'} was revoked from the account page`, now); return { ok: true };
         }
+        case 'limit': {
+          const g = Object.values(a.grants ?? {}).flat().find((x) => x.id === body.grant) ?? refuse('gone');
+          this.box.limitGrant(a.npub, body.grant, body.to ?? null);
+          this.box.happened(a.npub, body.to === 'posts' ? `${g.name} was limited to posting from the account page` : `${g.name} may do everything again, from the account page`, now);
+          return { ok: true };
+        }
         case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
         case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
         case 'logout': this.#sessions.delete(body.session); return { ok: true };
@@ -151,7 +157,7 @@ export class PageApi {
       npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key,
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
-      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, device: key, deviceName: name(key) }))),
+      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, device: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null }))),
     };
   }
 }

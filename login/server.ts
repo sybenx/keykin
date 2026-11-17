@@ -22,7 +22,7 @@ const FILES: Record<string, [string, string]> = {
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.
-const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'note_put', 'note_get']);
+const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'note_put', 'note_get']);
 const OPEN = new Set(['pw_salt', 'pw_login', 'login_start', 'login_wait']);
 const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180;
 const PER_MINUTE = 240;          // requests from one address, both paths together

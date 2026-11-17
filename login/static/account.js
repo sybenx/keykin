@@ -127,7 +127,7 @@
   const link = (text, to) => el('button', { className: 'go-link linkish', on: { click: () => go(to) } }, text);
 
   function draw() {
-    const devices = me.devices.filter((d) => d.kind === 'device'), blocked = devices.filter((d) => d.blocked), can = devices.filter((d) => !d.blocked);
+    const devices = me.devices.filter((d) => d.kind === 'device'), blocked = me.devices.filter((d) => d.blocked), can = devices.filter((d) => !d.blocked);
     const name = me.username ?? me.npubText.slice(0, 12) + '…';
     const sections = {
       home: () => {
@@ -156,10 +156,11 @@
         el('div', { className: 'card rows' }, [...devices, ...me.devices.filter((d) => d.kind === 'box')].map((d) => el('div', { className: 'row' },
           el('div', { className: 'grow' },
             el('div', { className: 'name' }, d.name, d.blocked ? el('span', { className: 'tag bad' }, 'Blocked') : null),
-            el('div', { className: 'detail' }, d.kind === 'box' ? 'Always on · cannot be blocked here'
+            el('div', { className: 'detail' }, d.key === me.boxKey ? 'Always on · cannot be blocked here'
               : d.blocked ? `Blocked${d.blockedAt ? ' ' + day(d.blockedAt) : ''}. It can no longer sign.`
+              : d.kind === 'box' ? `Another box · added ${day(d.added)}`
               : [d.fingerprint ? 'Fingerprint key' : 'No fingerprint key', `added ${day(d.added)}`, d.last ? `signed ${ago(d.last)}` : 'has not signed yet'].join(' · '))),
-          d.kind !== 'device' ? null : d.blocked
+          d.key === me.boxKey ? null : d.blocked
             ? el('button', { className: 'btn', ariaLabel: `Unblock ${d.name}`, on: { click: (e) => act(e.currentTarget, 'unblock', { key: d.key }, `${d.name} is unblocked.`) } }, 'Unblock')
             : el('button', { className: 'btn danger', ariaLabel: `Block ${d.name}`, on: { click: (e) => { if (confirm(`Block ${d.name}? It will not be able to sign until it is unblocked.`)) act(e.currentTarget, 'block', { key: d.key }, `${d.name} is blocked.`); } } }, 'Block')))),
         el('div', { className: 'grid2' },
@@ -175,6 +176,9 @@
         el('div', { className: 'card rows' }, me.grants.length ? me.grants.map((g) => el('div', { className: 'row' },
           el('div', { className: 'grow' }, el('div', { className: 'name' }, g.name.replace(/^https?:\/\//, '')),
             el('div', { className: 'detail' }, [g.kind === 'site' ? `Site · through ${g.deviceName}` : `App on ${g.deviceName}`, `since ${day(g.since)}`, g.last ? `last used ${ago(g.last)}` : 'not used yet'].join(' · '))),
+          el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
+            el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
+              e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),
           el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${g.name.replace(/^https?:\/\//, '')} is revoked.`) } }, 'Revoke')))
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         card(el('h2', {}, 'Sign in to a site'), el('div', { className: 'sub' }, 'No extension needed. The site gets access of its own, which you can revoke above. It works while one of your devices can answer.'),

@@ -391,3 +391,82 @@ test('moving an account to another box: same npub, the key never whole, the old 
   assert.equal(newW.box.accounts().length, 2);
   await assert.rejects(D.transferToBox(phone, held, newW.send, target, newW.send, NOW), /bad_code|already_listed|bad_member/);
 });
+
+test('removing a box: another box in the account is blocked and cycled away like a device; this box cannot be', async () => {
+  const { box, send, call } = world();
+  const { adminPage } = await import('../box/page.ts');
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  // A second box joins the account as a backup and collects its piece, as a box does: it signs its own request.
+  const backup = new Box();
+  await D.addMember(phone, held, { key: backup.state.key, name: 'Backup box', kind: 'box' }, send, NOW);
+  const fetched = box.handle(await seal({ op: 'welcome', account: held.npub }, backup.state.sk, NOW), NOW);
+  assert.equal(fetched.ok, true);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+
+  // Only the box answering has no Block button, on the admin page and on the account page's list.
+  const html = adminPage({ accounts: box.accounts(), requests: [], boxKey: box.state.key, csrf: 'x', logout: false, where: { host: 'box', behindLogin: true }, door: { seen: 0, side: false }, now: NOW });
+  assert.match(html, /aria-label="Block Backup box"/); assert.doesNotMatch(html, /aria-label="Block Box"/);
+  assert.match(html, /another box/);
+  assert.equal(call({ call: 'me', session }).boxKey, box.state.key);
+  // This box still cannot be blocked, by a device, the page or the admin.
+  await assert.rejects(D.block(phone, box.state.key, send, NOW, held.npub), /cannot_block_box/);
+  assert.deepEqual(call({ call: 'block', session, key: box.state.key }), { error: 'cannot_block_box' });
+  assert.throws(() => box.ownerBlock(box.state.key), /cannot_block_box/);
+  // The other box can: one press, then a cycle removes it for good and its piece stops fitting.
+  await D.block(phone, backup.state.key, send, NOW, held.npub);
+  assert.equal(box.handle(await seal({ op: 'members', account: held.npub }, backup.state.sk, NOW), NOW).error, 'blocked');
+  await D.cycle(phone, held, send, NOW);
+  assert.deepEqual(box.only()!.members.map((m) => [m.name, m.kind]), [['Phone', 'device'], ['Box', 'box']]);
+  assert.equal(box.handle(await seal({ op: 'members', account: held.npub }, backup.state.sk, NOW), NOW).error, 'unknown_member');
+  assert.ok(valid(await D.signEvent(phone, held, note(held.npub), send, NOW)));
+  // Unblocking a box is the same as a device's: the admin, or the page, may.
+  const spare = new Box();
+  await D.addMember(phone, held, { key: spare.state.key, name: 'Spare box', kind: 'box' }, send, NOW);
+  assert.deepEqual(call({ call: 'block', session, key: spare.state.key }), { ok: true });
+  assert.deepEqual(call({ call: 'unblock', session, key: spare.state.key }), { ok: true });
+  assert.equal(box.only()!.members.find((m) => m.name === 'Spare box')!.blocked, false);
+});
+
+test('per-site limits: a grant limited to posting signs posts only and gets no message keys', async () => {
+  const { box, send, call } = world();
+  const phone = device('Phone'), laptop = device('Laptop');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.addMember(phone, held, { key: laptop.key, name: 'Laptop', kind: 'device', chip: laptop.chip }, send, NOW);
+  const lh = await D.join(laptop, held.boxKey, held.npub, send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const site = D.newGrant('site', 'https://jumble.social', NOW), app = D.newGrant('app', 'Amethyst', NOW);
+  await D.reportGrants(laptop, lh, [site], send, NOW);
+  await D.reportGrants(phone, held, [app], send, NOW);
+  const ev = (kind: number, tags: string[][] = [], content = 'x') => ({ pubkey: held.npub, created_at: NOW, kind, tags, content });
+  const limits = () => Object.fromEntries(call({ call: 'me', session }).grants.map((g: any) => [g.name, g.limit]));
+  assert.deepEqual(limits(), { 'https://jumble.social': null, Amethyst: null });
+
+  // Set from the account page.
+  assert.deepEqual(call({ call: 'limit', session, grant: site.id, to: 'posts' }), { ok: true });
+  assert.deepEqual(limits(), { 'https://jumble.social': 'posts', Amethyst: null });
+  for (const k of [1, 6, 7, 16, 1111, 9734, 20, 21, 22, 22242]) assert.ok(valid(await D.signEvent(laptop, lh, ev(k, [['e', 'a'.repeat(64)]]), send, NOW, site.id)), `kind ${k}`);
+  for (const k of [0, 3, 4, 5, 9735, 10002, 30023]) await assert.rejects(D.signEvent(laptop, lh, ev(k, [['p', 'a'.repeat(64)]], '{"name":"x"}'), send, NOW, site.id), /not_allowed/, `kind ${k}`);
+  await assert.rejects(D.nip44Encrypt(laptop, lh, held.npub, 'can it read?', send, NOW, site.id), /not_allowed/);
+  // Only that grant: another one, and the person's own use, are untouched, on any device.
+  assert.ok(valid(await D.signEvent(phone, held, ev(0, [], '{"name":"Aaron"}'), send, NOW, app.id)));
+  assert.ok(valid(await D.signEvent(laptop, lh, ev(3, [['p', 'a'.repeat(64)]]), send, NOW)));
+  await D.nip44Encrypt(laptop, lh, held.npub, 'mine', send, NOW);
+  await assert.rejects(D.signEvent(phone, held, ev(3, [['p', 'a'.repeat(64)]]), send, NOW, site.id), /not_allowed/);
+
+  // Lifted from a device, and set again from a device.
+  await D.limit(phone, held, site.id, null, send, NOW);
+  assert.ok(valid(await D.signEvent(laptop, lh, ev(3, [['p', 'a'.repeat(64)]]), send, NOW, site.id)));
+  await D.limit(laptop, lh, app.id, 'posts', send, NOW);
+  await assert.rejects(D.nip44Decrypt(phone, held, held.npub, 'x', send, NOW, app.id), /not_allowed/);
+  assert.deepEqual(limits(), { 'https://jumble.social': null, Amethyst: 'posts' });
+  assert.ok(call({ call: 'me', session }).log.some((l: any) => /jumble.social was limited to posting/.test(l.text)));
+  // Bad requests, and a grant the page does not know.
+  await assert.rejects(D.limit(phone, held, app.id, 'everything' as any, send, NOW), /bad_request/);
+  assert.deepEqual(call({ call: 'limit', session, grant: 'f'.repeat(32), to: 'posts' }), { error: 'gone' });
+  // Revoking takes the limit with it.
+  call({ call: 'revoke', session, grant: app.id });
+  assert.equal(box.only()!.limits![app.id], undefined);
+});

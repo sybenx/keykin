@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.8, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.9, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -103,15 +103,20 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `caught_up` | Any unblocked member | No | Says it has applied the changes left for it |
 | `address` | Any unblocked member | No | Says where this device listens for other devices (section 8g) |
 | `login` | An unblocked device | **Yes** | Logs a browser in to the box's page (section 6a) |
-| `block` | Any unblocked member | No | Blocks a device. One press |
+| `block` | Any unblocked member | No | Blocks a device, or another box in the account. One press |
 | `unblock` | An unblocked device | **Yes** | Unblocks a device |
 | `add` | An unblocked device | **Yes** | Adds a device or a box, and makes the box's half of its piece |
 | `welcome_put` | The device that did the `add` | No | Leaves the device's half for the newcomer |
 | `welcome` | The newcomer | No | Collects both halves |
 | `reveal` | An unblocked device | **Yes** | Hands the box's piece to that device, sealed |
+| `grants`, `revoke`, `limit` | Any unblocked member | No | What is signed in, and ending or limiting it (section 11.5) |
 
-A blocked member is refused everything. A box cannot be blocked through this endpoint and a box
-may not ask for a signature.
+A blocked member is refused everything. A box may not ask for a signature.
+
+**Removing a box.** An account can hold a second box, as a backup. Any member can block it like a
+device, and cycling the keys afterwards (section 8f) drops it for good. The box answering a request
+cannot be blocked through it (`cannot_block_box`), whoever asks: the admin, the account page or a
+device.
 
 `sign`, `ecdh`, `add`, `reveal` and `cycle` carry the device's `epoch`. If it is behind, the box
 answers `stale` with the changes that device missed, and the device applies them and asks again.
@@ -131,9 +136,9 @@ It is never on the public side.
   page cannot be reached any other way, such as behind an Umbrel app's login.
 - **An empty box** shows the first setup code straight away.
 - **Waiting requests** (section 11.4), each with Approve and Refuse.
-- **Every account:** its npub, its username if it has one, and its devices with Block and
-  Unblock. Unblock here needs no device: it is the admin's own power, and the way back when a
-  thief blocks every other device first.
+- **Every account:** its npub, its username if it has one, and its devices and boxes with Block
+  and Unblock. Every row has a button except this box's own. Unblock here needs no device: it is
+  the admin's own power, and the way back when a thief blocks every other device first.
 - **Remove an account**, behind a tick box. It deletes the box's piece.
 - **Make a setup code** for one new account: a request approved in advance, good for 24 hours.
 - Every button carries a per-session token.
@@ -204,12 +209,33 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Every signature and every shared secret still goes through the box, so blocking the device
   stops every site it serves.
 - The relay is whichever one the device is told to use. A site must be able to reach it.
+- **A site that shows a code.** `nostrconnect://<site key>?relay=<relay>&secret=<secret>`, with
+  optional `name` and `url`, and possibly several `relay`s. The signer lets the site's key in at once,
+  as a grant named by the `url`'s origin (else `name`), listens on the code's relays as well as its
+  own, and sends the answer the site waits for: a kind 24133 event to the site whose content is
+  `{ id, result: <secret> }`, NIP-44 encrypted like any answer. At most five relays are used, `ws://`
+  or `wss://`. A code with no relay, no secret or a site key that is not 64 hex is refused
+  (`bad_code`).
+- Each answer goes back on the relay its request came in on.
+- Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
+  forgets the site and answers `not_connected` from then on.
 
 ## 8d. The command-line device
 
-`cli/keykin.ts` makes a computer a device: `create`, `invite`, `add`, `join`, `status`, `sign`,
-`block`, `unblock`, `bunker`, `nsec`. Its state is one file, `~/.keykin/device.json`, readable
-only by its owner. The piece in it is not encrypted.
+`cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `add`,
+`join`, `status`, `sign`, `block`, `unblock`, `cycle`, `serve`, `agent`, `bunker`, `scan`, `sites`,
+`signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
+readable only by its owner. The piece in it is not encrypted.
+
+- `keykin agent <relay>` stays on and does what the account page asks (section 11.6): it adds a
+  device, hands out a bunker link, becomes the signer for a pasted `nostrconnect://` code, and asks
+  Yes or No at the keyboard before removing blocked devices (with nobody there, the answer is No).
+- `keykin transfer '<setup code of the new box>'` moves the account to another box (section 11.4).
+  The old box is the one the device uses now. It saves the new address and box key and prints a
+  join text for the other devices.
+- `keykin moved '<join text>'`, on each other device of the account, switches its saved address
+  and box key to the new box. It checks that the join text is for this account and that the box at
+  that address has that key. The piece is not touched: it catches up on the next request (`stale`).
 
 ## 8e. The Android app
 
@@ -256,7 +282,8 @@ keeps the list it last saw at the box, and answers `sign` and `ecdh` for unblock
 same epoch. Other devices keep those addresses and try them when the box cannot be reached. Only
 signing and message keys work this way. Everything else needs the box.
 
-A block made while the box is off does not reach a helper until the box is back.
+A block made while the box is off does not reach a helper until the box is back. A helper does not
+check grants at all: a revoke or a limit (section 11.5) is kept only by the box.
 
 ## 8h. The browser extension
 
@@ -265,7 +292,13 @@ A block made while the box is off does not reach a helper until the box is back.
 
 - Set up by pasting the box's code, or by showing this browser's invite and pasting the join text.
 - Each site is asked about once, in a small window. After Allow it is answered with no further
-  questions until it is signed out in the extension's window.
+  questions until it is signed out in the extension's window, or revoked on the account page.
+- **Each allowed site is a grant** (section 11.5), named by its origin. Allowing a site makes one and
+  reports the whole list; signing out removes it and reports again. Every `signEvent` and message
+  key for that site names its grant. When the box answers `revoked`, that request fails ("This site
+  was signed out from your account page.") and the site is forgotten, so its next request asks
+  again. The list is also reported each time the extension's window opens, which picks up revokes.
+- A site limited to posting on the account page gets "This site may only post." for anything else.
 - **A browser has no chip key.** So it cannot add devices, unblock, cycle or form the whole key.
   Those are done from a phone.
 - Its piece is kept in the browser's extension storage, not encrypted.
@@ -428,13 +461,26 @@ being whole. The account keeps its npub and its devices.
 2. The device sends the new box `{ op: "transfer1", request }`. The answer is a signed
    `welcome` request, made by the new box for the old one.
 3. The device hands that to the old box and gets back the two halves of the new box's piece.
-4. The device sends the new box `{ op: "transfer2", request, welcome, account: { npub,
-   commitment, epoch, next, members } }` with a fingerprint. The new box builds its piece, checks
-   it against the commitment, and stores the account with the old box left out of the list.
+4. The device sends the new box `{ op: "transfer2", request, welcome, oldBox, members, next }`,
+   where `welcome` is the old box's answer from step 3, `oldBox` the old box's member key, and
+   `members` and `next` the list as the old box gives it. The new box builds its piece, checks it
+   against the commitment, and stores the account with the old box left out of the list and itself
+   in its place. The device must be an unblocked device on that list.
 5. The device cycles the keys on the new box (section 8f). The old box gets no change, so its
-   piece stops fitting. Other devices are told the new address with a join text.
+   piece stops fitting. Other devices are told the new address with a join text,
+   `{ keykin: 2, join: { addr, boxKey, npub } }` naming the new box, and switch to it ("moved"):
+   each checks the npub and that the box at `addr` reports `boxKey` in `members`, then uses it. Its
+   piece catches up on its next request there (`stale`).
 
-**Built:** asking, waiting, approving and making, on the box, the admin page and both device cores. **Transferring is not built.** No app has a screen for asking yet.
+The fingerprint is asked twice: for adding the new box on the old one (step 1) and for the cycle
+(step 5). `transfer1` and `transfer2` themselves carry none; the approved request is what lets them
+in. A device that was behind on the old box (it missed a cycle there) cannot catch up on the new
+one: it has to be removed and added again as a new device.
+
+**Built:** asking, waiting, approving and making, on the box, the admin page and both device cores.
+Transferring (`transfer1`, `transfer2`) on the box, `transferToBox` and "moved" in both device
+cores, and `keykin transfer` / `keykin moved` on the command line. No app has a screen for asking
+or moving yet.
 
 ### 11.5 What is signed in, and revoking it
 
@@ -454,7 +500,25 @@ each device tells the box what it has let in.
   let the site in is offline.
 - The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
 
-**Built:** the box, the account page, and `reportGrants` / `revoke` / the `grant` field in both device cores. The command-line signer reports each site it signs in and names it when signing. **Not wired:** the Android app and the extension.
+**Limiting a grant to posting.** The person can let a site or app post and do nothing else.
+
+- `{ op: "limit", account, grant, to: "posts" }` from any device sets it, and `to: null` lifts it.
+  The account page's call is `limit { grant, to }`, for a grant on its list (`gone` otherwise).
+  Neither needs a fingerprint: limiting takes power away, and a device can always sign for itself
+  without naming a grant.
+- The box keeps the limits per account. For a `sign` naming a limited grant it allows only kinds
+  1, 6, 7, 16, 1111, 9734, 20, 21, 22 and 22242 (notes, reposts, reactions, comments, zap
+  requests, media posts and relay logins) and answers `not_allowed` to anything else, so a profile,
+  a follow list, a delete or a zap receipt (9735) is refused. It answers `not_allowed` to every
+  `ecdh` naming it: a limited site cannot read or write messages.
+- Revoking a grant removes its limit too.
+- The page's `me` view gives each grant's `limit`: `"posts"` or `null`.
+
+**Built:** the box, the account page (a "Posts only" switch on each row of Sites and apps), and
+`reportGrants` / `revoke` / `limit` / the `grant` field in both device cores. The command-line
+signer and the browser extension report each site they let in and name it on every request. The
+Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. **Not wired:** the
+Android app does not report its grants to the box yet.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -477,7 +541,7 @@ happen differently:
 |---|---|---|
 | See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
 | Block and unblock a device | Become a site's signer (`nostrconnect` note) | |
-| Revoke a grant | Hand out a `bunker://` link (`bunker` note) | |
+| Revoke a grant, or limit it to posting (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
 | Set, change or clear the password (`pw_set`, `pw_clear`) | | |
 | End its own session, or all page sessions | | |
 
@@ -520,7 +584,7 @@ Kotlin core are the test both sides use.
 the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
 last used. The page shows them.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers notes with `keykin agent <relay>` (`invite`, `bunker`, `cycle`; not `nostrconnect`) and reports the sites it signs in as grants. **Not wired:** the phone app does not look for notes or report grants yet.
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). **Not wired:** the phone app does not look for notes or report grants yet.
 
 ## 9. Not built yet
 
@@ -535,10 +599,11 @@ last used. The page shows them.
 - **The camera scan on a real phone.** The scanner is wired in but was only exercised through
   pasted and intent-fed codes on an emulator.
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
-- **Per-site limits.** A site that is allowed can ask for any signature.
-- **Removing a box.** A device is removed by blocking it and cycling; a box cannot be blocked.
-- **Transferring an account between boxes** (section 11.4).
-- **Apps answering the account page's notes, and reporting grants** (sections 11.5 and 11.6).
+- **The Android app answering the account page's notes, and reporting grants** (sections 11.5 and
+  11.6). The Kotlin core has the calls; the app does not use them yet.
+- **Screens for moving an account to another box.** Built in the device cores and on the command
+  line only.
+- **Limits other than posting only.** A grant is either limited to posts or not limited.
 - **Paper backup and undo.** Not decided.
 - **QRST sign-in to the account page.** It signs in by Keykin's own device login or a password.
 - **Firefox and Safari.** The extension is Chromium only.

@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.5, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.6, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -133,7 +133,7 @@ untouched, and `POST /api`, the account page's calls (section 11.6).
   reply. A session sent in a request body is ignored.
 - `/api` needs a header only a page from the same origin can send, so another site cannot make
   the calls for someone.
-- It allows a fixed list of calls. None can sign, add a device, unblock one or form the key.
+- It allows a fixed list of calls (section 11.6). None hands over a key, a piece or a signature.
 - It limits each address to 240 requests a minute.
 
 The account page has six sections: Home, Devices, Signed in, Sign in to a site, Security and
@@ -359,7 +359,10 @@ They live on the box, per account. The box never sees the password.
 - **Limits on guessing:** five wrong tries for one username lock it for 15 minutes, doubling each
   time up to 24 hours; a right password clears the count. Across all usernames the box takes at
   most 30 tries a minute.
-- **What a password is worth:** only what section 11.6 lists as needing no device.
+- **The page can set it too:** `pw_set { username, salt, check }` with a page session, and
+  `pw_clear`. The page's own script computes the verifier.
+- **What a password is worth:** the whole account (section 11.6). The limits on guessing are
+  what stands between a guesser and that.
 
 **Built:** the box, both device cores (`passwordSet`), and the account page's sign-in. No app has a screen for setting it yet.
 
@@ -425,7 +428,7 @@ each device tells the box what it has let in.
   let the site in is offline.
 - The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
 
-**Built:** the box, the account page, and `reportGrants` / `revoke` / the `grant` field in both device cores. **Not wired:** the command-line bunker, the Android app and the extension do not report their grants or name them yet, so the account page lists nothing for them.
+**Built:** the box, the account page, and `reportGrants` / `revoke` / the `grant` field in both device cores. The command-line signer reports each site it signs in and names it when signing. **Not wired:** the Android app and the extension.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -438,35 +441,60 @@ box and nothing else: device requests (`POST /keykin`, unchanged), and the page'
 - by password (section 11.3), or
 - by a device: the page shows `{ keykin: 2, login: { addr, key, code } }`, a device sends
   `{ op: "login", account, code }` with a fingerprint, and the page's next `login_wait { code }`
-  returns the session. (Section 6a, now per account.)
+  returns the session.
 
-Both give the same session. **How someone logged in never widens what the page can do.**
+**A page session has the person's authority, however it was made** (Aaron, 2026-11-17: "the
+password *is* the auth"). The page still holds no piece of the key, so two kinds of thing
+happen differently:
 
-| The page may, with a session alone | Needs a device's fingerprint |
-|---|---|
-| See devices, grants and the account's npub | Add a device |
-| Block a device | Unblock a device |
-| Revoke a grant | Sign anything, or make a message key |
-| End its own session, or all page sessions | Cycle the keys |
-| | Form the whole key |
-| | Set, change or clear the password |
+| The box does it at once | A device does it, with no prompt | A device asks Yes or No first |
+|---|---|---|
+| See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
+| Block and unblock a device | Become a site's signer (`nostrconnect` note) | |
+| Revoke a grant | Hand out a `bunker://` link (`bunker` note) | |
+| Set, change or clear the password (`pw_set`, `pw_clear`) | | |
+| End its own session, or all page sessions | | |
 
-Everything in the left column only ever reduces access.
+Forming the whole key is not offered on the page at all: it would put the key in a browser. It
+stays in the app.
 
-**Things the page starts and a device finishes.** The page can leave a note for the account's
-devices, and a device that sees it asks the person and does it with a fingerprint:
+**The tap.** For the hard-to-undo things a device shows what is asked and the person presses
+Yes or No. No fingerprint and no typing. No pushes the request away and ends the page session
+that asked. The hard-to-undo things are:
 
-- `{ op: "notes", account }` from a device returns the waiting notes.
-- A note is `{ id, kind, text, at }`. `kind` is `nostrconnect` (a `nostrconnect://` code the
-  person pasted into the page: the device becomes that site's signer), `invite` (a new device's
-  invite text: the device adds it) or `bunker` (asking for a `bunker://` link: the device makes
-  one and answers).
-- A device answers with `{ op: "note_done", account, note, result }`. For `bunker` the result
-  is the link, which the page then shows.
-- Notes last 10 minutes. A `bunker://` or `nostrconnect://` sign-in made this way is a grant
-  (section 11.5) on the device that answered, and works while that device can be reached.
+- removing blocked devices for good (cycling), and forming the whole key;
+- signing an event that asks relays to erase the account (kind 62);
+- signing a delete of five or more posts at once (kind 5 with five or more `e` or `a` tags);
+- signing an empty profile (kind 0 with no name, about or picture) or an empty follow list
+  (kind 3 with no `p` tag).
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. **Not wired:** no app looks for notes yet, so a pasted `nostrconnect://` code, an invite or a request for a `bunker://` link waits until one does.
+For the three kinds of event, the device sends `"tapped": true` with `sign` once the person
+said Yes. Without it the box answers `needs_tap`. `src/destructive.ts` and `Destructive` in the
+Kotlin core are the test both sides use.
+
+**Notes: things the page starts and a device finishes.**
+
+- The page leaves a note: `note_put { kind, text }`. `kind` is `invite` (the text is a new
+  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
+  `cycle` (no text).
+- `{ op: "notes", account }` from a device returns the waiting ones, each
+  `{ id, kind, text, at, tap }`. `tap` is true only for `cycle`.
+- The device does it and answers `{ op: "note_done", account, note, result }`. The result is
+  the join text for `invite`, the link for `bunker`, and `ok` for the others.
+- For `invite` and `cycle` the device sends the usual `add` or `cycle` with `"note": "<id>"`
+  in place of the fingerprint. The box accepts that only while the note is waiting, and for
+  `invite` only for the device the note names.
+- After a No, the device sends `{ op: "note_refuse", account, note }`.
+- Notes last 10 minutes. If no device of the account is online, nothing happens: the public
+  side has no piece and gets none.
+- A sign-in made this way is a grant (section 11.5) on the device that answered, and works
+  while that device can be reached.
+
+**Recent activity.** The box keeps the last 60 things that happened to an account (sign-ins to
+the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
+last used. The page shows them.
+
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers notes with `keykin agent <relay>` (`invite`, `bunker`, `cycle`; not `nostrconnect`) and reports the sites it signs in as grants. **Not wired:** the phone app does not look for notes or report grants yet.
 
 ## 9. Not built yet
 
@@ -496,6 +524,9 @@ devices, and a device that sees it asks the person and does it with a fingerprin
 ## 10. Known weak spots
 
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
+- **A password is now worth the whole account.** Whoever has it can add a device of their own, and from
+  then on sign anything. What stands in the way is the guessing limit, and the admin's block and remove.
+- The box cannot check that a device really asked before a hard-to-undo signature. It takes the device's word.
 - Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and
   keep a username locked by guessing wrong. None of that reaches a key, but it can be a nuisance.
 - The side port and, behind another login, the admin page trust the network they are on. On an Umbrel,

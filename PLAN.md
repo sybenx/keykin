@@ -35,9 +35,16 @@ In the style of Google's account page: clear sections, plenty of options, nothin
   username and password.
 - **What it shows and does:** devices, what is signed in (sites and apps), revoke, block a
   device, backup options, undo, add a device, sign in to sites.
-- **Rule for powers:** anything that signs, adds a device, unblocks, or forms the whole key
-  needs a device's fingerprint, however the person logged in to the page. A password alone can
-  look, block, revoke and sign out. Those only ever reduce access.
+- **Rule for powers (changed later on 2026-11-17):** a page session has the person's
+  authority, however it was made. "The password *is* the auth." Only really destructive,
+  hard-to-undo changes need a tap on a device: a Yes or No on a notification, no fingerprint.
+  Those are forming the whole key, removing blocked devices for good, a vanish request, a mass
+  delete, and emptying the profile or follow list. No ends that browser's session.
+- **The case this is for:** phone left at home but online, he signs in to the account page from
+  a work PC with username and password, and uses Nostr there. The phone answers in the
+  background with no prompt.
+- **Still true:** the public side holds no piece, so a device must be online for each
+  signature. Undo and veto stay with the box admin.
 
 ## Keykin Box: the admin page
 

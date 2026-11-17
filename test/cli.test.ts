@@ -10,6 +10,7 @@ import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { startBox } from '../box/server.ts';
 import { main } from '../cli/keykin.ts';
+import * as D from '../src/device.ts';
 import * as nip19 from 'nostr-tools/nip19';
 
 const tmp = (n: string) => mkdtempSync(join(tmpdir(), n));
@@ -88,6 +89,58 @@ test('with the box off, a computer that stays on helps the other devices sign', 
     assert.ok(verifyEvent(JSON.parse((await cli(mini, 'sign', '{"content":"box is back"}')).text)));
     assert.match((await cli(mini, 'status')).text, /Old laptop  BLOCKED/);
   } finally { helper?.close(); await closeBox(b); }
+});
+
+test('the agent: a computer left on does what the account page asks, and its sites show up there', { skip: spawnSync('which', ['nak']).status !== 0 && 'nak is not installed', timeout: 60_000 }, async () => {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const relayProc = spawn('nak', ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { stdio: 'ignore' });
+  const relay = `ws://127.0.0.1:${port}`;
+  const b = await startBox({ dir: tmp('kk-box-'), port: 0, log: () => {} });
+  let agent: any, site: BunkerSigner | undefined;
+  try {
+    for (let k = 0; k < 50; k++) {
+      try { const w = new WebSocket(relay); await new Promise((ok, no) => { w.onopen = ok; w.onerror = no; }); w.close(); break; }
+      catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    const home = tmp('kk-mac-'), now = () => Math.floor(Date.now() / 1000);
+    const npub = /([0-9a-f]{64})/.exec((await cli(home, 'create', b.qr()!, 'MacBook')).text)![1];
+    // The person sets a password and signs in to the account page somewhere else.
+    b.box.setLogin(npub, 'aaron', 'a'.repeat(32), D.passwordCheck(await D.passwordVerifier('pw pw pw pw', 'a'.repeat(32))));
+    const session = b.page.call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw pw', 'a'.repeat(32)) }, now()).session;
+    agent = (await cli(home, 'agent', relay)).run;
+
+    // "Ask my phone for a link": the agent answers, and a site signs in with the link.
+    const { note: id } = b.page.call({ call: 'note_put', session, kind: 'bunker', text: '' }, now());
+    await agent.tick();
+    const link = b.page.call({ call: 'note_get', session, note: id }, now()).result;
+    assert.match(link, /^bunker:\/\//);
+    const siteKey = generateSecretKey();
+    site = BunkerSigner.fromBunker(siteKey, (await parseBunkerInput(link))!);
+    await site.connect();
+    await agent.tick();                       // the site is reported to the box
+    assert.ok(verifyEvent(await site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'from a work PC' })));
+    // The account page now lists that site, and when it was last used.
+    let me = b.page.call({ call: 'me', session }, now());
+    assert.equal(me.grants.length, 1); assert.match(me.grants[0].name, /^A site \(/); assert.equal(me.grants[0].deviceName, 'MacBook'); assert.ok(me.grants[0].last);
+    // Revoked there: the site is refused at once, and the agent forgets it.
+    b.page.call({ call: 'revoke', session, grant: me.grants[0].id }, now());
+    await assert.rejects(site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'after the revoke' }), /revoked/);
+    await agent.tick();
+    assert.match((await cli(home, 'sites')).text, /No site is signed in/);
+
+    // "Add a device" from the page: the agent adds it with nobody at the keyboard.
+    const pc = tmp('kk-pc-');
+    const { note: id2 } = b.page.call({ call: 'note_put', session, kind: 'invite', text: (await cli(pc, 'invite', 'Work PC')).text }, now());
+    await agent.tick();
+    await cli(pc, 'join', b.page.call({ call: 'note_get', session, note: id2 }, now()).result);
+    assert.ok(verifyEvent(JSON.parse((await cli(pc, 'sign', '{"content":"hi from the work PC"}')).text)));
+    // Removing blocked devices asks for a Yes. Nobody is at this keyboard, so it is No, and that browser is signed out.
+    b.page.call({ call: 'block', session, key: b.box.only()!.members.find((m) => m.name === 'Work PC')!.key }, now());
+    b.page.call({ call: 'note_put', session, kind: 'cycle', text: '' }, now());
+    await agent.tick();
+    assert.deepEqual(b.page.call({ call: 'me', session }, now()), { error: 'login' });
+    assert.equal(b.box.only()!.epoch, 0);
+  } finally { await site?.close(); agent?.close(); await closeBox(b); relayProc.kill(); }
 });
 
 test('a site signs in through the remote signer over a relay', { skip: spawnSync('which', ['nak']).status !== 0 && 'nak is not installed' }, async () => {

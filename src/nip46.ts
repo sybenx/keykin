@@ -16,13 +16,15 @@ export interface BunkerState {
   tickets?: { t: string; expires: number; origin?: string }[];
   /** Which site each signed-in client key belongs to, when it came in by a ticket. */
   origins?: Record<string, string>;
+  /** The grant each signed-in client key is known by at the box (SPEC 11.5). */
+  grants?: Record<string, D.Grant>;
 }
 /** Signs one site out. The link's secret changes too, so an old link cannot be used to come back. */
 export function signOut(b: BunkerState, prefix: string): string[] {
   const gone = b.clients.filter((c) => c.startsWith(prefix));
   const named = Object.entries(b.origins ?? {}).filter(([, o]) => o === prefix || o.includes(prefix)).map(([k]) => k);
   for (const k of named) if (!gone.includes(k)) gone.push(k);
-  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) delete b.origins?.[k]; b.secret = bytesToHex(randomBytes(16)); }
+  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) { delete b.origins?.[k]; delete b.grants?.[k]; } b.secret = bytesToHex(randomBytes(16)); }
   return gone;
 }
 export const newBunker = (): BunkerState => ({ sk: bytesToHex(randomBytes(32)), secret: bytesToHex(randomBytes(16)), clients: [] });
@@ -42,23 +44,48 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
         b.tickets = b.tickets.filter((x) => x !== ticket);
         if (ticket.origin) (b.origins ??= {})[client] = ticket.origin;
       }
-      b.clients.push(client); onChange();
+      b.clients.push(client);
+      // What the account page lists under Sites and apps (SPEC 11.5).
+      (b.grants ??= {})[client] = D.newGrant('site', b.origins?.[client] ?? `A site (${client.slice(0, 8)})`);
+      onChange();
     }
     return params[1] ? params[1] : 'ack';
   }
   if (!b.clients.includes(client)) throw new KeykinError('not_connected');
+  const grant = b.grants?.[client]?.id;
+  try { return await serve(); }
+  catch (e) {
+    // Revoked at the box: this site is done here too.
+    if (e instanceof KeykinError && e.code === 'revoked') { dropClient(b, client); onChange(); }
+    throw e;
+  }
+  async function serve(): Promise<string> {
   switch (method) {
     case 'ping': return 'pong';
     case 'get_public_key': return h.npub;
     case 'sign_event': {
       const e = JSON.parse(params[0]);
-      const signed = await D.signEvent(me, h, { pubkey: h.npub, created_at: e.created_at, kind: e.kind, tags: e.tags ?? [], content: e.content ?? '' }, send);
+      const signed = await D.signEvent(me, h, { pubkey: h.npub, created_at: e.created_at, kind: e.kind, tags: e.tags ?? [], content: e.content ?? '' }, send, undefined, grant);
       return JSON.stringify(signed);
     }
-    case 'nip44_encrypt': return D.nip44Encrypt(me, h, params[0], params[1], send);
-    case 'nip44_decrypt': return D.nip44Decrypt(me, h, params[0], params[1], send);
+    case 'nip44_encrypt': return D.nip44Encrypt(me, h, params[0], params[1], send, undefined, grant);
+    case 'nip44_decrypt': return D.nip44Decrypt(me, h, params[0], params[1], send, undefined, grant);
     default: throw new KeykinError('unsupported');
   }
+  }
+}
+
+/** Forgets a site: its key, its grant and the origin it was approved for. */
+export function dropClient(b: BunkerState, client: string) {
+  b.clients = b.clients.filter((c) => c !== client);
+  if (b.grants) delete b.grants[client];
+  if (b.origins) delete b.origins[client];
+}
+/** Tells the box what this signer has let in, and forgets whatever was revoked there. */
+export async function syncGrants(b: BunkerState, me: D.Me, h: D.Held, send: D.Send): Promise<number> {
+  const revoked = await D.reportGrants(me, h, Object.values(b.grants ?? {}), send);
+  for (const [client, g] of Object.entries(b.grants ?? {})) if (revoked.includes(g.id)) dropClient(b, client);
+  return revoked.length;
 }
 
 /** Runs the bunker on one relay until `close()` is called. */

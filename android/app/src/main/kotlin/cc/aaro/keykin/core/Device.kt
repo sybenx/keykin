@@ -126,11 +126,11 @@ object Device {
 
     /** Signs a Nostr event with the box. Returns the whole signed event. */
     /** `grant` names the site or app this signature is for (SPEC 11.5); leave it null for the person's own use. */
-    fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr), grant: String? = null): JSONObject {
+    fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr), grant: String? = null, tapped: Boolean = false): JSONObject {
         val id = eventId(h.npub, createdAt, kind, tags, content)
         val ev = JSONObject().put("pubkey", h.npub).put("created_at", createdAt).put("kind", kind).put("tags", JSONArray(tags.map { JSONArray(it) })).put("content", content)
         lateinit var mine: Frost.Asked
-        val r = current(me, h, send) { mine = Frost.ask(h.piece, id); JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()).apply { if (grant != null) put("grant", grant) } }
+        val r = current(me, h, send) { mine = Frost.ask(h.piece, id); JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()).apply { if (grant != null) put("grant", grant); if (tapped) put("tapped", true) } }
         if (r.getString("id") != id) refuse("wrong_id")
         val c = r.getJSONObject("commit")
         return ev.put("id", id).put("sig", Frost.finish(h.piece, id, mine, Commit(c.getInt("i"), c.getString("D"), c.getString("E")), r.getString("z")))
@@ -146,14 +146,15 @@ object Device {
     fun unblock(me: Me, h: Held, key: String, fp: Fingerprint, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "unblock").put("account", h.npub).put("key", key), me, fp)) }
 
     /** Adds a device. Needs the fingerprint. This device and the box each give half of the newcomer's piece. */
-    fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint, send: Send = http(h.addr)): Int {
+    /** `note`: a signed-in account page asked for this (SPEC 11.6); then no fingerprint is needed and `fp` may be null. */
+    fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint?, send: Send = http(h.addr), note: String? = null): Int {
         val (list, i) = listing(me, h, send)
         val boxI = list.firstOrNull { it.key == h.boxKey }?.i ?: refuse("no_box")
         var mine = emptyMap<Int, String>()
         val member = JSONObject().put("key", inv.key).put("name", inv.name).put("kind", "device").put("i", i).apply { if (inv.chip != null) put("chip", inv.chip) }
-        val r = current(me, h, send, fp) {
+        val r = current(me, h, send, if (note != null) null else fp) {
             mine = Frost.repairDeltas(h.piece, listOf(h.piece.i, boxI).sorted(), i)
-            JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!))
+            JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!)).apply { if (note != null) put("note", note) }
         }
         val sigma = Frost.repairSigma(listOf(mine[h.piece.i]!!, Seal.from(me.sk, h.boxKey, "repair-delta", r.getString("delta"))))
         call(send, seal(JSONObject().put("op", "welcome_put").put("account", h.npub).put("key", inv.key).put("sigma", Seal.to(me.sk, inv.key, "repair-sigma", sigma)), me))
@@ -183,14 +184,15 @@ object Device {
     }
 
     /** Cycles the keys. Needs the fingerprint. Blocked devices are dropped for good; the key does not change. */
-    fun cycle(me: Me, h: Held, fp: Fingerprint, send: Send = http(h.addr)) {
+    /** `note`: a signed-in account page asked and the person tapped Yes on this device, in place of the fingerprint. */
+    fun cycle(me: Me, h: Held, fp: Fingerprint?, send: Send = http(h.addr), note: String? = null) {
         val list = members(me, h, send)
         var b1 = BigInteger.ZERO
-        val r = current(me, h, send, fp) {
+        val r = current(me, h, send, if (note != null) null else fp) {
             b1 = BigInteger(1, random(32)).mod(N)
             val changes = JSONObject()
             for (m in list) if (!m.blocked && m.key != me.key && m.key != h.boxKey) changes.put(m.key, Seal.to(me.sk, m.key, "cycle", scalarHex(b1.multiply(BigInteger.valueOf(m.i.toLong())))))
-            JSONObject().put("op", "cycle").put("b1", Seal.to(me.sk, h.boxKey, "cycle", scalarHex(b1))).put("changes", changes)
+            JSONObject().put("op", "cycle").put("b1", Seal.to(me.sk, h.boxKey, "cycle", scalarHex(b1))).put("changes", changes).apply { if (note != null) put("note", note) }
         }
         val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
         adopt(h, c, h.piece.share.add(b1.multiply(BigInteger.valueOf(h.piece.i.toLong()))).mod(N), r.getInt("epoch"))
@@ -252,8 +254,10 @@ object Device {
 
     fun notes(me: Me, h: Held, send: Send = http(h.addr)): List<Note> {
         val a = call(send, seal(JSONObject().put("op", "notes").put("account", h.npub), me)).getJSONArray("notes")
-        return List(a.length()) { a.getJSONObject(it).let { n -> Note(n.getString("id"), n.getString("kind"), n.getString("text"), n.getLong("at")) } }
+        return List(a.length()) { a.getJSONObject(it).let { n -> Note(n.getString("id"), n.getString("kind"), n.getString("text"), n.getLong("at"), n.optBoolean("tap", false)) } }
     }
+    /** The person tapped No. The note goes, and the browser that asked is signed out of the account page. */
+    fun noteRefuse(me: Me, h: Held, note: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "note_refuse").put("account", h.npub).put("note", note), me)) }
     fun noteDone(me: Me, h: Held, note: String, result: String, send: Send = http(h.addr)) {
         call(send, seal(JSONObject().put("op", "note_done").put("account", h.npub).put("note", note).put("result", result), me))
     }
@@ -264,5 +268,24 @@ data class Grant(val id: String, val kind: String, val name: String, val since: 
     fun json(): JSONObject = JSONObject().put("id", id).put("kind", kind).put("name", name).put("since", since)
     companion object { fun new(kind: String, name: String) = Grant(hex(random(16)), kind, name, System.currentTimeMillis() / 1000) }
 }
-/** Something the account page started for a device to finish. `kind` is `nostrconnect`, `invite` or `bunker`. */
-data class Note(val id: String, val kind: String, val text: String, val at: Long)
+/**
+ * Something the account page started for a device to finish. `kind` is `nostrconnect`, `invite`, `bunker`
+ * or `cycle`. A signed-in account page has the person's authority, so the device just does it, except when
+ * `tap` is true: then it shows Yes or No first (no fingerprint), and No is `Device.noteRefuse`.
+ */
+data class Note(val id: String, val kind: String, val text: String, val at: Long, val tap: Boolean = false)
+
+/** The few signatures that are hard to undo. The device asks Yes or No, then signs with `tapped = true`. */
+object Destructive {
+    /** Why an event is hard to undo, in a few words, or null if it is ordinary. */
+    fun why(kind: Int, tags: List<List<String>>, content: String): String? = when {
+        kind == 62 -> "asks every relay to erase the whole account"
+        kind == 5 && tags.count { it.firstOrNull() == "e" || it.firstOrNull() == "a" } >= 5 -> "deletes five or more posts at once"
+        kind == 3 && tags.none { it.firstOrNull() == "p" } -> "empties the follow list"
+        kind == 0 -> {
+            val p = try { JSONObject(content) } catch (_: Exception) { null }
+            if (p == null || listOf("name", "display_name", "about", "picture", "nip05", "lud16").none { k -> p.optString(k).trim().isNotEmpty() }) "empties the profile" else null
+        }
+        else -> null
+    }
+}

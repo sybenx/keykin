@@ -129,8 +129,34 @@ class BoxInteropTest {
         val note = page(JSONObject().put("call", "note_put").put("session", session).put("kind", "bunker").put("text", "")).getString("note")
         val waiting = Device.notes(phone, held)
         assertEquals(listOf(note to "bunker"), waiting.map { it.id to it.kind })
+        assertFalse(waiting[0].tap)
         Device.noteDone(phone, held, note, "bunker://abc")
         assertEquals("bunker://abc", page(JSONObject().put("call", "note_get").put("session", session).put("note", note)).getString("result"))
+
+        // A signed-in page asks to add a device: this one does it with no fingerprint.
+        val (work, _) = device("Work PC (Kotlin)")
+        val inviteNote = page(JSONObject().put("call", "note_put").put("session", session).put("kind", "invite").put("text", Texts.invite(work))).getString("note")
+        assertEquals("needs_fingerprint", assertThrows(KeykinException::class.java) { Device.add(phone, held, Texts.readInvite(Texts.invite(work)), { "00".repeat(64) }) }.code)
+        Device.add(phone, held, Texts.readInvite(Texts.invite(work)), null, note = inviteNote)
+        Device.noteDone(phone, held, inviteNote, Texts.join(held))
+        val wh = Device.join(work, Texts.readJoin(Texts.join(held)))
+        Device.sign(work, wh, 1, "from the work PC")
+
+        // Hard-to-undo: removing blocked devices is a tap note, and a vanish request needs `tapped`.
+        Device.block(phone, held, work.key)
+        val cycleNote = page(JSONObject().put("call", "note_put").put("session", session).put("kind", "cycle").put("text", "")).getString("note")
+        assertTrue(Device.notes(phone, held).first { it.id == cycleNote }.tap)
+        Device.cycle(phone, held, null, note = cycleNote)
+        Device.noteDone(phone, held, cycleNote, "ok")
+        assertEquals(listOf("Pixel (Kotlin)", "Box"), Device.members(phone, held).map { it.name })
+        assertEquals("asks every relay to erase the whole account", Destructive.why(62, listOf(listOf("relay", "ALL_RELAYS")), ""))
+        assertNull(Destructive.why(1, emptyList(), "hello"))
+        assertEquals("needs_tap", assertThrows(KeykinException::class.java) { Device.sign(phone, held, 62, "", listOf(listOf("relay", "ALL_RELAYS"))) }.code)
+        Device.sign(phone, held, 62, "", listOf(listOf("relay", "ALL_RELAYS")), tapped = true)
+        // Saying No signs that browser out.
+        val again = page(JSONObject().put("call", "note_put").put("session", session).put("kind", "cycle").put("text", "")).getString("note")
+        Device.noteRefuse(phone, held, again)
+        assertEquals("login", page(JSONObject().put("call", "me").put("session", session)).getString("error"))
     }
 
     @Test fun nip44MatchesTheReference() {

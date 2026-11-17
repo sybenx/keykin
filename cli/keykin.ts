@@ -10,6 +10,8 @@
 //   keykin block <name> | unblock <name>
 //   keykin cycle                                         after a block: drop blocked devices for good
 //   keykin serve <port> <address others reach>           stay on and help other devices when the box is off
+//   keykin agent <relay url>                             stay on and do what the account page asks: add a device,
+//                                                        hand out bunker links, and (after a Yes here) remove blocked devices
 //   keykin bunker <relay url>                            sign in to sites (NIP-46)
 //   keykin scan '<a site's sign-in code>' [--yes]         sign in to a site that shows a code (the bunker must be running)
 //   keykin sites | signout <site or key prefix>          the sites signed in through the bunker
@@ -24,7 +26,7 @@ import * as D from '../src/device.ts';
 import { createServer } from 'node:http';
 import { load, save, meOf, heldOf, keep, sender } from './store.ts';
 import { DeviceHelper } from '../src/helper.ts';
-import { newBunker, runBunker, signOut, bunkerUrl } from '../src/nip46.ts';
+import { newBunker, runBunker, signOut, bunkerUrl, syncGrants } from '../src/nip46.ts';
 import { readCode, answerCode, newTicket } from '../src/ticket.ts';
 import { getPublicKey } from 'nostr-tools/pure';
 import { createInterface } from 'node:readline/promises';
@@ -140,6 +142,32 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       if (!s.bunker || !a) fail('Give the start of a site key from "keykin sites".');
       const gone = signOut(s.bunker!, a); save(file, s);
       return out(gone.length ? `Signed out ${gone.length} site${gone.length > 1 ? 's' : ''}. The bunker link has changed.` : 'No site matches that.');
+    }
+    case 'agent': {
+      if (!a) fail('Give a relay address, for example wss://relay.example.com');
+      const held = heldOf(s);
+      if (!s.bunker) { s.bunker = newBunker(); save(file, s); }
+      const keepAll = () => { keep(s, held, s.addr!); save(file, s); };
+      const send = box();
+      const run = await runBunker({ bunker: s.bunker, me, held, send, relay: a, onChange: () => { keepAll(); syncGrants(s.bunker!, me, held, send).then(keepAll, () => {}); },
+        before: () => { const fresh = load(file).bunker; if (fresh) { s.bunker!.clients = fresh.clients; s.bunker!.secret = fresh.secret; } }, log: out });
+      // Hard-to-undo requests ask here. With nobody at the keyboard the answer is No.
+      const tap = async (text: string) => {
+        if (!process.stdin.isTTY) { out(`Asked: ${text} Nobody is here to answer, so: No.`); return false; }
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try { return /^y(es)?$/i.test((await rl.question(`${text} [y/N] `)).trim()); } finally { rl.close(); }
+      };
+      const tick = async () => {
+        try {
+          for (const did of await D.answerNotes(me, held, send, { addr: s.addr!, tap, bunker: async () => bunkerUrl(s.bunker!, a) })) out(`agent: ${did}`);
+          if (await syncGrants(s.bunker!, me, held, send)) out('agent: a sign-in was revoked at the box');
+          keepAll();
+        } catch (e: any) { if (e?.code === 'blocked' || e?.code === 'unknown_member') out(`agent: this device is ${e.code === 'blocked' ? 'blocked' : 'no longer in the account'}`); }
+      };
+      await tick();
+      const timer = setInterval(tick, 3000);
+      out(`Doing what the account page asks. Leave this running.`);
+      return { close: () => { clearInterval(timer); run.close(); }, tick };
     }
     case 'bunker': {
       if (!a) fail('Give a relay address, for example wss://relay.example.com');

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { verifyEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
-import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46';
+import { BunkerSigner, parseBunkerInput, createNostrConnectURI } from 'nostr-tools/nip46';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { startBox } from '../box/server.ts';
 import { main } from '../cli/keykin.ts';
@@ -163,6 +163,64 @@ test('the agent: a computer left on does what the account page asks, and its sit
     assert.deepEqual(b.page.call({ call: 'me', session }, now()), { error: 'login' });
     assert.equal(b.box.only()!.epoch, 0);
   } finally { await site?.close(); agent?.close(); await closeBox(b); relayProc.kill(); }
+});
+
+// A relay on this machine, from nak. Resolves once it listens.
+async function nakRelay() {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const proc = spawn('nak', ['serve', '--hostname', '127.0.0.1', '--port', String(port)], { stdio: 'ignore' });
+  const url = `ws://127.0.0.1:${port}`;
+  for (let k = 0; k < 50; k++) {
+    try { const w = new WebSocket(url); await new Promise((ok, no) => { w.onopen = ok; w.onerror = no; }); w.close(); break; }
+    catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+  return { url, kill: () => proc.kill() };
+}
+
+test('the agent answers a nostrconnect:// code from the account page, on the relay the code names', { skip: spawnSync('which', ['nak']).status !== 0 && 'nak is not installed', timeout: 60_000 }, async () => {
+  const [mine, theirs] = [await nakRelay(), await nakRelay()];       // the agent's own relay, and the one the site uses
+  const b = await startBox({ dir: tmp('kk-box-'), port: 0, log: () => {} });
+  let agent: any, site: BunkerSigner | undefined;
+  try {
+    const home = tmp('kk-mac-'), now = () => Math.floor(Date.now() / 1000);
+    const npub = /([0-9a-f]{64})/.exec((await cli(home, 'create', b.qr()!, 'MacBook')).text)![1];
+    b.box.setLogin(npub, 'aaron', 'a'.repeat(32), D.passwordCheck(await D.passwordVerifier('pw pw pw pw', 'a'.repeat(32))));
+    const session = b.page.call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw pw', 'a'.repeat(32)) }, now()).session;
+    agent = (await cli(home, 'agent', mine.url)).run;
+
+    // The site shows its code and waits for a signer to answer on its relay.
+    const siteKey = generateSecretKey(), secret = 'a1b2c3d4';
+    const uri = createNostrConnectURI({ clientPubkey: getPublicKey(siteKey), relays: [theirs.url], secret, name: 'Work site', url: 'https://work.example/app' });
+    const waiting = BunkerSigner.fromURI(siteKey, uri, {}, 20_000);
+    await new Promise((r) => setTimeout(r, 300));
+    // The person pastes it into the account page; the agent picks the note up and answers with the secret.
+    const { note: id } = b.page.call({ call: 'note_put', session, kind: 'nostrconnect', text: uri }, now());
+    await agent.tick();
+    assert.deepEqual(b.page.call({ call: 'note_get', session, note: id }, now()), { ok: true, state: 'done', result: 'ok' });
+    site = await waiting;
+    assert.equal(await site.getPublicKey(), npub);
+    const ev = await site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'signed in by a pasted code' });
+    assert.ok(verifyEvent(ev)); assert.equal(ev.pubkey, npub);
+    const friendSk = generateSecretKey();
+    assert.equal(nip44.decrypt(await site.nip44Encrypt(getPublicKey(friendSk), 'psst'), nip44.utils.getConversationKey(friendSk, npub)), 'psst');
+
+    // It is a grant: listed on the account page under the site's own address, and it can be limited and revoked there.
+    await agent.tick();
+    const me = b.page.call({ call: 'me', session }, now());
+    assert.deepEqual(me.grants.map((g: any) => [g.name, g.deviceName]), [['https://work.example', 'MacBook']]);
+    assert.match((await cli(home, 'sites')).text, /https:\/\/work\.example/);
+    b.page.call({ call: 'limit', session, grant: me.grants[0].id, to: 'posts' }, now());
+    await assert.rejects(site.signEvent({ kind: 3, created_at: now(), tags: [], content: '' }), /not_allowed/);
+    b.page.call({ call: 'revoke', session, grant: me.grants[0].id }, now());
+    await assert.rejects(site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'after the revoke' }), /revoked/);
+    await assert.rejects(site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'and after that' }), /not_connected/);
+    assert.match((await cli(home, 'sites')).text, /No site is signed in/);
+
+    // A code that is not one is answered as not done, and nothing is let in.
+    const { note: bad } = b.page.call({ call: 'note_put', session, kind: 'nostrconnect', text: 'nostrconnect://nothex?relay=ws%3A%2F%2Fx&secret=1' }, now());
+    await agent.tick();
+    assert.equal(b.page.call({ call: 'note_get', session, note: bad }, now()).state, 'waiting');
+  } finally { await site?.close(); agent?.close(); await closeBox(b); mine.kill(); theirs.kill(); }
 });
 
 test('a site signs in through the remote signer over a relay', { skip: spawnSync('which', ['nak']).status !== 0 && 'nak is not installed' }, async () => {

@@ -14,7 +14,8 @@
 //   keykin cycle                                         after a block: drop blocked devices for good
 //   keykin serve <port> <address others reach>           stay on and help other devices when the box is off
 //   keykin agent <relay url>                             stay on and do what the account page asks: add a device,
-//                                                        hand out bunker links, and (after a Yes here) remove blocked devices
+//                                                        hand out bunker links, sign in to a site that shows a
+//                                                        nostrconnect:// code, and (after a Yes here) remove blocked devices
 //   keykin bunker <relay url>                            sign in to sites (NIP-46)
 //   keykin scan '<a site's sign-in code>' [--yes]         sign in to a site that shows a code (the bunker must be running)
 //   keykin sites | signout <site or key prefix>          the sites signed in through the bunker
@@ -177,7 +178,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       };
       const tick = async () => {
         try {
-          for (const did of await D.answerNotes(me, held, send, { addr: s.addr!, tap, bunker: async () => bunkerUrl(s.bunker!, a) })) out(`agent: ${did}`);
+          for (const did of await D.answerNotes(me, held, send, { addr: s.addr!, tap, bunker: async () => bunkerUrl(s.bunker!, a), connect: run.connect })) out(`agent: ${did}`);
           if (await syncGrants(s.bunker!, me, held, send)) out('agent: a sign-in was revoked at the box');
           keepAll();
         } catch (e: any) { if (e?.code === 'blocked' || e?.code === 'unknown_member') out(`agent: this device is ${e.code === 'blocked' ? 'blocked' : 'no longer in the account'}`); }

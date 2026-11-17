@@ -18,13 +18,15 @@ export interface BunkerState {
   origins?: Record<string, string>;
   /** The grant each signed-in client key is known by at the box (SPEC 11.5). */
   grants?: Record<string, D.Grant>;
+  /** For a site that came in by a nostrconnect:// code: the relays its code named, which the signer also listens on. */
+  relaysOf?: Record<string, string[]>;
 }
 /** Signs one site out. The link's secret changes too, so an old link cannot be used to come back. */
 export function signOut(b: BunkerState, prefix: string): string[] {
   const gone = b.clients.filter((c) => c.startsWith(prefix));
   const named = Object.entries(b.origins ?? {}).filter(([, o]) => o === prefix || o.includes(prefix)).map(([k]) => k);
   for (const k of named) if (!gone.includes(k)) gone.push(k);
-  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) { delete b.origins?.[k]; delete b.grants?.[k]; } b.secret = bytesToHex(randomBytes(16)); }
+  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) { delete b.origins?.[k]; delete b.grants?.[k]; delete b.relaysOf?.[k]; } b.secret = bytesToHex(randomBytes(16)); }
   return gone;
 }
 export const newBunker = (): BunkerState => ({ sk: bytesToHex(randomBytes(32)), secret: bytesToHex(randomBytes(16)), clients: [] });
@@ -44,9 +46,7 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
         b.tickets = b.tickets.filter((x) => x !== ticket);
         if (ticket.origin) (b.origins ??= {})[client] = ticket.origin;
       }
-      b.clients.push(client);
-      // What the account page lists under Sites and apps (SPEC 11.5).
-      (b.grants ??= {})[client] = D.newGrant('site', b.origins?.[client] ?? `A site (${client.slice(0, 8)})`);
+      admit(b, client, b.origins?.[client]);
       onChange();
     }
     return params[1] ? params[1] : 'ack';
@@ -75,11 +75,33 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
   }
 }
 
-/** Forgets a site: its key, its grant and the origin it was approved for. */
+/** Lets a site's key in, as a grant the account page lists under Sites and apps (SPEC 11.5). */
+function admit(b: BunkerState, client: string, name?: string) {
+  if (!b.clients.includes(client)) b.clients.push(client);
+  (b.grants ??= {})[client] ??= D.newGrant('site', name ?? `A site (${client.slice(0, 8)})`);
+}
+
+/** Forgets a site: its key, its grant, the origin it was approved for and the relays it named. */
 export function dropClient(b: BunkerState, client: string) {
   b.clients = b.clients.filter((c) => c !== client);
   if (b.grants) delete b.grants[client];
   if (b.origins) delete b.origins[client];
+  if (b.relaysOf) delete b.relaysOf[client];
+}
+
+/** What a site's nostrconnect:// code says (NIP-46): its own key, the relays it listens on, and the secret to echo. */
+export interface ConnectCode { client: string; relays: string[]; secret: string; name?: string; url?: string }
+export function readNostrConnect(text: string): ConnectCode {
+  let u: URL; try { u = new URL(text.trim()); } catch { throw new KeykinError('bad_code'); }
+  const client = u.host.toLowerCase();
+  if (u.protocol !== 'nostrconnect:' || !/^[0-9a-f]{64}$/.test(client)) throw new KeykinError('bad_code');
+  const relays = [...new Set(u.searchParams.getAll('relay').map((r) => r.trim()).filter((r) => /^wss?:\/\/[^\s]+$/.test(r)))].slice(0, 5);
+  const secret = u.searchParams.get('secret') ?? '';
+  if (!relays.length || !secret || secret.length > 200) throw new KeykinError('bad_code');
+  let url: string | undefined;
+  try { const o = new URL(u.searchParams.get('url') ?? ''); if (o.protocol === 'https:' || o.protocol === 'http:') url = o.origin; } catch { /* none */ }
+  const name = u.searchParams.get('name')?.slice(0, 60) || undefined;
+  return { client, relays, secret, name, url };
 }
 /** Tells the box what this signer has let in, and forgets whatever was revoked there. */
 export async function syncGrants(b: BunkerState, me: D.Me, h: D.Held, send: D.Send): Promise<number> {
@@ -88,26 +110,66 @@ export async function syncGrants(b: BunkerState, me: D.Me, h: D.Held, send: D.Se
   return revoked.length;
 }
 
-/** Runs the bunker on one relay until `close()` is called. */
+/**
+ * Runs the bunker until `close()` is called. It listens on `relay`, and also on any relay a site's
+ * nostrconnect:// code named. Each answer goes back on the relay the request came in on.
+ */
 export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held; send: D.Send; relay: string; onChange?: () => void; before?: () => void; log?: (s: string) => void }) {
   const sk = hexToBytes(o.bunker.sk), pub = getPublicKey(sk), log = o.log ?? (() => {});
-  const relay = await Relay.connect(o.relay);
-  if (o.bunker.relay !== o.relay) { o.bunker.relay = o.relay; o.onChange?.(); }
   const seen = new Set<string>();
-  const sub = relay.subscribe([{ kinds: [24133], '#p': [pub], since: Math.floor(Date.now() / 1000) - 10 }], {
-    onevent: async (ev: Event) => {
-      if (seen.has(ev.id)) return; seen.add(ev.id);
-      const key = nip44.utils.getConversationKey(sk, ev.pubkey);
-      let req: { id: string; method: string; params: string[] };
-      try { req = JSON.parse(nip44.decrypt(ev.content, key)); } catch { return; }
-      let body: { id: string; result?: string; error?: string };
-      o.before?.();   // pick up sign-outs made while running
-      try { body = { id: req.id, result: await answerRequest(o.bunker, o.me, o.held, o.send, ev.pubkey, req.method, req.params ?? [], o.onChange ?? (() => {})) }; }
-      catch (e) { body = { id: req.id, error: e instanceof KeykinError ? e.code : 'failed' }; if (!(e instanceof KeykinError)) log(`bunker: ${String(e)}`); }
-      log(`bunker: ${req.method} from ${ev.pubkey.slice(0, 8)} -> ${body.error ?? 'ok'}`);
-      const reply = finalizeEvent({ kind: 24133, created_at: Math.floor(Date.now() / 1000), tags: [['p', ev.pubkey]], content: nip44.encrypt(JSON.stringify(body), key) }, sk);
-      await relay.publish(reply).catch((e) => log(`bunker: publish failed: ${String(e)}`));
-    },
-  });
-  return { url: bunkerUrl(o.bunker, o.relay), close: () => { sub.close(); relay.close(); } };
+  const open = new Map<string, Promise<{ relay: Relay; close: () => void }>>();
+  const reply = (relay: Relay, client: string, body: object) => {
+    const ev = finalizeEvent({ kind: 24133, created_at: Math.floor(Date.now() / 1000), tags: [['p', client]], content: nip44.encrypt(JSON.stringify(body), nip44.utils.getConversationKey(sk, client)) }, sk);
+    return relay.publish(ev).catch((e) => log(`bunker: publish failed: ${String(e)}`));
+  };
+  /** Listens on one more relay, once. */
+  const listen = (url: string) => {
+    if (!open.has(url)) {
+      const p = Relay.connect(url).then((relay) => {
+        const sub = relay.subscribe([{ kinds: [24133], '#p': [pub], since: Math.floor(Date.now() / 1000) - 10 }], {
+          onevent: async (ev: Event) => {
+            if (seen.has(ev.id)) return; seen.add(ev.id);
+            let req: { id: string; method: string; params: string[] };
+            try { req = JSON.parse(nip44.decrypt(ev.content, nip44.utils.getConversationKey(sk, ev.pubkey))); } catch { return; }
+            let body: { id: string; result?: string; error?: string };
+            o.before?.();   // pick up sign-outs made while running
+            try { body = { id: req.id, result: await answerRequest(o.bunker, o.me, o.held, o.send, ev.pubkey, req.method, req.params ?? [], o.onChange ?? (() => {})) }; }
+            catch (e) { body = { id: req.id, error: e instanceof KeykinError ? e.code : 'failed' }; if (!(e instanceof KeykinError)) log(`bunker: ${String(e)}`); }
+            log(`bunker: ${req.method} from ${ev.pubkey.slice(0, 8)} -> ${body.error ?? 'ok'}`);
+            await reply(relay, ev.pubkey, body);
+          },
+        });
+        return { relay, close: () => { sub.close(); relay.close(); } };
+      });
+      p.catch(() => open.delete(url));      // a relay that cannot be reached is tried again next time
+      open.set(url, p);
+    }
+    return open.get(url)!;
+  };
+  await listen(o.relay);
+  if (o.bunker.relay !== o.relay) { o.bunker.relay = o.relay; o.onChange?.(); }
+  for (const urls of Object.values(o.bunker.relaysOf ?? {})) for (const u of urls) listen(u).catch((e) => log(`bunker: cannot reach ${u}: ${String(e)}`));
+
+  /**
+   * Becomes the signer for a site that shows a nostrconnect:// code. The site is let in at once (the person
+   * asked for it, on the account page or here), listened for on the relays its code names, and sent the
+   * connect answer it waits for: a response whose result is the code's secret. False if no relay could be reached.
+   */
+  const connect = async (text: string): Promise<boolean> => {
+    const c = readNostrConnect(text);
+    o.before?.();
+    if (c.url) (o.bunker.origins ??= {})[c.client] = c.url;
+    admit(o.bunker, c.client, c.url ?? c.name);
+    (o.bunker.relaysOf ??= {})[c.client] = c.relays;
+    o.onChange?.();
+    let sent = 0;
+    for (const u of c.relays) {
+      try { const { relay } = await listen(u); await reply(relay, c.client, { id: bytesToHex(randomBytes(8)), result: c.secret }); sent++; }
+      catch (e) { log(`bunker: cannot reach ${u}: ${String(e)}`); }
+    }
+    log(`bunker: connected to ${c.client.slice(0, 8)}${c.url ? ` (${c.url})` : ''} on ${sent} relay${sent === 1 ? '' : 's'}`);
+    return sent > 0;
+  };
+  const close = () => { for (const p of open.values()) p.then((r) => r.close(), () => {}); open.clear(); };
+  return { url: bunkerUrl(o.bunker, o.relay), close, connect };
 }

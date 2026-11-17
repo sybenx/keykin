@@ -5,7 +5,8 @@ My devices and my box. Any two pieces sign.
 - `DIRECTION.md`: why, and what the design is.
 - `SPEC.md`: what the code does, and what is not built.
 - `src/`: the pieces, the signing round, member requests, the device side.
-- `box/`: the box (`box.ts`), its page (`page.ts`) and its HTTP server (`server.ts`).
+- `box/`: the box (`box.ts`), the account page's calls (`pageapi.ts`), the admin page (`page.ts`) and its HTTP server (`server.ts`).
+- `login/`: Keykin Login, the public door and the account page. `KEYKIN_BOX=http://127.0.0.1:7461 npm run login`.
 - `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
 - `android/`: the phone app.
 - `ext/`: the browser extension. `node ext/build.mjs`, then load `ext/dist` in Chrome with Load unpacked.

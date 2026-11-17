@@ -16,10 +16,6 @@ services:
     image: keykin-box:0.1.0
     pull_policy: build
     user: "1000:1000"
-    environment:
-      # Relays the box page uses for sign-in by a scanned code (QRST). Leave empty to use the
-      # page's own scan-to-log-in instead.
-      KEYKIN_RELAYS: wss://syb.lol
     volumes:
       - /data/keykin:/data
     ports:

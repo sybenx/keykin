@@ -90,6 +90,49 @@ class BoxInteropTest {
         assertEquals(nsec, Device.formNsec(watch, wh, watchChip.fp))
     }
 
+    @Test fun manyAccountsAskingPasswordsGrantsAndNotes() {
+        // "<setup text for a first account>|<page endpoint>": the box test fixture's side.
+        val env = (System.getenv("KEYKIN_BOX_MANY") ?: "").split("|")
+        assumeTrue("set KEYKIN_BOX_MANY", env.size == 2)
+        val qr = Texts.qr(env[0]); val send = Device.http(qr.addr)
+        fun page(body: JSONObject): JSONObject {
+            val c = java.net.URL(env[1]).openConnection() as java.net.HttpURLConnection
+            c.requestMethod = "POST"; c.doOutput = true; c.outputStream.use { it.write(utf8(body.toString())) }
+            return JSONObject(String(c.inputStream.readBytes(), Charsets.UTF_8))
+        }
+        val (phone, chip) = device("Pixel (Kotlin)")
+        val held = Device.create(phone, qr)
+
+        // A second person asks, and has to wait for the admin.
+        val (carol, _) = device("Carol (Kotlin)")
+        val id = Device.ask(carol, "make", "from the Kotlin test", send)
+        assertEquals("waiting", Device.asked(carol, id, send))
+        assertEquals("not_approved", assertThrows(KeykinException::class.java) { Device.create(carol, Qr(qr.addr, qr.key, id)) }.code)
+
+        // Password: the verifier made here is the one a browser would make, and the box accepts it.
+        Device.passwordSet(phone, held, "kotlin", "correct horse é", chip.fp)
+        val salt = page(JSONObject().put("call", "pw_salt").put("username", "kotlin")).getString("salt")
+        val session = page(JSONObject().put("call", "pw_login").put("username", "kotlin").put("verifier", Device.passwordVerifier("correct horse é", salt))).getString("session")
+        assertEquals(held.npub, page(JSONObject().put("call", "me").put("session", session)).getString("npub"))
+
+        // Grants: reported, used, revoked from the page, refused.
+        val g = Grant.new("app", "Amethyst")
+        assertEquals(emptyList<String>(), Device.reportGrants(phone, held, listOf(g)))
+        Device.sign(phone, held, 1, "for an app", grant = g.id)
+        page(JSONObject().put("call", "revoke").put("session", session).put("grant", g.id))
+        assertEquals("revoked", assertThrows(KeykinException::class.java) { Device.sign(phone, held, 1, "again", grant = g.id) }.code)
+        assertEquals("revoked", assertThrows(KeykinException::class.java) { Device.nip44Encrypt(phone, held, held.npub, "x", grant = g.id) }.code)
+        assertEquals(listOf(g.id), Device.reportGrants(phone, held, listOf(g)))
+        Device.sign(phone, held, 1, "my own")
+
+        // Notes: the page asks for a bunker link, this device answers.
+        val note = page(JSONObject().put("call", "note_put").put("session", session).put("kind", "bunker").put("text", "")).getString("note")
+        val waiting = Device.notes(phone, held)
+        assertEquals(listOf(note to "bunker"), waiting.map { it.id to it.kind })
+        Device.noteDone(phone, held, note, "bunker://abc")
+        assertEquals("bunker://abc", page(JSONObject().put("call", "note_get").put("session", session).put("note", note)).getString("result"))
+    }
+
     @Test fun nip44MatchesTheReference() {
         // "<conversation key hex>|<nonce hex>|<plaintext>|<payload>", made by nostr-tools.
         val v = (System.getenv("KEYKIN_NIP44_VECTOR") ?: "").split("|")

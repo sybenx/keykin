@@ -8,6 +8,7 @@ COPY box ./box
 COPY src ./src
 COPY frost-wasm ./frost-wasm
 COPY vendor ./vendor
+COPY login ./login
 ENV KEYKIN_DIR=/data KEYKIN_ADDR=0.0.0.0 KEYKIN_PORT=7460
 USER 1000:1000
 EXPOSE 7460

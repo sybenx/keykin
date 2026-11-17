@@ -70,14 +70,14 @@ object Device {
     private fun current(me: Me, h: Held, send: Send, fp: Fingerprint? = null, body: () -> JSONObject): JSONObject {
         var tries = 0
         while (true) {
-            val r = send(seal(body().put("epoch", h.epoch), me, fp))
+            val r = send(seal(body().put("epoch", h.epoch).put("account", h.npub), me, fp))
             if (r.optString("error") != "stale" || tries++ > 0 || r.optJSONArray("catchups") == null) { if (r.has("error")) refuse(r.getString("error")); return r }
             var share = h.piece.share
             val cs = r.getJSONArray("catchups")
             for (k in 0 until cs.length()) cs.getJSONObject(k).let { c -> share = share.add(BigInteger(Seal.from(me.sk, c.getString("from"), "cycle", c.getString("sealed")), 16)).mod(N) }
             val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
             adopt(h, c, share, r.getInt("epoch"))
-            call(send, seal(JSONObject().put("op", "caught_up"), me))
+            call(send, seal(JSONObject().put("op", "caught_up").put("account", h.npub), me))
         }
     }
     /** Takes a new piece only if it lies on the new line of the same key: share·G = C0 + i·C1. */
@@ -115,38 +115,39 @@ object Device {
     /** After scanning the box's QR: the device and the box make the key together. No whole key exists. */
     fun create(me: Me, qr: Qr, send: Send = http(qr.addr)): Held {
         val one = Frost.dkg1(1)
-        val r1 = call(send, seal(JSONObject().put("op", "create1").put("code", qr.code).put("pkg", one.pkg).put("name", me.name).apply { if (me.chip != null) put("chip", me.chip) }, me))
+        val r1 = call(send, seal(JSONObject().put("op", "create1").put("request", qr.code).put("code", qr.code).put("pkg", one.pkg).put("name", me.name).apply { if (me.chip != null) put("chip", me.chip) }, me))
         val box = listOf(2 to r1.getString("pkg"))
         val two = Frost.dkg2(one.secret, box)
-        val r2 = call(send, seal(JSONObject().put("op", "create2").put("pkg2", Seal.to(me.sk, qr.key, "keygen", two.pkgFor[2] ?: refuse("bad_keygen"))), me))
+        val r2 = call(send, seal(JSONObject().put("op", "create2").put("request", qr.code).put("pkg2", Seal.to(me.sk, qr.key, "keygen", two.pkgFor[2] ?: refuse("bad_keygen"))), me))
         val done = Frost.dkg3(two.secret, box, listOf(2 to Seal.from(me.sk, qr.key, "keygen", r2.getString("pkg2"))))
         if (done.npub != r2.getString("npub")) refuse("bad_keygen")
         return Held(Piece(done.c, 1, done.share), done.npub, qr.key, qr.addr)
     }
 
     /** Signs a Nostr event with the box. Returns the whole signed event. */
-    fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr)): JSONObject {
+    /** `grant` names the site or app this signature is for (SPEC 11.5); leave it null for the person's own use. */
+    fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr), grant: String? = null): JSONObject {
         val id = eventId(h.npub, createdAt, kind, tags, content)
         val ev = JSONObject().put("pubkey", h.npub).put("created_at", createdAt).put("kind", kind).put("tags", JSONArray(tags.map { JSONArray(it) })).put("content", content)
         lateinit var mine: Frost.Asked
-        val r = current(me, h, send) { mine = Frost.ask(h.piece, id); JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()) }
+        val r = current(me, h, send) { mine = Frost.ask(h.piece, id); JSONObject().put("op", "sign").put("event", ev).put("commit", mine.commit.json()).apply { if (grant != null) put("grant", grant) } }
         if (r.getString("id") != id) refuse("wrong_id")
         val c = r.getJSONObject("commit")
         return ev.put("id", id).put("sig", Frost.finish(h.piece, id, mine, Commit(c.getInt("i"), c.getString("D"), c.getString("E")), r.getString("z")))
     }
 
-    fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> = listing(me, send).first
-    private fun listing(me: Me, send: Send): Pair<List<Member>, Int> {
-        val r = call(send, seal(JSONObject().put("op", "members"), me)); val a = r.getJSONArray("members")
+    fun members(me: Me, h: Held, send: Send = http(h.addr)): List<Member> = listing(me, h, send).first
+    private fun listing(me: Me, h: Held, send: Send): Pair<List<Member>, Int> {
+        val r = call(send, seal(JSONObject().put("op", "members").put("account", h.npub), me)); val a = r.getJSONArray("members")
         return List(a.length()) { a.getJSONObject(it).let { m -> Member(m.getString("key"), m.getInt("i"), m.getString("name"), m.getString("kind"), m.has("chip"), m.getBoolean("blocked"), m.getLong("added"), if (m.has("addr")) m.getString("addr") else null) } } to r.getInt("next")
     }
-    fun block(me: Me, h: Held, key: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "block").put("key", key), me)) }
+    fun block(me: Me, h: Held, key: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "block").put("account", h.npub).put("key", key), me)) }
     /** Needs the fingerprint. */
-    fun unblock(me: Me, h: Held, key: String, fp: Fingerprint, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "unblock").put("key", key), me, fp)) }
+    fun unblock(me: Me, h: Held, key: String, fp: Fingerprint, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "unblock").put("account", h.npub).put("key", key), me, fp)) }
 
     /** Adds a device. Needs the fingerprint. This device and the box each give half of the newcomer's piece. */
     fun add(me: Me, h: Held, inv: Invite, fp: Fingerprint, send: Send = http(h.addr)): Int {
-        val (list, i) = listing(me, send)
+        val (list, i) = listing(me, h, send)
         val boxI = list.firstOrNull { it.key == h.boxKey }?.i ?: refuse("no_box")
         var mine = emptyMap<Int, String>()
         val member = JSONObject().put("key", inv.key).put("name", inv.name).put("kind", "device").put("i", i).apply { if (inv.chip != null) put("chip", inv.chip) }
@@ -155,13 +156,13 @@ object Device {
             JSONObject().put("op", "add").put("member", member).put("delta", Seal.to(me.sk, h.boxKey, "repair-delta", mine[boxI]!!))
         }
         val sigma = Frost.repairSigma(listOf(mine[h.piece.i]!!, Seal.from(me.sk, h.boxKey, "repair-delta", r.getString("delta"))))
-        call(send, seal(JSONObject().put("op", "welcome_put").put("key", inv.key).put("sigma", Seal.to(me.sk, inv.key, "repair-sigma", sigma)), me))
+        call(send, seal(JSONObject().put("op", "welcome_put").put("account", h.npub).put("key", inv.key).put("sigma", Seal.to(me.sk, inv.key, "repair-sigma", sigma)), me))
         return i
     }
 
     /** The new device's side: collect both halves and build its piece. */
     fun join(me: Me, j: JoinText, send: Send = http(j.addr)): Held {
-        val r = call(send, seal(JSONObject().put("op", "welcome"), me))
+        val r = call(send, seal(JSONObject().put("op", "welcome").put("account", j.npub), me))
         if (r.getString("npub") != j.npub) refuse("wrong_account")
         val c = r.getJSONArray("commitment").let { a -> List(a.length()) { a.getString(it) } }
         if (c.size != 2 || c[0].substring(2) != j.npub) refuse("wrong_account")
@@ -199,19 +200,69 @@ object Device {
     fun approveLogin(me: Me, h: Held, text: String, fp: Fingerprint, send: Send = http(h.addr)) {
         val q = try { JSONObject(text).getJSONObject("login") } catch (_: Exception) { refuse("bad_qr") }
         if (q.optString("key") != h.boxKey) refuse("wrong_box")
-        call(send, seal(JSONObject().put("op", "login").put("code", q.getString("code")), me, fp))
+        call(send, seal(JSONObject().put("op", "login").put("account", h.npub).put("code", q.getString("code")), me, fp))
     }
 
     /** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. */
-    fun conversationKey(me: Me, h: Held, peer: String, send: Send = http(h.addr)): ByteArray {
+    fun conversationKey(me: Me, h: Held, peer: String, send: Send = http(h.addr), grant: String? = null): ByteArray {
         if (!Regex("^[0-9a-f]{64}$").matches(peer)) refuse("bad_peer")
-        val r = current(me, h, send) { JSONObject().put("op", "ecdh").put("peer", peer) }
+        val r = current(me, h, send) { JSONObject().put("op", "ecdh").put("peer", peer).apply { if (grant != null) put("grant", grant) } }
         // This piece's part: λ·share·Q, with λ = other / (other − i) for the pair of pieces taking part.
         val (i, o) = BigInteger.valueOf(h.piece.i.toLong()) to BigInteger.valueOf(r.getInt("i").toLong())
         val lambda = o.multiply(o.subtract(i).modInverse(N)).mod(N)
         val mine = Secp.mul(lambda.multiply(h.piece.share).mod(N), "02$peer")
         return Nip44.conversationKey(unhex(Secp.add(mine, r.getString("part")).substring(2)))
     }
-    fun nip44Encrypt(me: Me, h: Held, peer: String, text: String, send: Send = http(h.addr)) = Nip44.encrypt(text, conversationKey(me, h, peer, send))
-    fun nip44Decrypt(me: Me, h: Held, peer: String, payload: String, send: Send = http(h.addr)) = Nip44.decrypt(payload, conversationKey(me, h, peer, send))
+    fun nip44Encrypt(me: Me, h: Held, peer: String, text: String, send: Send = http(h.addr), grant: String? = null) = Nip44.encrypt(text, conversationKey(me, h, peer, send, grant))
+    fun nip44Decrypt(me: Me, h: Held, peer: String, payload: String, send: Send = http(h.addr), grant: String? = null) = Nip44.decrypt(payload, conversationKey(me, h, peer, send, grant))
+
+    // --- Asking for an account on a box that needs the admin's yes (SPEC 11.4) ------------------------
+
+    /** Asks to make an account (`make`) or move one here (`transfer`). Returns the request id to wait on. */
+    fun ask(me: Me, what: String, note: String, send: Send, account: String? = null): String =
+        call(send, seal(JSONObject().put("op", "ask").put("what", what).put("name", me.name).put("note", note).apply { if (me.chip != null) put("chip", me.chip); if (account != null) put("account", account) }, me)).getString("request")
+    /** `waiting`, `approved`, `refused` or `gone`. Once approved, use the id as the `code` of a Qr for `create`. */
+    fun asked(me: Me, request: String, send: Send): String = call(send, seal(JSONObject().put("op", "asked").put("request", request), me)).getString("state")
+
+    // --- Username and password for the account page (SPEC 11.3) --------------------------------------
+
+    /** The verifier for a password: PBKDF2-HMAC-SHA256, 600000 rounds, 32 bytes, over the NFKC form. Hex. */
+    fun passwordVerifier(password: String, saltHex: String): String {
+        val spec = javax.crypto.spec.PBEKeySpec(java.text.Normalizer.normalize(password, java.text.Normalizer.Form.NFKC).toCharArray(), unhex(saltHex), 600000, 256)
+        return hex(javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded)
+    }
+    /** Sets or changes the username and password. Needs the fingerprint. The box never sees the password. */
+    fun passwordSet(me: Me, h: Held, username: String, password: String, fp: Fingerprint, send: Send = http(h.addr)) {
+        val salt = hex(random(16))
+        val check = hex(sha256(utf8("keykin2-pw"), unhex(passwordVerifier(password, salt))))
+        call(send, seal(JSONObject().put("op", "password_set").put("account", h.npub).put("username", username).put("salt", salt).put("check", check), me, fp))
+    }
+    fun passwordClear(me: Me, h: Held, fp: Fingerprint, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "password_clear").put("account", h.npub), me, fp)) }
+
+    // --- What this device has let in, and revoking (SPEC 11.5) ---------------------------------------
+
+    /** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
+    fun reportGrants(me: Me, h: Held, grants: List<Grant>, send: Send = http(h.addr)): List<String> {
+        val r = call(send, seal(JSONObject().put("op", "grants").put("account", h.npub).put("grants", JSONArray(grants.map { it.json() })), me)).getJSONArray("revoked")
+        return List(r.length()) { r.getString(it) }
+    }
+    fun revoke(me: Me, h: Held, grant: String, send: Send = http(h.addr)) { call(send, seal(JSONObject().put("op", "revoke").put("account", h.npub).put("grant", grant), me)) }
+
+    // --- Things the account page started for a device to finish (SPEC 11.6) --------------------------
+
+    fun notes(me: Me, h: Held, send: Send = http(h.addr)): List<Note> {
+        val a = call(send, seal(JSONObject().put("op", "notes").put("account", h.npub), me)).getJSONArray("notes")
+        return List(a.length()) { a.getJSONObject(it).let { n -> Note(n.getString("id"), n.getString("kind"), n.getString("text"), n.getLong("at")) } }
+    }
+    fun noteDone(me: Me, h: Held, note: String, result: String, send: Send = http(h.addr)) {
+        call(send, seal(JSONObject().put("op", "note_done").put("account", h.npub).put("note", note).put("result", result), me))
+    }
 }
+
+/** A site or app this device has let in (SPEC 11.5). `kind` is `site` or `app`. */
+data class Grant(val id: String, val kind: String, val name: String, val since: Long) {
+    fun json(): JSONObject = JSONObject().put("id", id).put("kind", kind).put("name", name).put("since", since)
+    companion object { fun new(kind: String, name: String) = Grant(hex(random(16)), kind, name, System.currentTimeMillis() / 1000) }
+}
+/** Something the account page started for a device to finish. `kind` is `nostrconnect`, `invite` or `bunker`. */
+data class Note(val id: String, val kind: String, val text: String, val at: Long)

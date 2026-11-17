@@ -25,6 +25,7 @@ tasks.withType<Test>().configureEach {
     // The unit tests talk to a real box (KEYKIN_BOX_QR) with the FROST library built for this computer.
     systemProperty("keykin.frostlib", file("../../frost/target/release/libkeykin_frost.dylib").absolutePath)
     environment("KEYKIN_BOX_QR", System.getenv("KEYKIN_BOX_QR") ?: "")
+    environment("KEYKIN_BOX_MANY", System.getenv("KEYKIN_BOX_MANY") ?: "")
     environment("KEYKIN_NIP44_VECTOR", System.getenv("KEYKIN_NIP44_VECTOR") ?: "")
     outputs.upToDateWhen { false }
     testLogging { events("passed", "failed", "skipped"); showStandardStreams = true; exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }

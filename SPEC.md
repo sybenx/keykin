@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.4, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.5, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -100,34 +100,45 @@ answers `stale` with the changes that device missed, and the device applies them
 first: the owner blocks the phone and unblocks the rest. A stolen phone could always do that,
 and the box is what recovers from it.
 
-## 6a. The box's page
+## 6a. The admin page
 
-What the person who runs the box sees in a browser, at the box's address. Plain HTML from the
-box itself, nothing loaded from elsewhere.
+What the person who runs the box sees, at the box's main port. Plain HTML from the box itself.
+It is never on the public side.
 
-- **Sign in with your signer (QRST).** When the box is given relays (`KEYKIN_RELAYS`), its login
-  page is a site like any other: it shows a sign-in code (section 8j), a device in the account
-  answers it, and the page then has the account sign the box's challenge (a kind 22242 event
-  naming this page's origin and a one-time challenge tied to this browser). The box logs the
-  browser in if that signature is by this box's own account. Any other account is refused.
-- **Log in by scanning, without relays.** With no relays set, the login page shows a code of
-  Keykin's own instead:
-  `{ keykin: 2, login: { addr, key, code } }`. A device in the account scans it and, after a
-  fingerprint, sends `login` with the code. The page, which has been asking the box whether its
-  code was approved, is then logged in. A code lasts three minutes, works once, and only for the
-  browser that was shown it. A device accepts a login code only from its own box.
-- **Behind another login** (`KEYKIN_BEHIND_LOGIN=1`), the page asks for nothing itself and the box
-  makes no owner secret. This is for a box whose page can only be reached through something
-  that already asks who you are, such as an Umbrel app's login.
-- **Or log in** with the owner secret. This is the only way before an account exists, and the
-  way back if every device is lost or blocked. The box prints it once, on its first start, and keeps only
-  its hash. Five wrong tries in a minute are refused for the rest of that minute. A session lasts
-  12 hours, in a cookie scripts cannot read.
-- **No account yet:** the setup QR of section 2, with the same text available to copy for a
-  device with no camera. The QR names the address the browser used. The page moves on by itself
-  once a device has created the account.
-- **With an account:** the npub and the list of devices, each with Block or Unblock. The box
-  itself has no button. Every button carries a per-session token.
+- **Getting in:** the owner secret, which the box prints once on its first start and also
+  leaves in `owner-secret.txt`. Or, **behind another login** (`KEYKIN_BEHIND_LOGIN=1`), nothing:
+  the page trusts whoever got through, and the box makes no owner secret. Use that only when the
+  page cannot be reached any other way, such as behind an Umbrel app's login.
+- **An empty box** shows the first setup code straight away.
+- **Waiting requests** (section 11.4), each with Approve and Refuse.
+- **Every account:** its npub, its username if it has one, and its devices with Block and
+  Unblock. Unblock here needs no device: it is the admin's own power, and the way back when a
+  thief blocks every other device first.
+- **Remove an account**, behind a tick box. It deletes the box's piece.
+- **Make a setup code** for one new account: a request approved in advance, good for 24 hours.
+- Every button carries a per-session token.
+
+## 6b. Keykin Login and the side door
+
+The box listens twice. The **main port** has the admin page plus `POST /keykin` and
+`POST /page`. The **side port** (`KEYKIN_SIDE_PORT`) has only those two paths.
+
+**Keykin Login** (`login/`) is a separate small server meant to face the internet. It serves the
+account page and passes two things to the box's side port, and nothing else: `POST /keykin`
+untouched, and `POST /api`, the account page's calls (section 11.6).
+
+- It holds no piece, no device list and no account data. Stopping it shuts the outside door and
+  leaves the box, the admin page and private devices working.
+- It keeps the page session in a cookie the page's script cannot read, and never puts it in a
+  reply. A session sent in a request body is ignored.
+- `/api` needs a header only a page from the same origin can send, so another site cannot make
+  the calls for someone.
+- It allows a fixed list of calls. None can sign, add a device, unblock one or form the key.
+- It limits each address to 240 requests a minute.
+
+The account page has six sections: Home, Devices, Signed in, Sign in to a site, Security and
+Backup. Password sign-in needs the page to be served over `https`, because browsers only offer
+the key-stretching it uses on secure pages. Device sign-in works either way.
 
 ## 7. Adding a member
 
@@ -328,7 +339,7 @@ A box holds many accounts. **An account's id is its npub in hex** (the x-only ke
 - The join text gains the account: `{ keykin: 2, join: { addr, boxKey, npub } }` is unchanged,
   and `npub` is the account id.
 
-**Built:** not yet. Today's box holds one account and ignores `account`.
+**Built:** the box, the TypeScript device code and the Kotlin core. The Keykin debug app on the phone still sends no `account`, which a one-account box accepts.
 
 ### 11.3 Username and password
 
@@ -351,7 +362,7 @@ They live on the box, per account. The box never sees the password.
   most 30 tries a minute.
 - **What a password is worth:** only what section 11.6 lists as needing no device.
 
-**Built:** not yet.
+**Built:** the box, both device cores (`passwordSet`), and the account page's sign-in. No app has a screen for setting it yet.
 
 ### 11.4 Asking to make or transfer an account
 
@@ -395,7 +406,7 @@ being whole. The account keeps its npub and its devices.
 5. The device cycles the keys on the new box (section 8f). The old box gets no change, so its
    piece stops fitting. Other devices are told the new address with a join text.
 
-**Built:** not yet. Today the admin page shows one setup code and nobody asks.
+**Built:** asking, waiting, approving and making, on the box, the admin page and both device cores. **Transferring is not built.** No app has a screen for asking yet.
 
 ### 11.5 What is signed in, and revoking it
 
@@ -415,7 +426,7 @@ each device tells the box what it has let in.
   let the site in is offline.
 - The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
 
-**Built:** not yet. Today each device keeps its own list and the box knows nothing of it.
+**Built:** the box, the account page, and `reportGrants` / `revoke` / the `grant` field in both device cores. **Not wired:** the command-line bunker, the Android app and the extension do not report their grants or name them yet, so the account page lists nothing for them.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -456,7 +467,7 @@ devices, and a device that sees it asks the person and does it with a fingerprin
 - Notes last 10 minutes. A `bunker://` or `nostrconnect://` sign-in made this way is a grant
   (section 11.5) on the device that answered, and works while that device can be reached.
 
-**Built:** the device login of section 6a, for one account. The rest is not built.
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. **Not wired:** no app looks for notes yet, so a pasted `nostrconnect://` code, an invite or a request for a `bunker://` link waits until one does.
 
 ## 9. Not built yet
 
@@ -475,6 +486,10 @@ devices, and a device that sees it asks the person and does it with a fingerprin
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
 - **Per-site limits.** A site that is allowed can ask for any signature.
 - **Removing a box.** A device is removed by blocking it and cycling; a box cannot be blocked.
+- **Transferring an account between boxes** (section 11.4).
+- **Apps answering the account page's notes, and reporting grants** (sections 11.5 and 11.6).
+- **Paper backup and undo.** Not decided.
+- **QRST sign-in to the account page.** It signs in by Keykin's own device login or a password.
 - **Firefox and Safari.** The extension is Chromium only.
 - **Release builds.** The Android app is a debug build and the extension is unpacked.
 - **Tier 3.** Not planned for now.
@@ -482,7 +497,11 @@ devices, and a device that sees it asks the person and does it with a fingerprin
 ## 10. Known weak spots
 
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
-- Logging in to the box's page by scanning trusts the person to scan only their own box's page.
+- Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and
+  keep a username locked by guessing wrong. None of that reaches a key, but it can be a nuisance.
+- The side port and, behind another login, the admin page trust the network they are on. On an Umbrel,
+  another app on the same machine could reach them.
+- Logging in to the account page by scanning trusts the person to scan only their own page.
   A device refuses a code from any other box, but a code shown by someone else's browser on the
   same box would log that browser in.
 - A device that listens for others trusts the list it last saw. If the box is off, it cannot

@@ -67,6 +67,38 @@ test('the extension: set up with the box, a site signs in, signs and encrypts, t
     assert.equal(nip44.decrypt(sealed, friendKey), 'hello from a page');
     assert.equal(await site.evaluate(([f, c]) => (window as any).nostr.nip44.decrypt(f, c), [friend, nip44.encrypt('and back', friendKey)]), 'and back');
 
+    // The site is a grant at the box: the account page lists it, with when it was last used.
+    const now = () => Math.floor(Date.now() / 1000), salt = 'a'.repeat(32), verifier = await D.passwordVerifier('pw pw pw pw', salt);
+    b.box.setLogin(npub, 'aaron', salt, D.passwordCheck(verifier));
+    const session = b.page.call({ call: 'pw_login', username: 'aaron', verifier }, now()).session;
+    const grants = () => b.page.call({ call: 'me', session }, now()).grants;
+    assert.deepEqual(grants().map((g: any) => [g.name, g.kind, g.deviceName, g.limit]), [[base, 'site', 'Browser', null]]);
+    assert.ok(grants()[0].last);
+    // (The page's own rules forbid eval, so the call is named rather than written out.)
+    const tryIt = (a: { sign?: object; encrypt?: string }) => site.evaluate((a) => {
+      const n = (window as any).nostr;
+      return (a.sign ? n.signEvent(a.sign) : n.nip44.encrypt(a.encrypt, 'secret')).then(() => 'ok', (e: Error) => e.message);
+    }, a);
+    const follows = { kind: 3, tags: [['p', 'a'.repeat(64)]], content: '' };
+    // Posts only, set on the account page: a note still signs, a follow list and messages do not.
+    assert.deepEqual(b.page.call({ call: 'limit', session, grant: grants()[0].id, to: 'posts' }, now()), { ok: true });
+    assert.equal(grants()[0].limit, 'posts');
+    const onlyPosts = 'This site may only post. That is set on your account page.';
+    assert.equal(await tryIt({ sign: { kind: 1, content: 'a post is fine' } }), 'ok');
+    assert.equal(await tryIt({ sign: follows }), onlyPosts);
+    assert.equal(await tryIt({ encrypt: friend }), onlyPosts);
+    b.page.call({ call: 'limit', session, grant: grants()[0].id, to: null }, now());
+    assert.equal(await tryIt({ sign: follows }), 'ok');
+    // Revoked on the account page: the next signature fails, and after that the extension asks again.
+    const first = grants()[0].id;
+    b.page.call({ call: 'revoke', session, grant: first }, now());
+    assert.equal(await tryIt({ sign: { kind: 1, content: 'after the revoke' } }), 'This site was signed out from your account page.');
+    const askedAgain = approval(ctx);
+    const backIn = site.evaluate(() => (window as any).nostr.signEvent({ kind: 1, created_at: 1700000000, tags: [], content: 'allowed again' }));
+    await (await askedAgain).click('#allow');
+    assert.ok(verifyEvent(await backIn));
+    assert.equal(grants().length, 1); assert.notEqual(grants()[0].id, first);
+
     // Another site is asked about separately, and Deny means no.
     const other = await ctx.newPage();
     await other.goto(`http://localhost:${b.port}/`);
@@ -79,6 +111,7 @@ test('the extension: set up with the box, a site signs in, signs and encrypts, t
     await popup.reload();
     await popup.click(`button[aria-label="Sign out ${base}"]`);
     await popup.waitForSelector('text=None yet');
+    assert.deepEqual(grants(), []);                    // and the account page no longer lists it
     const asked3 = approval(ctx);
     const again = site.evaluate(() => (window as any).nostr.getPublicKey().then(() => 'answered', (e: Error) => e.message));
     await (await asked3).click('#deny');

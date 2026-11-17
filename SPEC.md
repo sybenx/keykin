@@ -281,7 +281,6 @@ Who does what:
 |---|---|
 | The ticket format and both halves | `src/ticket.ts`, over the QRST library bundled as `vendor/qrst.js` |
 | A site's widget, `KeykinSignIn.start(element, { relays })` | `site/signin.ts`, built to `site/dist/keykin-signin.js` |
-| The box page as a site | `site/box-login.ts`, built to `box/static/signin.js` |
 | Command-line signer | `keykin bunker <relay>` running, then `keykin scan '<code>'` |
 | Phone signer | The Android app: scan or paste a site's code. Sites are listed on the home screen with Sign out |
 

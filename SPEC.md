@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.9, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.10, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -529,9 +529,24 @@ box and nothing else: device requests (`POST /keykin`, unchanged), and the page'
 **Logging in to the page** gives a page session, a random token the box issues for 12 hours:
 
 - by password (section 11.3), or
-- by a device: the page shows `{ keykin: 2, login: { addr, key, code } }`, a device sends
-  `{ op: "login", account, code }` with a fingerprint, and the page's next `login_wait { code }`
-  returns the session.
+- by a scanned code, the way any site signs in (section 8j). The page shows a QRST `signer-ticket`
+  code and ends up with a remote signer for the account. It asks the box for a challenge
+  (`signin_start`), has the signer sign a kind 22242 event with the tags `["relay", <page origin>]`
+  and `["challenge", <challenge>]`, and sends that (`signin { event }`). The box checks the
+  signature, the kind, that the challenge is one it gave and unused, and that `created_at` is
+  within ten minutes. The session is for the event's `pubkey`.
+
+The account page used to show a code of its own (`{ keykin: 2, login: … }`, answered by
+`{ op: "login" }`). The page no longer shows it. The box still answers it, for apps built before
+this.
+
+**The box need not hold the account that signs in.** A phone with the whole key on it and no box
+signs in the same way. For such a session `me` returns `{ held: false, npub, open }`, and the only
+other calls are `logout` and `protect`. `protect` returns a setup code made for that one account
+(a request approved in advance, with `only: <npub>`): the phone scans it and brings the account
+in (`import`), keeping the whole key as its backup. The code is refused for any other account
+and for making a new one. `protect` works only on an open box (`KEYKIN_OPEN=1`); otherwise it
+answers `not_open` and the account needs a code from the admin page.
 
 **A page session has the person's authority, however it was made** (Aaron, 2026-11-17: "the
 password *is* the auth"). The page still holds no piece of the key, so two kinds of thing

@@ -15,16 +15,21 @@ const H = { connection: 'close' };
 const device = (name: string): D.Me => ({ ...newMemberKey(), name, ...softwareChip() });
 const note = (npub: string, content = 'hi') => ({ pubkey: npub, created_at: 1700000000, kind: 1, tags: [], content });
 
-async function world() {
-  const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, sidePort: 0, behindLogin: true, url: 'http://to-be-set', log: () => {} });
-  const login = await startLogin({ box: `http://127.0.0.1:${box.sidePort}`, port: 0, log: () => {} });
+// QRST's own test relay, for the page's sign-in by a scanned code. Without it the page is given a relay that is not there.
+const relayTool = process.env.QRST_REPO ? join(process.env.QRST_REPO, 'tools/test-relay.mjs') : join(homedir(), 'qr-secret-transfer/tools/test-relay.mjs');
+
+async function world(o: { open?: boolean } = {}) {
+  const testRelay = existsSync(relayTool) ? await (await import(relayTool)).startRelay({}) : null;
+  const relay: string = testRelay?.url ?? 'ws://127.0.0.1:9';
+  const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, sidePort: 0, behindLogin: true, url: 'http://to-be-set', open: o.open, log: () => {} });
+  const login = await startLogin({ box: `http://127.0.0.1:${box.sidePort}`, port: 0, relays: [relay], log: () => {} });
   const base = `http://127.0.0.1:${login.port}`;
   const send: D.Send = async (r) => (await fetch(`${base}/keykin`, { method: 'POST', body: JSON.stringify(r), headers: H })).json();
   const api = async (body: object, cookie = '', headers: Record<string, string> = { 'x-keykin': '1' }) => {
     const r = await fetch(`${base}/api`, { method: 'POST', body: JSON.stringify(body), headers: { ...H, 'content-type': 'application/json', cookie, ...headers } });
     return { status: r.status, body: await r.json() as any, cookies: r.headers.getSetCookie() };
   };
-  return { box, login, base, send, api, close: async () => { await login.close(); await box.close(); } };
+  return { box, login, base, send, api, relay, hasRelay: !!testRelay, closeRelay: async () => { await testRelay?.close?.(); }, close: async () => { await login.close(); await box.close(); await testRelay?.close?.(); } };
 }
 
 test('Keykin Login passes devices and the page\'s calls to the box, and nothing else', async () => {
@@ -95,7 +100,7 @@ test('with Keykin Login stopped, the box and private devices carry on', async ()
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send));
     assert.ok(verifyEvent(await D.signEvent(phone, held, note(held.npub), direct)));
     assert.equal((await fetch(`http://127.0.0.1:${w.box.port}/`, { headers: H })).status, 200);
-  } finally { await w.box.close(); }
+  } finally { await w.box.close(); await w.closeRelay(); }
 });
 
 function chromium(): string | null {
@@ -142,8 +147,8 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.goto(w.base + '/');
 
     // Sign-in screen: a code for a device, and the password form.
-    await page.waitForSelector('.qr svg');
-    assert.equal(JSON.parse((await page.textContent('#logintext'))!).login.key, w.box.box.state.key);
+    if (w.hasRelay) await page.waitForSelector('#scan .kk-qr svg');
+    await page.waitForSelector('#username');
     await shot('signin');
     await page.fill('#username', 'aaron'); await page.fill('#password', 'wrong one');
     await page.click('#pwgo');
@@ -233,13 +238,23 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.waitForSelector('text=The password was changed from the account page');
     await shot('activity');
 
-    // Sign out, then sign in again by a device instead of the password.
+    // Sign out, and the sign-in screen is back. (Signing in by a scanned code is tried on an emulator: it needs a signer app.)
     await page.click('nav >> text=Security');
     await page.click('#signout');
-    await page.waitForSelector('.qr svg');
-    await D.approveLogin(phone, held, (await page.textContent('#logintext'))!, w.send);
+    await page.waitForSelector('#username');
+    if (w.hasRelay) await page.waitForSelector('#scan .kk-qr svg');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'a brand new password');
+    await page.click('#pwgo');
     await page.waitForSelector('text=Welcome, Aaron');
-    assert.match((await page.textContent('.top'))!, /signed in with a device/);
+
+    // A phone's camera followed the code's link here: the page offers the app, and signs nobody in.
+    const phonePage = await (await browser.newContext({ viewport: { width: 390, height: 800 }, userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel 9a) Chrome/130 Mobile' })).newPage();
+    await phonePage.goto(w.base + '/#v=1&mode=offer&p=signer-ticket&npub=npub1vrue0xcv6vqfq3y2257epkxajfw8l52v5r5lanygnn0w0rdvg8ls978669&check=none&token=839a8c191794cd858d79c60457c48261&relay=wss://syb.lol&origin=' + w.base);
+    await phonePage.waitForSelector('#openapp');
+    assert.match((await phonePage.getAttribute('#openapp', 'href'))!, /^intent:\/\/npub1vrue0xcv6vqfq3y2257epkxajfw8l52v5r5lanygnn0w0rdvg8ls978669\?v=1&mode=offer&p=signer-ticket.*#Intent;scheme=qrst;/);
+    assert.equal(await phonePage.locator('#username').count(), 0);
+    await phonePage.click('#here');
+    await phonePage.waitForSelector('#username');
     await page.setViewportSize({ width: 390, height: 800 });
     for (const s of ['Devices', 'Sites and apps', 'Security', 'Home']) {
       await page.click(`nav >> text=${s}`);
@@ -248,4 +263,57 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await shot('home-phone');
     assert.deepEqual(errors, []);
   } finally { await browser.close(); await w.close(); }
+});
+
+test('signing in to the account page the way any site does: a signed challenge, with or without the box holding the account', async () => {
+  const { finalizeEvent, generateSecretKey, getPublicKey } = await import('nostr-tools/pure');
+  const { bytesToHex } = await import('../src/bytes.ts');
+  const now = () => Math.floor(Date.now() / 1000);
+  const proof = (sk: Uint8Array, challenge: string, more: object = {}) => finalizeEvent({ kind: 22242, created_at: now(), tags: [['relay', 'http://page'], ['challenge', challenge]], content: '', ...more }, sk);
+  const ks = (cookies: string[]) => cookies.find((c) => c.startsWith('ks='))!.split(';')[0];
+
+  // A box that lets nobody in by the page.
+  const shut = await world();
+  try {
+    const sk = generateSecretKey(), pub = getPublicKey(sk);
+    const c = (await shut.api({ call: 'signin_start' })).body;
+    assert.match(c.challenge, /^[0-9a-f]{32}$/); assert.deepEqual(c.relays, [shut.relay]);
+    // Not a login event, a challenge the box never gave, a broken signature: all refused.
+    assert.equal((await shut.api({ call: 'signin', event: proof(sk, c.challenge, { kind: 1 }) })).body.error, 'bad_request');
+    assert.equal((await shut.api({ call: 'signin', event: proof(sk, 'f'.repeat(32)) })).body.error, 'gone');
+    const bent = proof(sk, c.challenge); bent.sig = bent.sig.replace(/.$/, (x) => (x === '0' ? '1' : '0'));
+    assert.equal((await shut.api({ call: 'signin', event: bent })).body.error, 'wrong');
+    const good = proof(sk, c.challenge);
+    const done = await shut.api({ call: 'signin', event: good });
+    assert.equal(done.body.ok, true);
+    assert.equal((await shut.api({ call: 'signin', event: good })).body.error, 'gone');            // a challenge works once
+    const cookie = ks(done.cookies);
+    const me = (await shut.api({ call: 'me' }, cookie)).body;
+    assert.equal(me.held, false); assert.equal(me.npub, pub); assert.equal(me.open, false); assert.match(me.npubText, /^npub1/);
+    assert.equal((await shut.api({ call: 'protect' }, cookie)).body.error, 'not_open');
+    assert.equal((await shut.api({ call: 'note_put', kind: 'bunker', text: '' }, cookie)).body.error, 'not_here');
+    assert.equal((await shut.api({ call: 'logout' }, cookie)).body.ok, true);
+    assert.equal((await shut.api({ call: 'me' }, cookie)).body.error, 'login');
+  } finally { await shut.close(); }
+
+  // An open box: the signed-in account comes in with the code the page shows, and no other account can use that code.
+  const open = await world({ open: true });
+  try {
+    const sk = generateSecretKey(), pub = getPublicKey(sk);
+    const c = (await open.api({ call: 'signin_start' })).body;
+    const cookie = ks((await open.api({ call: 'signin', event: proof(sk, c.challenge) })).cookies);
+    assert.equal((await open.api({ call: 'me' }, cookie)).body.open, true);
+    const p = (await open.api({ call: 'protect' }, cookie)).body;
+    assert.match(p.svg, /^<svg/);
+    const qr = D.readQr(p.text);
+    await assert.rejects(D.importWithBox(device('Thief'), qr, bytesToHex(generateSecretKey()), open.send), /bad_code/);
+    await assert.rejects(D.createWithBox(device('Thief'), qr, open.send), /bad_code/);
+    const phone = device('Pixel 9a');
+    const held = await D.importWithBox(phone, qr, bytesToHex(sk), open.send);
+    assert.equal(held.npub, pub);
+    // The same session now sees the whole account page.
+    const me = (await open.api({ call: 'me' }, cookie)).body;
+    assert.equal(me.held, true); assert.deepEqual(me.devices.map((d: any) => d.name), ['Pixel 9a', 'Box']);
+    assert.ok(verifyEvent(await D.signEvent(phone, held, note(pub), open.send)));
+  } finally { await open.close(); }
 });

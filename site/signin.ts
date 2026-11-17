@@ -14,7 +14,9 @@ export interface SignedIn { pubkey: string; signer: BunkerSigner; ticket: Ticket
 
 const el = (tag: string, props: Record<string, any> = {}, ...kids: (Node | string)[]) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
 
-export function start(box: HTMLElement, o: { relays: string[] }): { done: Promise<SignedIn>; cancel: () => void } {
+/** `ask: false` skips the page's own "Sign in?" question, for a page that proves who signed in some other way before it trusts the signer. */
+/** `words` replaces the wording, for a page that speaks to people who have never heard of a signer. */
+export function start(box: HTMLElement, o: { relays: string[]; words?: { scan?: string; digits?: string; differ?: string; ask?: string }; ask?: boolean }): { done: Promise<SignedIn>; cancel: () => void } {
   let signer: BunkerSigner | undefined;
   let answer: ((yes: boolean) => void) | undefined;
   const draw = (v: SignInView) => {
@@ -25,16 +27,17 @@ export function start(box: HTMLElement, o: { relays: string[] }): { done: Promis
       const pic = el('div', { className: 'kk-qr', role: 'img', ariaLabel: 'Sign-in code' }); pic.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 0, scalable: true });
       const copy = el('button', { type: 'button', className: 'kk-copy', textContent: 'Copy the code as a link' }) as HTMLButtonElement;
       copy.onclick = async () => { try { await navigator.clipboard.writeText(v.uri!); copy.textContent = 'Copied'; } catch { copy.textContent = 'Could not copy'; } };
-      return void box.append(pic, el('p', { className: 'kk-dim', textContent: 'Scan this with your signer.' }), copy, el('p', { className: 'kk-link', id: 'kk-uri', hidden: true, textContent: v.uri }));
+      return void box.append(pic, el('p', { className: 'kk-dim', textContent: o.words?.scan ?? 'Scan this with your signer.' }), copy, el('p', { className: 'kk-link', id: 'kk-uri', hidden: true, textContent: v.uri }));
     }
     if (v.state === 'checking') return void box.append(
-      el('p', { textContent: 'Your signer shows five digits. They should be:' }), el('p', { className: 'kk-digits', id: 'kk-digits', textContent: v.digits ?? '' }),
-      el('p', { className: 'kk-dim', textContent: 'If they differ, say no on your signer.' }));
+      el('p', { textContent: o.words?.digits ?? 'Your signer shows five digits. They should be:' }), el('p', { className: 'kk-digits', id: 'kk-digits', textContent: v.digits ?? '' }),
+      el('p', { className: 'kk-dim', textContent: o.words?.differ ?? 'If they differ, say no on your signer.' }));
+    if (v.state === 'asking' && o.ask === false) return void box.append(el('p', { className: 'kk-dim', textContent: 'Signing in…' }));
     if (v.state === 'asking') {
       const yes = el('button', { type: 'button', className: 'kk-go', id: 'kk-yes', textContent: 'Sign in' }) as HTMLButtonElement;
       const no = el('button', { type: 'button', id: 'kk-no', textContent: 'Cancel' }) as HTMLButtonElement;
       yes.onclick = () => answer?.(true); no.onclick = () => answer?.(false);
-      return void box.append(el('p', { id: 'kk-asking', textContent: v.asking ?? 'Sign in?' }), yes, document.createTextNode(' '), no);
+      return void box.append(el('p', { id: 'kk-asking', textContent: o.words?.ask ?? v.asking ?? 'Sign in?' }), yes, document.createTextNode(' '), no);
     }
     if (v.state === 'connecting') return void box.append(el('p', { className: 'kk-dim', textContent: 'Signing in…' }));
     if (v.state === 'done') return void box.append(el('p', { className: 'kk-dim', textContent: 'Signed in.' }));
@@ -43,7 +46,7 @@ export function start(box: HTMLElement, o: { relays: string[] }): { done: Promis
   const origin = location.origin, baseUrl = location.origin + location.pathname;
   const run = startSignIn({
     relays: o.relays, baseUrl, origin, onView: draw,
-    confirm: () => new Promise<boolean>((resolve) => { answer = resolve; }),
+    confirm: () => o.ask === false ? Promise.resolve(true) : new Promise<boolean>((resolve) => { answer = resolve; }),
     redeem: async (t) => {
       signer = BunkerSigner.fromBunker(generateSecretKey(), { pubkey: t.signer, relays: t.relays, secret: t.t });
       await signer.connect();

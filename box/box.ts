@@ -51,6 +51,7 @@ export interface Ask {
   id: string; what: 'make' | 'transfer';
   key?: string;                        // the asking device's member key; none for a code the admin made
   name?: string; note?: string; chip?: string; account?: string;
+  only?: string;                       // a code made for one account (hex): good only for bringing that account in
   asked: number; state: 'waiting' | 'approved' | 'refused'; decided?: number;
 }
 /** `owner` is the hash of the owner secret that logs in to the admin page. Accounts are keyed by npub, hex. */
@@ -96,9 +97,9 @@ export class Box {
   qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode }); }
 
   /** The admin makes room for one more account: a request approved in advance, as a setup code. */
-  newSetupCode(addr: string, now: number): string {
+  newSetupCode(addr: string, now: number, only?: string): string {
     const id = bytesToHex(randomBytes(16));
-    this.state.requests[id] = { id, what: 'make', asked: now, state: 'approved', decided: now };
+    this.state.requests[id] = { id, what: 'make', asked: now, state: 'approved', decided: now, ...(only ? { only } : {}) };
     this.#save();
     return JSON.stringify({ keykin: 2, addr, key: this.state.key, code: id });
   }
@@ -124,10 +125,11 @@ export class Box {
     if (changed) this.#save();
   }
   /** The request a `create` or `transfer` names, if it may be used by this device now. */
-  #usable(id: unknown, device: string, what: 'make' | 'transfer'): string {
+  #usable(id: unknown, device: string, what: 'make' | 'transfer', bringing?: '*'): string {
     if (typeof id !== 'string') refuse('bad_code');
     if (id === this.setupCode) { if (this.accounts().length) refuse('already_set_up'); return id as string; }
     const r = this.state.requests[id as string];
+    if (r?.only && bringing !== '*') refuse('bad_code');      // made for one account, from the account page
     // A code the admin made (no asking device) is good for either; one that was asked for is good for what was asked.
     if (!r || (r.key && r.what !== what)) refuse('bad_code');
     if (r.state !== 'approved') refuse(r.state === 'waiting' ? 'not_approved' : 'refused');
@@ -353,7 +355,7 @@ export class Box {
   // Bringing in a key the person already has. The device split it; this is the box's piece. The whole
   // key existed on that device for a moment, which making a key together (create1, create2) avoids.
   #import(body: any, device: string, now: number) {
-    const id = this.#usable(body.request ?? body.code, device, 'make');
+    const id = this.#usable(body.request ?? body.code, device, 'make', '*');     // which account it is for is checked below
     if (body.chip !== undefined && !CHIP.test(body.chip)) refuse('bad_chip_key');
     let C: Commitment, share: bigint;
     try { C = commitmentFrom(body.commitment); share = scalarFrom(openFrom(this.state.sk, device, 'import', body.share)); }
@@ -363,6 +365,7 @@ export class Box {
     const npub = commitmentHex(C)[0].slice(2);
     if (commitmentHex(C)[0].slice(0, 2) !== '02') refuse('bad_piece');          // the key in its even-y form, as BIP-340 wants
     if (this.state.accounts[npub]) refuse('already_here');
+    if (this.state.requests[id]?.only && this.state.requests[id].only !== npub) refuse('bad_code');
     delete this.state.requests[id];
     this.state.accounts[npub] = {
       commitment: commitmentHex(C), npub, i: BOX_I, share: scalarHex(share),

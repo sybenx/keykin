@@ -86,3 +86,17 @@ ul.plain { margin:0; padding-left:18px; font-size:14px; line-height:1.6; }
 .qr svg { display:block; width:100%; height:100%; }
 .signin input.field { height:46px; font-size:15px; }
 .signin button.btn.go { height:46px; margin-top:6px; }
+/* Sign-in by a scanned code (signin.js draws these) */
+.kk { display:flex; flex-direction:column; align-items:center; gap:12px; min-height:240px; justify-content:center; }
+.kk p { margin:0; font-size:14px; line-height:1.45; }
+.kk-dim { color:var(--dim); }
+.kk-qr { width:184px; height:184px; border:1px solid var(--line); border-radius:10px; background:#fff; padding:10px; }
+.kk-qr svg { display:block; width:100%; height:100%; }
+.kk-digits { font-size:30px; letter-spacing:6px; font-variant-numeric:tabular-nums; }
+.kk-err { color:var(--danger); }
+.kk-link { display:none; }
+.kk button { height:36px; padding:0 14px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--text); font:500 14px Inter, system-ui, sans-serif; cursor:pointer; }
+.kk button.kk-go { border:0; background:var(--accent); color:var(--on); font-weight:600; }
+.kk button.kk-copy { border:0; background:none; color:var(--dim); font-weight:400; font-size:13px; text-decoration:underline; height:auto; padding:0; }
+a.linkbtn { display:inline-flex; align-items:center; justify-content:center; height:46px; padding:0 22px; border-radius:10px; text-decoration:none; background:var(--accent); color:var(--on); font:600 15px Inter, system-ui, sans-serif; }
+a.linkbtn:hover { color:var(--on); }

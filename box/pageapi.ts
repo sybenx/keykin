@@ -5,8 +5,12 @@
 import { Box, type Account, type Note, USERNAME } from './box.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha } from '../src/bytes.ts';
 import { timingSafeEqual } from 'node:crypto';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { eventId } from '../src/event.ts';
 
-const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180, NOTE_SECONDS = 600;
+const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180, NOTE_SECONDS = 600, CHALLENGE_SECONDS = 900, PROOF_SKEW = 600;
+/** The kind of the event that proves who is signing in: a login event (NIP-42's kind), which signers sign without asking. */
+export const PROOF_KIND = 22242;
 const FREE_TRIES = 5, FIRST_LOCK = 15 * 60, LONGEST_LOCK = 24 * 3600, TRIES_A_MINUTE = 30;
 const HEX32 = /^[0-9a-f]{32}$/, HEX64 = /^[0-9a-f]{64}$/;
 
@@ -15,13 +19,17 @@ export class PageApi {
   #noteBy = new Map<string, string>();      // note id -> the session that left it
   #logins = new Map<string, { until: number; browser: string; account?: string }>();
   #notes = new Map<string, Note[]>();
+  #challenges = new Map<string, number>();   // challenge -> good until
   #tries: number[] = [];
   readonly box: Box;
   /** The address devices reach the box at, for the login codes the page shows. */
   readonly addr: () => string;
 
-  constructor(box: Box, addr: () => string) {
-    this.box = box; this.addr = addr;
+  /** Whether anyone who signs in may bring their account onto this box without the admin approving. */
+  readonly open: () => boolean;
+
+  constructor(box: Box, addr: () => string, open: () => boolean = () => false) {
+    this.box = box; this.addr = addr; this.open = open;
     box.onLogin = (code, account) => {
       const l = this.#logins.get(code);
       if (!l || l.account) return false;
@@ -50,6 +58,28 @@ export class PageApi {
       switch (body?.call) {
         case 'pw_salt': return { ok: true, salt: this.#saltFor(String(body.username ?? '')) };
         case 'pw_login': return this.#pwLogin(body, now);
+        // Signing in the way any site does: the page gets a signer for the account (by a scanned code), and
+        // that signer signs this challenge. The box only checks the signature. It need not hold the account.
+        case 'signin_start': {
+          if (this.#challenges.size > 2000) refuse('too_many');
+          const challenge = bytesToHex(randomBytes(16));
+          this.#challenges.set(challenge, now + CHALLENGE_SECONDS);
+          return { ok: true, challenge };
+        }
+        case 'signin': {
+          const e = body.event;
+          if (!e || typeof e !== 'object' || !HEX64.test(e.pubkey ?? '') || !HEX64.test(e.id ?? '') || typeof e.sig !== 'string' || !/^[0-9a-f]{128}$/.test(e.sig)
+            || e.kind !== PROOF_KIND || !Number.isInteger(e.created_at) || !Array.isArray(e.tags) || typeof e.content !== 'string') refuse('bad_request');
+          const challenge = e.tags.find((t: any) => Array.isArray(t) && t[0] === 'challenge')?.[1];
+          if (typeof challenge !== 'string' || !this.#challenges.has(challenge)) refuse('gone');
+          if (Math.abs(now - e.created_at) > PROOF_SKEW) refuse('gone');
+          let good = false;
+          try { good = eventId({ pubkey: e.pubkey, created_at: e.created_at, kind: e.kind, tags: e.tags, content: e.content }) === e.id && schnorr.verify(hexToBytes(e.sig), hexToBytes(e.id), hexToBytes(e.pubkey)); } catch { good = false; }
+          if (!good) refuse('wrong');
+          this.#challenges.delete(challenge);                    // a challenge works once
+          if (this.box.state.accounts[e.pubkey]) this.box.happened(e.pubkey, 'A browser was signed in to the account page by a device', now);
+          return { ok: true, session: this.#newSession(e.pubkey, now, 'device') };
+        }
         case 'login_start': {
           if (!HEX32.test(body.browser ?? '')) refuse('bad_request');
           if (this.#logins.size > 500) refuse('too_many');
@@ -67,9 +97,21 @@ export class PageApi {
       }
       // Everything below needs a session.
       const ses = this.#sessions.get(body?.session) ?? refuse('login');
-      const a = this.box.state.accounts[ses.account] ?? refuse('login');
+      const a = this.box.state.accounts[ses.account];
+      if (!a) {
+        // Signed in, but this box holds no piece of the account yet. All it can do here is come in.
+        switch (body.call) {
+          case 'me': return { ok: true, how: ses.how, npub: ses.account, held: false, open: this.open() };
+          case 'protect': {
+            if (!this.open()) refuse('not_open');
+            return { ok: true, text: this.box.newSetupCode(this.addr(), now, ses.account) };
+          }
+          case 'logout': case 'logout_all': this.#sessions.delete(body.session); return { ok: true };
+          default: return refuse('not_here');
+        }
+      }
       switch (body.call) {
-        case 'me': return { ok: true, how: ses.how, ...this.#view(a) };
+        case 'me': return { ok: true, how: ses.how, held: true, ...this.#view(a) };
         case 'block': { const n = this.#name(a, body.key); this.box.ownerBlock(body.key, a.npub); this.box.happened(a.npub, `${n} was blocked from the account page`, now); return { ok: true }; }
         case 'unblock': { const n = this.#name(a, body.key); this.box.unblockIn(a.npub, body.key); this.box.happened(a.npub, `${n} was unblocked from the account page`, now); return { ok: true }; }
         case 'revoke': {
@@ -111,6 +153,7 @@ export class PageApi {
   #tidy(now: number) {
     for (const [t, s] of this.#sessions) if (s.until < now) this.#sessions.delete(t);
     for (const [c, l] of this.#logins) if (l.until < now) this.#logins.delete(c);
+    for (const [c, until] of this.#challenges) if (until < now) this.#challenges.delete(c);
     for (const id of this.#noteBy.keys()) if (![...this.#notes.values()].some((l) => l.some((n) => n.id === id))) this.#noteBy.delete(id);
     for (const [a, list] of this.#notes) { const keep = list.filter((n) => now - n.at < NOTE_SECONDS); if (keep.length) this.#notes.set(a, keep); else this.#notes.delete(a); }
   }

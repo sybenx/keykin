@@ -28,14 +28,14 @@
   const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
   const say = (code) => ({
     wrong: 'That username and password do not match.', slow_down: 'Too many tries. Wait a minute.', no_box: 'The box cannot be reached right now.',
-    cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.',
+    cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.', not_open: 'The owner of this server has to let you in first.', not_here: 'This server does not look after your account yet.', gone: 'That ran out. Try again.',
     bad_username: 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.', username_taken: 'That username is taken on this box.',
   }[code] ?? `That did not work (${code}).`);
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   let timers = [];
   const every = (ms, f) => { const t = setInterval(f, ms); timers.push(t); return t; };
   const stopTimers = () => { timers.forEach(clearInterval); timers = []; };
-  let me = null, section = 'home', flash = null;
+  let me = null, section = 'home', flash = null, leave = () => {};
 
   async function verifier(password, saltHex) {
     if (!crypto.subtle) throw new Error('insecure');
@@ -47,13 +47,34 @@
   // What the box stores for a verifier: SHA-256("keykin2-pw" ‖ verifier).
   const checkOf = async (verifierHex) => sha256hex(new Uint8Array([...new TextEncoder().encode('keykin2-pw'), ...verifierHex.match(/../g).map((b) => parseInt(b, 16))]));
 
+  // ---- A phone's camera followed a sign-in code's link here -------------------------------------------
+  // The code on the sign-in screen is a link to this page, so a camera app opens it. Nothing is acted
+  // on: the page offers to hand the code to the app, and only when the person taps (QRST 11.2c).
+
+  function showHandoff() {
+    const hash = location.hash.slice(1), params = new URLSearchParams(hash);
+    const rest = hash.split('&').filter((part) => !part.startsWith('npub=')).join('&');
+    const handoff = `${params.get('npub')}?${rest}`;
+    const get = 'https://github.com/sybenx/marble/releases/latest';
+    const open = el('a', { className: 'btn go linkbtn', id: 'openapp', href: /Android/i.test(navigator.userAgent)
+      ? `intent://${handoff}#Intent;scheme=qrst;S.browser_fallback_url=${encodeURIComponent(get)};end` : `qrst://${handoff}` }, 'Open in Marble');
+    const here = el('button', { className: 'linkish', id: 'here', type: 'button', on: { click: () => { history.replaceState(null, '', location.pathname); showLogin(); } } }, 'Sign in on this device instead');
+    app.replaceChildren(el('div', { className: 'signin' },
+      el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
+      el('div', { className: 'panel' }, el('div', { className: 'half scan' },
+        el('h2', {}, 'Finish in Marble'),
+        el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, 'You scanned a sign-in code with your camera. Marble is the app that signs you in with it.'),
+        open,
+        el('a', { className: 'small', id: 'getapp', href: get, rel: 'noopener' }, 'Get Marble'))),
+      here));
+  }
+  const fromCamera = () => { const h = location.hash; return window.top === window.self && /[#&]p=signer-ticket(&|$)/.test(h) && /[#&]npub=npub1/.test(h) && /[#&]v=/.test(h); };
+
   // ---- Signing in ------------------------------------------------------------------------------------
 
   async function showLogin(message) {
-    stopTimers(); section = 'home'; flash = null;
-    const qrBox = el('div', { className: 'qr', role: 'img', ariaLabel: 'Login QR code' });
-    const waiting = el('div', { className: 'small dim', id: 'scanstate' }, 'Waiting for your phone…');
-    const codeText = el('p', { className: 'mono small', id: 'logintext' });
+    leave(); stopTimers(); section = 'home'; flash = null;
+    const scan = el('div', { className: 'kk', id: 'scan' });
     const err = el('p', { className: 'err small', role: 'alert', hidden: !message }, message ?? '');
     const user = el('input', { className: 'field', type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, required: true });
     const pass = el('input', { className: 'field', type: 'password', id: 'password', autocomplete: 'current-password', required: true });
@@ -73,27 +94,74 @@
     app.replaceChildren(el('div', { className: 'signin' },
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
       el('div', { className: 'panel' },
-        el('div', { className: 'half scan' }, el('h2', {}, 'Scan with your phone'), qrBox,
-          el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, 'Open Marble on a device in your account and scan this. It asks for your fingerprint.'), waiting,
-          el('details', { className: 'small' }, el('summary', { className: 'dim' }, 'No camera? Copy the code as text'), codeText)),
+        el('div', { className: 'half scan' }, el('h2', {}, 'Scan with your phone'), scan),
         el('div', { className: 'rule' }),
         el('div', { className: 'half' }, el('h2', {}, 'Or use your password'), err, form,
           el('div', { className: 'small dim', style: 'line-height:1.45' }, 'Your password signs you in fully. A few things that cannot be undone still ask for a Yes on one of your devices.'))),
-      el('div', { className: 'small dim' }, 'Your key is never on this page. It lives in pieces on your devices and your box.')));
+      el('div', { className: 'small dim' }, 'Your account never leaves your phone. This page only asks it who you are.')));
 
-    const fresh = async () => {
-      const r = await api('login_start').catch(() => ({ error: 'no_box' }));
-      if (!r.ok) { qrBox.replaceChildren(); waiting.textContent = say(r.error); return null; }
-      qrBox.innerHTML = r.svg; codeText.textContent = r.text;      // the svg is made by this page's own server
-      return r.code;
+    // The same sign-in any site uses: the phone scans the code, and then proves who it is by signing a
+    // one-time challenge from the box. A code lasts a few minutes, so a new one is drawn when it runs out.
+    let run = null, live = true;
+    leave = () => { live = false; run?.cancel(); };
+    const begin = async () => {
+      if (!live) return;
+      const c = await api('signin_start').catch(() => ({ error: 'no_box' }));
+      if (!live) return;
+      if (!c.ok) { scan.replaceChildren(el('p', { className: 'err small', role: 'alert' }, say(c.error))); return void setTimeout(begin, 5000); }
+      // No "Sign in?" question here: the phone already asked, and the box checks the phone's signature before it lets this browser in.
+      run = KeykinSignIn.start(scan, { relays: c.relays, ask: false, words: {
+        scan: 'Open Marble on your phone and scan this.',
+        digits: 'Your phone shows five digits. They should be:', differ: 'If they differ, say no on your phone.',
+      } });
+      try {
+        const { signer } = await run.done;
+        const event = await signer.signEvent({ kind: 22242, created_at: Math.floor(Date.now() / 1000), tags: [['relay', location.origin], ['challenge', c.challenge]], content: '' });
+        signer.close().catch(() => {});
+        const r = await api('signin', { event });
+        if (!live) return;
+        if (r.ok) return showAccount();
+        scan.replaceChildren(el('p', { className: 'err small', role: 'alert' }, say(r.error)));
+      } catch (x) { if (!live) return; }
+      setTimeout(begin, 2500);          // cancelled, ran out or failed: the widget has said why; then a fresh code
     };
-    let code = await fresh(), started = Date.now();
-    every(1500, async () => {
-      if (!code) return;
-      if (Date.now() - started > 170000) { code = await fresh(); started = Date.now(); return; }
-      const r = await api('login_wait', { code }).catch(() => null);
-      if (r && r.ok && !r.waiting) showAccount();
-      else if (r && r.error === 'gone') { code = await fresh(); started = Date.now(); }
+    begin();
+  }
+
+  // ---- Signed in, but this server does not hold the account yet --------------------------------------
+
+  function showNew(r) {
+    const out = el('button', { className: 'linkish', id: 'signout', on: { click: async () => { await api('logout').catch(() => {}); showLogin(); } } }, 'Sign out');
+    const body = el('div', { className: 'half scan', id: 'newbody' });
+    const start = () => {
+      const go = el('button', { className: 'btn go', id: 'protect', type: 'button' }, 'Protect this account');
+      go.onclick = async () => {
+        go.disabled = true;
+        const p = await api('protect').catch(() => ({ error: 'no_box' }));
+        if (p.error === 'login') return showLogin(say('login'));
+        if (!p.ok) { go.disabled = false; return void note.replaceChildren(say(p.error)); }
+        const qr = el('div', { className: 'qr', role: 'img', ariaLabel: 'Code to scan' }); qr.innerHTML = p.svg;      // made by this page's own server
+        body.replaceChildren(el('h2', {}, 'Scan with your phone'), qr,
+          el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, 'Open Marble on your phone and scan this. This page moves on when it is done.'),
+          el('details', { className: 'small' }, el('summary', { className: 'dim' }, 'No camera? Copy the code as text'), el('p', { className: 'mono small', id: 'protecttext' }, p.text)));
+      };
+      const note = el('p', { className: 'err small', role: 'alert' });
+      body.replaceChildren(
+        el('h2', {}, 'You are signed in'),
+        el('div', { className: 'mono small', id: 'who' }, r.npubText.slice(0, 16) + '…' + r.npubText.slice(-6)),
+        el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, r.open
+          ? 'This server does not look after your account yet. When it does, a lost phone can be blocked, you can see everything that is signed in, and you can sign in here with a password.'
+          : 'This server does not look after your account yet. Its owner has to let you in first.'),
+        r.open ? go : null, note);
+    };
+    start();
+    app.replaceChildren(el('div', { className: 'signin' },
+      el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Your account'), el('div', { className: 'dim' }, location.host)),
+      el('div', { className: 'panel' }, body), out));
+    every(3000, async () => {
+      const n = await api('me').catch(() => null);
+      if (n && n.ok && n.held !== false) showAccount();
+      else if (n && n.error === 'login') showLogin(say('login'));
     });
   }
 
@@ -102,9 +170,10 @@
   const SECTIONS = [['home', 'Home'], ['devices', 'Devices'], ['sites', 'Sites and apps'], ['security', 'Security'], ['backup', 'Backup'], ['activity', 'Recent activity']];
 
   async function showAccount() {
-    stopTimers();
+    leave(); stopTimers();
     const r = await api('me').catch(() => ({ error: 'no_box' }));
     if (!r.ok) return showLogin(r.error === 'login' ? undefined : say(r.error));
+    if (r.held === false) return showNew(r);
     me = r; draw();
     every(15000, async () => {
       const n = await api('me').catch(() => null);
@@ -281,5 +350,5 @@
       el('div', { className: 'with-note' }, save, off, line));
   }
 
-  showAccount();
+  if (fromCamera()) showHandoff(); else showAccount();
 })();

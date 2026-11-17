@@ -1,0 +1,27 @@
+# Dockge stack `keykin`: the Keykin box. One always-on machine holding one piece of the key.
+#
+# Its page is at http://<this machine>:7460. Reach it only over a private network (a tailnet):
+# the page and the device endpoint are plain HTTP. Its state, with the box's piece, is in
+# /data/keykin as Dockge's Docker sees it, owned by uid 1000.
+#
+# On first start it writes its owner secret to /data/keykin/owner-secret.txt. Read it, keep it
+# somewhere safe, and delete the file.
+#
+# The image is built here from ./app, never downloaded (pull_policy: build), so Update rebuilds it.
+services:
+  keykin:
+    build:
+      context: ./app
+      dockerfile: deploy/Dockerfile
+    image: keykin-box:0.1.0
+    pull_policy: build
+    user: "1000:1000"
+    environment:
+      # Relays the box page uses for sign-in by a scanned code (QRST). Leave empty to use the
+      # page's own scan-to-log-in instead.
+      KEYKIN_RELAYS: wss://syb.lol
+    volumes:
+      - /data/keykin:/data
+    ports:
+      - 7460:7460
+    restart: unless-stopped

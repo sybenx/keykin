@@ -4,7 +4,8 @@
 //   KEYKIN_PORT  port (default 7460)
 //   KEYKIN_RELAYS  relays (comma separated, wss://) the box page uses for sign-in by a scanned code (QRST).
 //                  Without any, the page falls back to its own scan-to-log-in.
-// On its first start it prints the owner secret once. The owner logs in to the page with it.
+// On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
+// The owner logs in to the page with it.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
@@ -35,6 +36,9 @@ export function startBox(o: { dir: string; addr?: string; port?: number; relays?
     ownerSecret = bytesToHex(randomBytes(16)).match(/.{4}/g)!.join('-');
     box.state.owner = bytesToHex(sha('keykin2-owner', ownerSecret));
     log(`keykin box: owner secret (shown once, keep it): ${ownerSecret}`);
+    // Also left in a file only the box's own user can read, for a box whose output is hard to get at
+    // (a container). Delete it once the secret is kept somewhere else.
+    writeFileSync(join(o.dir, 'owner-secret.txt'), ownerSecret + '\n', { mode: 0o600 });
   }
   if (!state || ownerSecret) save(box.state);
 

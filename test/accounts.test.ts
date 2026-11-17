@@ -73,6 +73,7 @@ test('asking for an account waits for the admin', async () => {
   const id = await D.askBox(carol, 'make', "Carol, Aaron's sister", send, NOW);
   assert.equal(await D.askBox(carol, 'make', 'again', send, NOW), id);         // one waiting request per device
   assert.equal(await D.asked(carol, id, send, NOW), 'waiting');
+  assert.deepEqual(await D.askedWithKey(carol, id, send, NOW), { state: 'waiting', key: box.state.key });    // all a phone with only an address needs
   await assert.rejects(D.createWithBox(carol, { key: box.state.key, code: id }, send, NOW), /not_approved/);
   // What the admin sees.
   const r = box.state.requests[id];
@@ -89,6 +90,13 @@ test('asking for an account waits for the admin', async () => {
   const id2 = await D.askBox(dave, 'make', '', send, NOW);
   box.decide(id2, false, NOW);
   await assert.rejects(D.createWithBox(dave, { key: box.state.key, code: id2 }, send, NOW), /refused/);
+  // Taking a request back: only the one who asked can.
+  const frank = device('Frank');
+  const id4 = await D.askBox(frank, 'make', '', send, NOW);
+  await assert.rejects(D.askCancel(dave, id4, send, NOW), /gone/);
+  await D.askCancel(frank, id4, send, NOW);
+  assert.equal(await D.asked(frank, id4, send, NOW), 'gone');
+  assert.equal(box.state.requests[id4], undefined);
   const eve = device('Eve');
   const id3 = await D.askBox(eve, 'make', '', send, NOW);
   assert.equal(box.handle(await seal({ op: 'asked', request: id3 }, eve.sk, NOW + 8 * 86400), NOW + 8 * 86400).state, 'gone');

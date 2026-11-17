@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync } from 'node:fs';
+import { mkdtempSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -55,6 +55,28 @@ test('two command-line devices: create, invite, add, join, sign, block, nsec', a
     assert.doesNotMatch((await cli(mac, 'status')).text, /Mac mini/);
     await assert.rejects(cli(mini, 'sign', '{}'), /unknown_member/);
     assert.ok(verifyEvent(JSON.parse((await cli(mac, 'sign', '{"content":"after the cycle"}')).text)));
+  } finally { await closeBox(b); }
+});
+
+test('importing a key keeps the whole key as a backup until the person forgets it', async () => {
+  const b = await startBox({ dir: tmp('kk-box-'), port: 0, log: () => {} });
+  try {
+    const home = tmp('kk-mac-');
+    const sk = generateSecretKey(), nsec = nip19.nsecEncode(sk), npub = getPublicKey(sk);
+    const done = (await cli(home, 'import', b.qr()!, nsec, 'MacBook')).text;
+    assert.match(done, new RegExp(nip19.npubEncode(npub))); assert.match(done, /still holds the whole key/);
+    const saved = () => JSON.parse(readFileSync(join(home, 'device.json'), 'utf8'));
+    assert.equal(saved().nsec, Buffer.from(sk).toString('hex'));                 // kept, in the 0600 state file
+    assert.equal(statSync(join(home, 'device.json')).mode & 0o777, 0o600);
+    const ev = JSON.parse((await cli(home, 'sign', '{"content":"same me"}')).text);
+    assert.ok(verifyEvent(ev)); assert.equal(ev.pubkey, npub);
+    // Nothing forgets it but the person.
+    await cli(home, 'status'); await cli(home, 'sign', '{}');
+    assert.equal(saved().nsec, Buffer.from(sk).toString('hex'));
+    assert.match((await cli(home, 'forget-key')).text, /Forgotten/);
+    assert.equal(saved().nsec, undefined);
+    assert.match((await cli(home, 'forget-key')).text, /holds no whole key/);
+    assert.ok(verifyEvent(JSON.parse((await cli(home, 'sign', '{"content":"still me"}')).text)));
   } finally { await closeBox(b); }
 });
 

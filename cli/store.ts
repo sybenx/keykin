@@ -12,6 +12,8 @@ export interface Saved {
   addr?: string;
   held?: { commitment: string[]; i: number; share: string; npub: string; boxKey: string; epoch?: number };
   bunker?: BunkerState;
+  /** The whole key (hex), kept as a backup after `import` until the person runs `forget-key`. */
+  nsec?: string;
   /** The device list as last seen at the box, for when the box is off. */
   list?: { key: string; i: number; name: string; kind: string; blocked: boolean; addr?: string }[];
 }

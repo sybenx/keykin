@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.7, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.8, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -33,7 +33,6 @@ sealed package.
 ### Bringing in a key the person already has
 
 The other way to start an account, for someone who already has an nsec (Aaron, 2026-11-17).
-The whole key is on that one device for a moment; from then on it lives in pieces.
 
 1. The device takes the nsec, in its even-y form, as `a0`, picks a random `a1`, and so has the
    line. Its own piece is `f(1)` and the box's is `f(2)`.
@@ -42,7 +41,14 @@ The whole key is on that one device for a moment; from then on it lives in piece
    or an approved request as for `create1`.
 3. The box checks that the piece lies on that line, refuses a key it already holds
    (`already_here`), and stores the account. The npub is the one the nsec always had.
-4. The device forgets the nsec.
+4. **The device keeps the whole nsec**, encrypted at rest, as the tier 1 backup. It is how the
+   account comes back if the pieces are lost, and it can still be moved to another device by
+   QRST. Signing uses the pieces from then on.
+5. **Forgetting the nsec is the person's choice**, made on that device ("Forget the whole key on
+   this phone", `keykin forget-key`). No code forgets it otherwise.
+
+"The nsec is never raw on any device" (section 2) is about keys made together with the box. A
+key that was brought in already exists, and its owner holds it.
 
 ## 3. Signing
 
@@ -393,11 +399,17 @@ admin page.
 
 - `what` is `make` or `transfer`. A transfer also carries `"account": "<npub hex>"`.
 - `name` is the device's name, up to 60 characters. `note` is free text for the admin, up to 200.
-- The answer is `{ ok: true, request: "<id>" }`. One member key may have one request waiting.
+- The answer is `{ ok: true, request: "<id>", key: "<the box's member key>" }`. One member key may
+  have one request waiting.
   The box keeps at most 50 waiting and drops those older than seven days.
 
-**Waiting.** The device sends `{ op: "asked", request }` to hear the state: `waiting`,
-`approved`, `refused` or `gone`. An approved request can be used for 24 hours.
+**Waiting.** The device sends `{ op: "asked", request }` to hear `{ state, key }`. The state is
+`waiting`, `approved`, `refused` or `gone`. `key` is the box's member key, which a device that
+started from only an address needs for `create1` and `create2`. An approved request can be
+used for 24 hours. `{ op: "ask_cancel", request }` from the device that asked takes it back.
+
+A device that learned the key this way trusts the address it asked. Over `https` that is the
+certificate; a setup code carries the key itself.
 
 **What the admin sees:** the device's name, the note, `make` or `transfer` (with the npub for a
 transfer), when it was asked, and the first 8 characters of the device's member key. Buttons:

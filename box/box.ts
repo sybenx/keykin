@@ -138,7 +138,14 @@ export class Box {
       this.#seen.set(body.id, body.ts);
       this.#tidyRequests(now);
       if (body.op === 'ask') return this.#ask(body, req.key, now);
-      if (body.op === 'asked') return { ok: true, state: this.state.requests[body.request]?.state ?? 'gone' };
+      // `key` is the box's member key: what a device seals to when it goes on to make the account.
+      if (body.op === 'asked') return { ok: true, state: this.state.requests[body.request]?.state ?? 'gone', key: this.state.key };
+      if (body.op === 'ask_cancel') {
+        const r = this.state.requests[body.request];
+        if (!r || r.key !== req.key) refuse('gone');
+        delete this.state.requests[r!.id]; this.#pending.delete(r!.id); this.#save();
+        return { ok: true };
+      }
       if (body.op === 'create1') return this.#create1(body, req.key);
       if (body.op === 'create2') return this.#create2(body, req.key, now);
       if (body.op === 'import') return this.#import(body, req.key, now);
@@ -235,13 +242,13 @@ export class Box {
     if (body.chip !== undefined && !CHIP.test(body.chip)) refuse('bad_chip_key');
     const all = Object.values(this.state.requests);
     const mine = all.find((r) => r.key === device && r.state === 'waiting');
-    if (mine) return { ok: true, request: mine.id };
+    if (mine) return { ok: true, request: mine.id, key: this.state.key };
     if (all.filter((r) => r.state === 'waiting').length >= MAX_WAITING) refuse('too_many');
     const id = bytesToHex(randomBytes(16));
     this.state.requests[id] = { id, what: body.what, key: device, name: String(body.name ?? 'Device').slice(0, 60), note: String(body.note ?? '').slice(0, 200),
       chip: body.chip, account: body.account, asked: now, state: 'waiting' };
     this.#save();
-    return { ok: true, request: id };
+    return { ok: true, request: id, key: this.state.key };
   }
 
   /** Ends a grant for good (SPEC 11.5): from a device, or from the account page. */

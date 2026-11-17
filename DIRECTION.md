@@ -68,7 +68,13 @@ Build tiers 1 and 2 only. Tier 3 is not being built now.
 - **Adding a device never forms the key either.** An existing device and the box each give
   half of the newcomer's piece.
 
-This replaces the earlier idea of a primary device that generates the nsec and keeps it.
+This replaces the earlier idea of a primary device that generates the nsec and keeps it, for
+keys that are made new.
+
+**A key you bring in is different (Aaron, 2026-11-17).** If you start from an nsec you already
+have, the device splits it with the box and **keeps the whole nsec as the tier 1 QRST backup**.
+It is how the account comes back if the pieces are lost. Forgetting it is a choice you make on
+that device, and nothing else forgets it.
 
 ### Who acts as central
 

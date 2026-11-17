@@ -62,7 +62,8 @@ export async function createWithBox(me: Me, qr: { key: string; code: string }, s
 /** `tapped`: the person said Yes on this device to a hard-to-undo event (see destructive.ts). Without it the box answers `needs_tap`. */
 /**
  * Brings in a key the person already has (hex). This device splits it, keeps one piece and sends the
- * box the other, sealed. The caller must forget the whole key afterwards: from then on it lives in pieces.
+ * box the other, sealed. The caller KEEPS the whole key, encrypted at rest, as the tier 1 backup: it is
+ * how the account comes back if the pieces are lost. It is forgotten only when the person chooses to.
  */
 export async function importWithBox(me: Me, qr: { key: string; code: string }, nsecHex: string, send: Send, t = now()): Promise<Held> {
   if (!/^[0-9a-f]{64}$/.test(nsecHex)) refuse('bad_key');
@@ -200,6 +201,13 @@ export async function askBox(me: Me, what: 'make' | 'transfer', note: string, se
 export async function asked(me: Me, request: string, send: Send, t = now()): Promise<string> {
   return (await call(send, await seal({ op: 'asked', request }, me.sk, t))).state;
 }
+/** The same, with the box's member key: `{ state, key }`. A device that only had the box's address needs the key to go on. */
+export async function askedWithKey(me: Me, request: string, send: Send, t = now()): Promise<{ state: string; key: string }> {
+  const r = await call(send, await seal({ op: 'asked', request }, me.sk, t));
+  return { state: r.state, key: r.key };
+}
+/** Takes the request back. Only the device that asked can. */
+export async function askCancel(me: Me, request: string, send: Send, t = now()) { await call(send, await seal({ op: 'ask_cancel', request }, me.sk, t)); }
 
 // --- Username and password for the account page (SPEC 11.3) ----------------------------------------
 

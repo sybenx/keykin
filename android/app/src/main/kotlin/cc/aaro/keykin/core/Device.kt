@@ -126,7 +126,8 @@ object Device {
 
     /**
      * Brings in a key the person already has (hex). This device splits it, keeps one piece and sends the
-     * box the other, sealed. The caller must forget the whole key afterwards.
+     * box the other, sealed. The caller KEEPS the whole key, encrypted at rest, as the tier 1 backup. It is
+     * forgotten only when the person chooses to.
      */
     fun importKey(me: Me, qr: Qr, nsecHex: String, send: Send = http(qr.addr)): Held {
         if (!Regex("^[0-9a-f]{64}$").matches(nsecHex)) refuse("bad_key")
@@ -245,6 +246,11 @@ object Device {
         call(send, seal(JSONObject().put("op", "ask").put("what", what).put("name", me.name).put("note", note).apply { if (me.chip != null) put("chip", me.chip); if (account != null) put("account", account) }, me)).getString("request")
     /** `waiting`, `approved`, `refused` or `gone`. Once approved, use the id as the `code` of a Qr for `create`. */
     fun asked(me: Me, request: String, send: Send): String = call(send, seal(JSONObject().put("op", "asked").put("request", request), me)).getString("state")
+    /** The state, and the box's member key: what `Qr(addr, key, request)` needs when the phone only had the address. */
+    fun askedWithKey(me: Me, request: String, send: Send): Pair<String, String> =
+        call(send, seal(JSONObject().put("op", "asked").put("request", request), me)).let { it.getString("state") to it.getString("key") }
+    /** Takes the request back. Only the device that asked can. */
+    fun askCancel(me: Me, request: String, send: Send) { call(send, seal(JSONObject().put("op", "ask_cancel").put("request", request), me)) }
 
     // --- Username and password for the account page (SPEC 11.3) --------------------------------------
 

@@ -2,7 +2,9 @@
 // keykin: this computer as a Keykin device.
 //
 //   keykin create '<QR text from the box page>' [name]   make an account with the box
-//   keykin import '<setup code>' <nsec> [name]           the same, with a key you already have (nsec1… or hex)
+//   keykin import '<setup code>' <nsec> [name]           the same, with a key you already have (nsec1… or hex).
+//                                                        The whole key stays in this device's state file as a backup
+//   keykin forget-key                                    forget that backup. Only you decide when
 //   keykin invite [name]                                 on a NEW device: print its invite
 //   keykin add '<invite>'                                on a device in the account: add it, print the join text
 //   keykin join '<join text>'                            on the new device: collect its piece
@@ -63,8 +65,13 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       let hex: string;
       try { hex = raw.startsWith('nsec1') ? Buffer.from(nip19decode(raw).data as Uint8Array).toString('hex') : raw; } catch { hex = ''; }
       const held = await D.importWithBox(me, qr, hex, sender(qr.addr));
-      keep(s, held, qr.addr); save(file, s);
-      return out(`Account brought in. ${npubEncode(held.npub)}`);
+      keep(s, held, qr.addr); s.nsec = hex; save(file, s);
+      return out(`Account brought in. ${npubEncode(held.npub)}\nThis device still holds the whole key, as a backup. Run forget-key when you no longer want that.`);
+    }
+    case 'forget-key': {
+      if (!s.nsec) return out('This device holds no whole key.');
+      delete s.nsec; save(file, s);
+      return out('Forgotten. The key now lives only in pieces.');
     }
     case 'invite': {
       if (s.held) fail('This device is already in an account.');
@@ -189,7 +196,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, import, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
+    default: out('Commands: create, import, forget-key, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

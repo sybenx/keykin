@@ -55,7 +55,11 @@ class Store(private val c: Context) {
     @Synchronized fun keepHelpers(addrs: List<String>) { read()?.let { write(it.put("helpers", org.json.JSONArray(addrs))) } }
     /** The box, then the helpers. */
     fun send(h: Held): cc.aaro.keykin.core.Send = cc.aaro.keykin.core.Device.withHelpers(cc.aaro.keykin.core.Device.http(h.addr), helpers().map { cc.aaro.keykin.core.Device.http(it) })
-    /** Forgets the account on this phone: its piece goes. The phone's own key and name stay. */
+    /** The whole key (hex), kept encrypted here as a backup after an import, until the person forgets it. */
+    fun nsec(): String? = read()?.optString("nsec")?.takeIf { it.isNotEmpty() }
+    @Synchronized fun keepNsec(hex: String) { read()?.let { write(it.put("nsec", hex)) } }
+    @Synchronized fun forgetNsec() { read()?.let { it.remove("nsec"); write(it) } }
+    /** Forgets the account on this phone: its piece goes. The phone's own key and name stay, and so does a kept whole key. */
     @Synchronized fun forget() { read()?.let { it.remove("held"); it.remove("helpers"); write(it) } }
     @Synchronized fun keep(h: Held) { write((read() ?: error("no device")).put("held", h.json())) }
 }

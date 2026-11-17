@@ -54,6 +54,8 @@ class MainActivity : FragmentActivity() {
     private var problem by mutableStateOf<String?>(null)
     /** A key typed in on the import screen, waiting for the box's code. Never saved. */
     private var pendingNsec: String? = null
+    /** Whether this phone still holds the whole key as a backup (after an import). */
+    private var keptKey by mutableStateOf(false)
     private var apps by mutableStateOf<List<String>>(emptyList())
     private fun own(h: Held): Held { h.changed = { store.keep(it) }; store.keep(h); held = h; return h }
     override fun onResume() { super.onResume(); if (::store.isInitialized) apps = Apps.all(this) }
@@ -69,6 +71,7 @@ class MainActivity : FragmentActivity() {
         me = store.me(Build.MODEL ?: "Android device")
         held = store.held()?.also { it.changed = { h -> store.keep(h) } }
         apps = Apps.all(this)
+        keptKey = store.nsec() != null
         screen = if (held != null) Screen.Home else Screen.Start
         if (held != null) { refresh(); refreshSites() }
         // Dark icons on the light background and the reverse, so the status bar stays readable.
@@ -140,8 +143,8 @@ class MainActivity : FragmentActivity() {
                 if (held != null) refuse("already_set_up")
                 val nsec = pendingNsec
                 if (nsec != null) {
-                    own(Device.importKey(me, Texts.qr(t), nsec)); pendingNsec = null
-                    screen = Screen.Home; loadMembers(); note = "Your key is in pieces now. This phone no longer holds the whole key."
+                    own(Device.importKey(me, Texts.qr(t), nsec)); store.keepNsec(nsec); keptKey = true; pendingNsec = null
+                    screen = Screen.Home; loadMembers(); note = "Done. Signing now uses the pieces. This phone still holds the whole key as a backup, until you choose to forget it."
                     return@work
                 }
                 own(Device.create(me, Texts.qr(t))); screen = Screen.Home; loadMembers()
@@ -175,6 +178,12 @@ class MainActivity : FragmentActivity() {
     private fun cycle() = held?.let { h -> work {
         Device.cycle(me, h, fingerprint("Remove blocked devices for good")); loadMembers(); note = "Done. Blocked devices are gone for good."
     } }
+    // Showing the kept key asks for the fingerprint first, when this phone has one.
+    private fun showKept() = work {
+        val k = store.nsec() ?: refuse("no_key")
+        if (me.chip != null) Chip.sign(this, "Show the whole key", utf8("keykin-show-key"))
+        screen = Screen.Nsec(k)
+    }
     private fun showNsec() = held?.let { h -> work { screen = Screen.Nsec(Device.formNsec(me, h, fingerprint("Form the whole key on this device"))) } }
     private fun copy(text: String) { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Keykin", text)) }
 
@@ -213,7 +222,7 @@ class MainActivity : FragmentActivity() {
         }
         Card {
             Head("Use a key you already have")
-            Dim("Bring your nsec in. This phone splits it with the box and then forgets the whole key.")
+            Dim("Bring your nsec in. This phone splits it with the box, and keeps the whole key as a backup until you choose to forget it.")
             Btn("Bring in my nsec", enabled = !busy, modifier = Modifier.fillMaxWidth()) { screen = Screen.Import }
         }
         if (me.chip == null) Dim("This phone has no fingerprint or face set up. It will be able to sign, but not to add devices, unblock them or form the whole key.")
@@ -226,7 +235,7 @@ class MainActivity : FragmentActivity() {
         val p = palette()
         Card {
             Head("1. Your nsec")
-            Dim("Paste the key that starts with nsec1. It is used once, to make the pieces, and is not saved.")
+            Dim("Paste the key that starts with nsec1. This phone keeps it, encrypted, as a backup. Forgetting it is your choice, later.")
             BasicTextField(text, { text = it; ready = false }, Modifier.fillMaxWidth().heightIn(min = 72.dp).background(p.bg, RoundedCornerShape(8.dp)).border(1.dp, p.line, RoundedCornerShape(8.dp)).padding(12.dp),
                 textStyle = TextStyle(color = p.text, fontSize = 14.sp), cursorBrush = SolidColor(p.accent))
             Btn("Use this key", Kind.Main, !busy && text.isNotBlank(), Modifier.fillMaxWidth()) {
@@ -328,6 +337,18 @@ class MainActivity : FragmentActivity() {
             Dim("Forgetting the account here removes this phone's piece. The account itself is untouched. Without another device that can sign with the box, it cannot be used again.")
             if (!sure) Btn("Forget the account on this phone", Kind.Danger, !busy, Modifier.fillMaxWidth()) { sure = true }
             else Btn("Yes, forget it", Kind.Danger, !busy, Modifier.fillMaxWidth()) { store.forget(); held = null; members = emptyList(); sure = false; screen = Screen.Start; note = "This phone has no account now." }
+        }
+        if (keptKey) Card {
+            var sure by remember { mutableStateOf(false) }
+            Head("Backup: the whole key is on this phone")
+            Dim("You brought this key in, so this phone still holds all of it, encrypted. It is how the account comes back if the pieces are lost, and it can be moved to another device. Forgetting it is up to you.")
+            Btn("Show the whole key", enabled = !busy, modifier = Modifier.fillMaxWidth()) { showKept() }
+            if (!sure) Btn("Forget the whole key on this phone", Kind.Danger, !busy, Modifier.fillMaxWidth()) { sure = true }
+            else {
+                Warn("After this, the key lives only in pieces. Make sure you have it somewhere else if you want a backup.")
+                Btn("Yes, forget the whole key", Kind.Danger, !busy, Modifier.fillMaxWidth()) { store.forgetNsec(); keptKey = false; sure = false; note = "Forgotten. The key now lives only in pieces." }
+                Btn("Keep it", enabled = !busy, modifier = Modifier.fillMaxWidth()) { sure = false }
+            }
         }
         Card {
             Head("The whole key")

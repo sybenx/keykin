@@ -54,23 +54,6 @@ test('two command-line devices: create, invite, add, join, sign, block, nsec', a
     assert.doesNotMatch((await cli(mac, 'status')).text, /Mac mini/);
     await assert.rejects(cli(mini, 'sign', '{}'), /unknown_member/);
     assert.ok(verifyEvent(JSON.parse((await cli(mac, 'sign', '{"content":"after the cycle"}')).text)));
-
-    // Log a browser in to the box's page by "scanning" its code.
-    const base = `http://127.0.0.1:${b.port}`;
-    const first = await fetch(base + '/', { headers: { connection: 'close' } });
-    const page = await first.text();
-    const cookie = first.headers.get('set-cookie')!.split(';')[0];
-    const loginText = /id="logintext"[^>]*>([^<]+)</.exec(page)![1].replaceAll('&quot;', '"');
-    const code = JSON.parse(loginText).login.code;
-    const wait = () => fetch(`${base}/login/wait?code=${code}`, { headers: { connection: 'close', cookie } });
-    assert.deepEqual(await (await wait()).json(), { ok: false });
-    assert.equal((await fetch(`${base}/login/wait?code=${code}`, { headers: { connection: 'close' } })).status, 404);   // another browser
-    await cli(mac, 'login', loginText);
-    const done = await wait();
-    assert.deepEqual(await done.json(), { ok: true });
-    const session = done.headers.get('set-cookie')!.split(';')[0];
-    assert.match(await (await fetch(base + '/', { headers: { connection: 'close', cookie: session } })).text(), /Devices/);
-    assert.equal((await wait()).status, 404);                                                    // one use
   } finally { await closeBox(b); }
 });
 

@@ -1,32 +1,34 @@
-// The box as a process: the page its owner uses, one endpoint for devices, and one state file.
-//   KEYKIN_DIR   where state.json lives (default ./box-data)
-//   KEYKIN_ADDR  address to listen on (default 127.0.0.1; use the tailnet address to be reachable)
-//   KEYKIN_PORT  port (default 7460)
-//   KEYKIN_URL   the address devices reach this box at, for the codes its page shows. Set it when the page
-//                is opened through a proxy; otherwise the page uses the address the browser used.
-//   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the page already asks who you are (the Umbrel
-//                login, say). The page then asks for nothing itself and makes no owner secret. Use it only
-//                when the page cannot be reached any other way.
-//   KEYKIN_RELAYS  relays (comma separated, wss://) the box page uses for sign-in by a scanned code (QRST).
-//                  Without any, the page falls back to its own scan-to-log-in.
+// The box as a process. One state file, and two doors:
+//
+//   the main port   the admin page, plus the two things devices and the account page need
+//                   (POST /keykin and POST /page). Put it on a private network only.
+//   the side port   only POST /keykin and POST /page. This is what Keykin Login talks to. The
+//                   admin page does not exist on it.
+//
+//   KEYKIN_DIR           where state.json lives (default ./box-data)
+//   KEYKIN_ADDR          address to listen on (default 127.0.0.1; use the tailnet address to be reachable)
+//   KEYKIN_PORT          the main port (default 7460)
+//   KEYKIN_SIDE_PORT     the side port (default: none)
+//   KEYKIN_URL           the address devices reach this box at, for the codes its pages show. With Keykin
+//                        Login in front, this is the public address. Otherwise the admin page uses the
+//                        address the browser used.
+//   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the admin page already asks who you are (the
+//                        Umbrel login, say). The page then asks for nothing itself and makes no owner
+//                        secret. Use it only when the page cannot be reached any other way.
 // On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
-// The owner logs in to the page with it.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Box, type BoxState } from './box.ts';
-import { loginPage, setupPage, devicesPage } from './page.ts';
+import { PageApi } from './pageapi.ts';
+import { loginPage, codePage, adminPage } from './page.ts';
 import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/bytes.ts';
-import { verifyEvent } from 'nostr-tools/pure';
-import { fileURLToPath } from 'node:url';
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; url?: string; behindLogin?: boolean; relays?: string[]; log?: (s: string) => void }) {
-  const relays = (o.relays ?? []).filter(Boolean);
-  const signinJs = join(fileURLToPath(new URL('.', import.meta.url)), 'static/signin.js');
+export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   mkdirSync(o.dir, { recursive: true, mode: 0o700 });
   const file = join(o.dir, 'state.json');
@@ -34,6 +36,9 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
   const box = new Box(state);
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
+  const nowS = () => Math.floor(Date.now() / 1000);
+  const where = (): string => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
+  const page = new PageApi(box, () => o.url || where());
 
   // The owner secret is shown once, here. Only its hash is kept.
   let ownerSecret: string | null = null;
@@ -45,24 +50,11 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
     // (a container). Delete it once the secret is kept somewhere else.
     writeFileSync(join(o.dir, 'owner-secret.txt'), ownerSecret + '\n', { mode: 0o600 });
   }
-  if (!state || ownerSecret) save(box.state);
+  save(box.state);          // also rewrites an older state file in today's shape
 
   const sessions = new Map<string, { until: number; csrf: string }>();
   let fails: number[] = [];
-  // Logins waiting for a device to scan them: the code in the QR, tied to the browser that was shown it.
-  const logins = new Map<string, { until: number; browser: string; approved: boolean }>();
-  const LOGIN_SECONDS = 180;
-  box.onLogin = (code, _account, by) => {
-    const l = logins.get(code);
-    if (!l || l.until < nowS()) return false;
-    l.approved = true; log(`keykin box: login approved by ${by}`);
-    return true;
-  };
-  const newSession = (t: number) => { const token = bytesToHex(randomBytes(32)); sessions.set(token, { until: t + SESSION_SECONDS, csrf: bytesToHex(randomBytes(16)) }); return `kk=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}`; };
-  const nowS = () => Math.floor(Date.now() / 1000);
-  const where = () => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
-
-  // Behind someone else's login, whoever gets through is the owner. The form token still guards every button.
+  // Behind someone else's login, whoever gets through is the admin. The form token still guards every button.
   const proxied = { token: 'behind-login', until: Infinity, csrf: bytesToHex(randomBytes(16)) };
   const session = (req: IncomingMessage) => {
     if (o.behindLogin) return proxied;
@@ -78,136 +70,99 @@ export function startBox(o: { dir: string; addr?: string; port?: number; url?: s
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
-  // Challenges the account signs to log this browser in after a QRST sign-in: tied to the browser, used once.
-  const challenges = new Map<string, { until: number; browser: string }>();
-  const browserOf = (req: IncomingMessage) => /(?:^|;\s*)kkl=([0-9a-f]{32})/.exec(req.headers.cookie ?? '')?.[1];
-  const html = (res: ServerResponse, status: number, body: string, nonce = '', cookie?: string) => {
+  const html = (res: ServerResponse, status: number, body: string, nonce = '') => {
     res.writeHead(status, {
-      ...(cookie ? { 'set-cookie': cookie } : {}),
       'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
       'x-content-type-options': 'nosniff',
-      'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'${relays.length ? ' wss: ws:' : ''}; form-action 'self'; base-uri 'none'${nonce === 'self' ? `; script-src 'self'` : nonce ? `; script-src 'nonce-${nonce}'` : ''}`,
+      'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'${nonce ? `; script-src 'nonce-${nonce}'` : ''}`,
     });
     res.end(body);
   };
   const json = (res: ServerResponse, status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   const go = (res: ServerResponse, to: string, cookie?: string) => { res.writeHead(303, { location: to, ...(cookie ? { 'set-cookie': cookie } : {}) }); res.end(); };
+  const told = (res: ServerResponse, text: string) => go(res, `/?n=${encodeURIComponent(text)}`);
 
-  async function route(req: IncomingMessage, res: ServerResponse) {
+  // What both doors answer: devices' signed requests, and the account page's calls.
+  async function shared(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
+    if (req.method !== 'POST' || (path !== '/keykin' && path !== '/page')) return false;
+    let parsed: any;
+    try { parsed = JSON.parse(await readBody(req)); } catch { json(res, 400, { error: 'bad_json' }); return true; }
+    json(res, 200, path === '/keykin' ? box.handle(parsed, nowS()) : page.call(parsed, nowS()));
+    return true;
+  }
+
+  async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://box');
     const path = url.pathname, method = req.method ?? 'GET';
+    if (await shared(req, res, path)) return;
 
-    // Devices.
-    if (method === 'POST' && path === '/keykin') {
-      let parsed: any;
-      try { parsed = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad_json' }); }
-      return json(res, 200, box.handle(parsed, nowS()));
-    }
-
-    // The owner's page.
+    // The admin page.
     const s = session(req);
+    const addr = (): string => o.url || (req.headers.host ? `http://${req.headers.host}` : where());
     if (method === 'GET' && path === '/') {
-      if (!s) {
-        const error = url.searchParams.has('e') ? (url.searchParams.get('e') === 'wait' ? 'Too many tries. Wait a minute.' : 'That is not the owner secret.') : undefined;
-        if (!box.only()) return html(res, 200, loginPage({ error }));
-        if (relays.length && existsSync(signinJs)) {
-          const browser = bytesToHex(randomBytes(16));
-          return html(res, 200, loginPage({ error, relays }), 'self', `kkl=${browser}; HttpOnly; SameSite=Strict; Path=/login; Max-Age=900`);
-        }
-        // With an account, a device in it can log this browser in by scanning a code.
-        const t = nowS();
-        for (const [k, l] of logins) if (l.until < t) logins.delete(k);
-        if (logins.size > 200) return html(res, 200, loginPage({ error }));
-        const code = bytesToHex(randomBytes(16)), browser = bytesToHex(randomBytes(16)), nonce = bytesToHex(randomBytes(16));
-        logins.set(code, { until: t + LOGIN_SECONDS, browser, approved: false });
-        const addr = o.url || (req.headers.host ? `http://${req.headers.host}` : where());
-        const qrText = JSON.stringify({ keykin: 2, login: { addr, key: box.state.key, code } });
-        return html(res, 200, loginPage({ error, qrText, code, nonce }), nonce, `kkl=${browser}; HttpOnly; SameSite=Strict; Path=/login; Max-Age=${LOGIN_SECONDS}`);
-      }
-      if (!box.only()) {
-        const nonce = bytesToHex(randomBytes(16));
-        // The QR names the address the owner's browser used, since a device can likely reach that too.
-        const addr = o.url || (req.headers.host ? `http://${req.headers.host}` : where());
-        return html(res, 200, setupPage({ qrText: box.qr(addr)!, csrf: s.csrf, nonce, logout: !o.behindLogin }), nonce);
-      }
-      return html(res, 200, devicesPage({ account: box.only()!, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin }));
+      if (!s) return html(res, 200, loginPage({ error: url.searchParams.has('e') ? (url.searchParams.get('e') === 'wait' ? 'Too many tries. Wait a minute.' : 'That is not the owner secret.') : undefined }));
+      const first = box.qr(addr());
+      if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0 }), nonce); }
+      return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, boxKey: box.state.key }));
     }
-    if (method === 'GET' && path === '/signin.js' && existsSync(signinJs)) {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return void res.end(readFileSync(signinJs));
-    }
-    if (method === 'POST' && path === '/login/challenge') {
-      const browser = browserOf(req);
-      if (!browser || !box.only()) return json(res, 400, { error: 'no_browser' });
-      const t = nowS();
-      for (const [k, c] of challenges) if (c.until < t) challenges.delete(k);
-      if (challenges.size > 500) return json(res, 429, { error: 'busy' });
-      const challenge = bytesToHex(randomBytes(16));
-      challenges.set(challenge, { until: t + 120, browser });
-      return json(res, 200, { challenge });
-    }
-    if (method === 'POST' && path === '/login/nostr') {
-      let ev: any; try { ev = JSON.parse(await readBody(req, 16 * 1024)).event; } catch { return json(res, 400, { error: 'bad_json' }); }
-      const t = nowS(), tag = (n: string) => Array.isArray(ev?.tags) ? ev.tags.find((x: any) => Array.isArray(x) && x[0] === n)?.[1] : undefined;
-      const c = challenges.get(String(tag('challenge')));
-      // The account itself must have signed this box's own challenge, for this browser, just now.
-      if (!c || c.until < t || c.browser !== browserOf(req)) return json(res, 403, { error: 'bad_challenge' });
-      challenges.delete(String(tag('challenge')));
-      if (ev.kind !== 22242 || typeof ev.created_at !== 'number' || Math.abs(t - ev.created_at) > 120 || !verifyEvent(ev)) return json(res, 403, { error: 'bad_event' });
-      if (req.headers.origin && tag('relay') !== req.headers.origin) return json(res, 403, { error: 'bad_event' });
-      if (ev.pubkey !== box.only()?.npub) return json(res, 403, { error: 'wrong_account' });
-      log('keykin box: login by the account, through its signer');
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': newSession(t) });
-      return void res.end(JSON.stringify({ ok: true }));
-    }
-    if (method === 'GET' && path === '/login/wait') {
-      const l = logins.get(url.searchParams.get('code') ?? '');
-      const browser = /(?:^|;\s*)kkl=([0-9a-f]{32})/.exec(req.headers.cookie ?? '')?.[1];
-      if (!l || l.until < nowS() || l.browser !== browser) return json(res, 404, { error: 'gone' });
-      if (!l.approved) return json(res, 200, { ok: false });
-      logins.delete(url.searchParams.get('code')!);
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': newSession(nowS()) });
-      return void res.end(JSON.stringify({ ok: true }));
-    }
-    if (method === 'GET' && path === '/owner/state') return s ? json(res, 200, { account: !!box.only() }) : json(res, 401, { error: 'login' });
+    if (method === 'GET' && path === '/admin/state') return s ? json(res, 200, { accounts: box.accounts().length }) : json(res, 401, { error: 'login' });
 
     if (method === 'POST' && path === '/login') {
+      if (o.behindLogin) return go(res, '/');
       const form = new URLSearchParams(await readBody(req, 4096));
       const t = nowS();
       fails = fails.filter((x) => t - x < FAIL_WINDOW);
       if (fails.length >= MAX_FAILS) return go(res, '/?e=wait');
       const given = sha('keykin2-owner', form.get('secret')?.trim() ?? '');
       if (!timingSafeEqual(given, hexToBytes(box.state.owner!))) { fails.push(t); return go(res, '/?e=1'); }
-      return go(res, '/', newSession(t));
+      const token = bytesToHex(randomBytes(32));
+      sessions.set(token, { until: t + SESSION_SECONDS, csrf: bytesToHex(randomBytes(16)) });
+      return go(res, '/', `kk=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}`);
     }
-    if (method === 'POST' && (path === '/logout' || path === '/owner/block' || path === '/owner/unblock')) {
+    if (method === 'POST' && (path === '/logout' || path.startsWith('/admin/'))) {
       if (!s) return go(res, '/');
       const form = new URLSearchParams(await readBody(req, 4096));
-      if (form.get('csrf') !== s.csrf) return html(res, 403, loginPage({ error: 'That page was out of date. Log in again.' }));
+      if (form.get('csrf') !== s.csrf) return html(res, 403, loginPage({ error: 'That page was out of date. Open the box page again.' }));
       if (path === '/logout') { if (o.behindLogin) return go(res, '/'); sessions.delete(s.token); return go(res, '/', 'kk=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); }
       try {
-        const key = form.get('key') ?? '';
-        const name = box.only()?.members.find((m) => m.key === key)?.name ?? 'Device';
-        if (path === '/owner/block') { box.ownerBlock(key); log(`keykin box: owner blocked ${name}`); return go(res, `/?n=${encodeURIComponent(`${name} is blocked.`)}`); }
-        box.ownerUnblock(key); log(`keykin box: owner unblocked ${name}`);
-        return go(res, `/?n=${encodeURIComponent(`${name} is unblocked.`)}`);
-      } catch (e) { if (e instanceof KeykinError) return go(res, `/?n=${encodeURIComponent('That did not work: ' + e.code)}`); throw e; }
+        const key = form.get('key') ?? '', account = form.get('account') ?? undefined, id = form.get('id') ?? '';
+        const nameOf = () => box.accounts().flatMap((a) => a.members).find((m) => m.key === key)?.name ?? 'Device';
+        switch (path) {
+          case '/admin/block': { const n = nameOf(); box.ownerBlock(key, account); log(`keykin box: admin blocked ${n}`); return told(res, `${n} is blocked.`); }
+          case '/admin/unblock': { const n = nameOf(); box.ownerUnblock(key, account); log(`keykin box: admin unblocked ${n}`); return told(res, `${n} is unblocked.`); }
+          case '/admin/approve': { const n = box.state.requests[id]?.name ?? 'That device'; box.decide(id, true, nowS()); log(`keykin box: admin approved ${n}`); return told(res, `${n} may make its account now.`); }
+          case '/admin/refuse': { const n = box.state.requests[id]?.name ?? 'That device'; box.decide(id, false, nowS()); return told(res, `${n} was refused.`); }
+          case '/admin/remove': {
+            if (form.get('sure') !== '1') return told(res, 'Tick the box to remove an account.');
+            box.removeAccount(account ?? ''); log('keykin box: admin removed an account'); return told(res, 'The account is removed.');
+          }
+          case '/admin/code': { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: box.newSetupCode(addr(), nowS()), csrf: s.csrf, nonce, logout: !o.behindLogin, first: false, count: box.accounts().length }), nonce); }
+        }
+      } catch (e) { if (e instanceof KeykinError) return told(res, 'That did not work: ' + e.code); throw e; }
     }
     res.writeHead(404, { 'content-type': 'text/plain' }); res.end('Not found\n');
   }
 
-  const server = createServer((req, res) => {
-    route(req, res).catch((e) => { log(`keykin box: ${String(e)}`); if (!res.headersSent) res.writeHead(500); res.end(); });
-  });
-  return new Promise<{ server: typeof server; box: Box; port: number; qr: () => string | null; ownerSecret: string | null }>((resolve) => {
-    server.listen(o.port ?? 7460, o.addr ?? '127.0.0.1', () => {
-      const port = (server.address() as any).port;
-      log(`keykin box: page and devices on ${where()}`);
-      resolve({ server, box, port, qr: () => box.qr(where()), ownerSecret });
-    });
-  });
+  const guard = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<unknown>) => (req: IncomingMessage, res: ServerResponse) => {
+    fn(req, res).catch((e) => { log(`keykin box: ${String(e)}`); if (!res.headersSent) res.writeHead(500); res.end(); });
+  };
+  const server: ReturnType<typeof createServer> = createServer(guard(route));
+  // The side door: nothing but the two shared paths.
+  const side = o.sidePort === undefined ? null : createServer(guard(async (req, res) => {
+    if (!(await shared(req, res, new URL(req.url ?? '/', 'http://box').pathname))) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('Not found\n'); }
+  }));
+  const listen = (srv: ReturnType<typeof createServer>, port: number) => new Promise<number>((ok) => srv.listen(port, o.addr ?? '127.0.0.1', () => ok((srv.address() as any).port)));
+  return (async () => {
+    const port = await listen(server, o.port ?? 7460);
+    const sidePort = side ? await listen(side, o.sidePort!) : null;
+    log(`keykin box: admin page and devices on ${where()}${sidePort ? `, side door on port ${sidePort}` : ''}`);
+    const close = () => new Promise<void>((done) => { side?.close(); side?.closeAllConnections(); server.close(() => done()); server.closeAllConnections(); });
+    return { server, box, page, port, sidePort, qr: () => box.qr(o.url || where()), ownerSecret, close };
+  })();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startBox({ dir: process.env.KEYKIN_DIR ?? './box-data', addr: process.env.KEYKIN_ADDR, port: Number(process.env.KEYKIN_PORT ?? 7460), url: process.env.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: process.env.KEYKIN_BEHIND_LOGIN === '1', relays: (process.env.KEYKIN_RELAYS ?? '').split(',').map((r) => r.trim()) });
+  const e = process.env;
+  startBox({ dir: e.KEYKIN_DIR ?? './box-data', addr: e.KEYKIN_ADDR, port: Number(e.KEYKIN_PORT ?? 7460), sidePort: e.KEYKIN_SIDE_PORT ? Number(e.KEYKIN_SIDE_PORT) : undefined,
+    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1' });
 }

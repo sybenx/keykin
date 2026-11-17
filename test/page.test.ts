@@ -102,7 +102,7 @@ test('the admin page: someone asks for an account, the admin approves', async ()
     assert.equal(await D.asked(carol, id, c.send), 'approved');
     const held = await D.createWithBox(carol, { key: b.box.state.key, code: id }, c.send);
     page = await (await c.get('/')).text();
-    assert.doesNotMatch(page, /Waiting for your answer/);
+    assert.match(page, /Nobody is asking for an account/);
     assert.match(page, /Carol phone/); assert.equal(b.box.accounts().length, 2); assert.ok(held.npub);
     // A refusal.
     const dave = device('Dave');

@@ -1,7 +1,7 @@
 // Keykin Login: the public door in front of the box, and the account page in a real browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -42,7 +42,7 @@ test('Keykin Login passes devices and the page\'s calls to the box, and nothing 
     for (const [method, path] of [['GET', '/admin/state'], ['POST', '/admin/code'], ['POST', '/admin/remove'], ['POST', '/login'], ['POST', '/page'], ['GET', '/owner-secret.txt'], ['GET', '/../box/server.ts']])
       assert.equal((await fetch(w.base + path, { method, headers: H, body: method === 'POST' ? '{}' : undefined })).status, 404, path);
     const home = await fetch(w.base + '/', { headers: H });
-    assert.match(await home.text(), /Your Keykin account/);
+    assert.match(await home.text(), /Your account/);
     assert.match(home.headers.get('content-security-policy')!, /default-src 'none'/);
 
     // Another site cannot make the page's calls: they need a header only this page can send.
@@ -109,73 +109,124 @@ function chromium(): string | null {
 }
 const exe = chromium();
 
-test('the account page in a browser: sign in, look around, block, end a sign-in, get a bunker link', { skip: !exe && 'no Chromium found', timeout: 120_000 }, async () => {
+test('the account page in a browser: sign in, devices, sites and apps, security, activity', { skip: !exe && 'no Chromium found', timeout: 150_000 }, async () => {
   const { chromium: pw } = await import('playwright-core');
   const w = await world();
   const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = join(tmpdir(), 'keykin-shots'); mkdirSync(shots, { recursive: true });
   try {
     const phone = device('Pixel 9a'), laptop = device('MacBook');
     const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
     await D.addMember(phone, held, { key: laptop.key, name: 'MacBook', kind: 'device', chip: laptop.chip }, w.send);
     const lh = await D.join(laptop, held.boxKey, held.npub, w.send);
     await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
-    const jumble = D.newGrant('site', 'https://jumble.social');
+    const jumble = D.newGrant('site', 'https://jumble.social'), amethyst = D.newGrant('app', 'Amethyst');
     await D.reportGrants(laptop, lh, [jumble], w.send);
+    await D.reportGrants(phone, held, [amethyst], w.send);
+    await D.signEvent(laptop, lh, note(held.npub), w.send, undefined, jumble.id);
+    // The phone is somewhere else, online: it answers what the page asks with nobody touching it.
+    const away = { ...phone, fp: undefined };
+    const taps: string[] = [];
+    const answer = (yes = true) => D.answerNotes(away, held, w.send, { addr: w.base, tap: async (t) => { taps.push(t); return yes; }, bunker: async () => 'bunker://abc123?relay=wss%3A%2F%2Frelay.example' });
+    const answered = async (yes = true) => { for (let k = 0; k < 40; k++) { const did = await answer(yes); if (did.length) return did; await new Promise((r) => setTimeout(r, 150)); } return []; };
 
-    const page = await (await browser.newContext()).newPage();
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 860 } })).newPage();
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e))); page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    const shot = (name: string) => page.screenshot({ path: join(shots, name + '.png') });
     await page.goto(w.base + '/');
+
     // Sign-in screen: a code for a device, and the password form.
     await page.waitForSelector('.qr svg');
-    const loginText = await page.textContent('#logintext');
-    assert.equal(JSON.parse(loginText!).login.key, w.box.box.state.key);
+    assert.equal(JSON.parse((await page.textContent('#logintext'))!).login.key, w.box.box.state.key);
+    await shot('signin');
     await page.fill('#username', 'aaron'); await page.fill('#password', 'wrong one');
     await page.click('#pwgo');
     await page.waitForSelector('text=do not match');
     await page.fill('#password', 'correct horse battery');
     await page.click('#pwgo');
-    await page.waitForSelector('text=Hello, aaron');
+    await page.waitForSelector('text=Welcome, Aaron');
     assert.match((await page.textContent('#npub'))!, /^npub1/);
+    assert.match((await page.textContent('.top'))!, /aaron · signed in with a password/);
+    await page.waitForSelector('text=Everything looks fine.');
+    await shot('home');
 
-    // Devices: block the laptop, and see that the page offers no way to unblock.
+    // Devices: block, see it refused, unblock from the page.
     await page.click('nav >> text=Devices');
-    await page.waitForSelector('text=Pixel 9a');
+    await page.waitForSelector('text=Fingerprint key');
+    await shot('devices');
     page.once('dialog', (d) => d.accept());
     await page.click('button[aria-label="Block MacBook"]');
     await page.waitForSelector('text=MacBook is blocked.');
-    assert.equal(await page.locator('button:has-text("Unblock")').count(), 0);
     await assert.rejects(D.signEvent(laptop, lh, note(held.npub), w.send), /blocked/);
+    await page.click('button[aria-label="Unblock MacBook"]');
+    await page.waitForSelector('text=MacBook is unblocked.');
+    assert.ok(verifyEvent(await D.signEvent(laptop, lh, note(held.npub), w.send)));
 
-    // Signed in: end the site's sign-in.
-    await page.click('nav >> text=Signed in');
-    await page.waitForSelector('text=https://jumble.social');
-    await page.click('button[aria-label="End https://jumble.social"]');
-    await page.waitForSelector('text=Nothing is signed in.');
-    await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, jumble.id), /revoked/);
+    // Add a device from the page: the phone, untouched, does it.
+    const work = device('Work PC');
+    await page.fill('input[aria-label="Invite from the new device"]', JSON.stringify({ keykin: 2, invite: { key: work.key, name: 'Work PC', chip: work.chip } }));
+    await page.click('text=Send to phone');
+    assert.deepEqual(await answered(), ['added Work PC']);
+    await page.waitForSelector('#joincode');
+    const jt = JSON.parse((await page.textContent('#joincode'))!).join;
+    const wh = await D.join(work, jt.boxKey, jt.npub, w.send);
+    assert.ok(verifyEvent(await D.signEvent(work, wh, note(held.npub), w.send)));
+    assert.deepEqual(taps, []);
 
-    // Sign in to a site: the page asks, a device answers, the page shows the link.
-    await page.click('nav >> text=Sign in to a site');
-    await page.click('text=Get a bunker link');
-    await page.waitForSelector('text=Waiting for one of your devices');
-    let waiting: D.Note[] = [];
-    for (let k = 0; k < 20 && !waiting.length; k++) { waiting = await D.notes(phone, held, w.send); if (!waiting.length) await new Promise((r) => setTimeout(r, 200)); }
-    assert.equal(waiting[0].kind, 'bunker');
-    await D.noteDone(phone, held, waiting[0].id, 'bunker://abc123?relay=wss%3A%2F%2Frelay.example', w.send);
-    await page.waitForSelector('#bunkerlink');
+    // Remove a blocked device for good: that one asks for a Yes on a device.
+    await page.click('nav >> text=Home'); await page.click('nav >> text=Devices');
+    page.once('dialog', (d) => d.accept());
+    await page.click('button[aria-label="Block MacBook"]');
+    await page.waitForSelector('text=Remove 1 device');
+    await page.click('text=Remove 1 device');
+    await page.waitForSelector('text=Waiting for a Yes');
+    assert.deepEqual(await answered(true), ['removed blocked devices']);
+    assert.equal(taps.length, 1);
+    await page.waitForSelector('text=Nothing to remove');
+    assert.equal(await page.locator('text=MacBook').count(), 0);
+
+    // Sites and apps: what is signed in, revoke, and a bunker link from the phone.
+    await page.click('nav >> text=Sites and apps');
+    await page.waitForSelector('text=App on Pixel 9a');
+    await shot('sites');
+    await page.click('button[aria-label="Revoke Amethyst"]');
+    await page.waitForSelector('text=Amethyst is revoked.');
+    await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);
+    await page.click('text=Ask my phone for a link');
+    assert.deepEqual(await answered(), ['gave a bunker link']);
+    await page.waitForSelector('#bunkerlink.has');
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
+
+    // Security: change the password from the page; the new one signs in, the old one does not.
+    await page.click('nav >> text=Security');
+    await page.fill('#newpass', 'a brand new password');
+    await page.click('#savepw');
+    await page.waitForSelector('text=Password saved.');
+    await shot('security');
+    const salt = (await w.api({ call: 'pw_salt', username: 'aaron' })).body.salt;
+    assert.deepEqual((await w.api({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('correct horse battery', salt) })).body, { error: 'wrong' });
+    assert.deepEqual((await w.api({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('a brand new password', salt) })).body, { ok: true });
+
+    // Recent activity lists what happened.
+    await page.click('nav >> text=Recent activity');
+    await page.waitForSelector('text=MacBook was blocked from the account page');
+    await page.waitForSelector('text=The password was changed from the account page');
+    await shot('activity');
 
     // Sign out, then sign in again by a device instead of the password.
     await page.click('nav >> text=Security');
     await page.click('#signout');
     await page.waitForSelector('.qr svg');
     await D.approveLogin(phone, held, (await page.textContent('#logintext'))!, w.send);
-    await page.waitForSelector('text=Hello, aaron');
+    await page.waitForSelector('text=Welcome, Aaron');
+    assert.match((await page.textContent('.top'))!, /signed in with a device/);
     await page.setViewportSize({ width: 390, height: 800 });
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'no sideways scroll on a phone');
-    await page.screenshot({ path: join(tmpdir(), 'keykin-account-phone.png') });
-    await page.setViewportSize({ width: 1200, height: 800 });
-    await page.screenshot({ path: join(tmpdir(), 'keykin-account.png') });
-    assert.deepEqual(errors.filter((e) => !/favicon/.test(e)), []);
+    for (const s of ['Devices', 'Sites and apps', 'Security', 'Home']) {
+      await page.click(`nav >> text=${s}`);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no sideways scroll on a phone: ${s}`);
+    }
+    await shot('home-phone');
+    assert.deepEqual(errors, []);
   } finally { await browser.close(); await w.close(); }
 });

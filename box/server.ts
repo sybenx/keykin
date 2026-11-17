@@ -83,6 +83,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   const told = (res: ServerResponse, text: string) => go(res, `/?n=${encodeURIComponent(text)}`);
 
   // What both doors answer: devices' signed requests, and the account page's calls.
+  let sideSeen = 0;      // when something last came in by the side door: Keykin Login is alive
   async function shared(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
     if (req.method !== 'POST' || (path !== '/keykin' && path !== '/page')) return false;
     let parsed: any;
@@ -98,12 +99,14 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
 
     // The admin page.
     const s = session(req);
+    const whereIs = { host: (req.headers.host ?? 'This box').replace(/:\d+$/, ''), behindLogin: !!o.behindLogin };
     const addr = (): string => o.url || (req.headers.host ? `http://${req.headers.host}` : where());
     if (method === 'GET' && path === '/') {
       if (!s) return html(res, 200, loginPage({ error: url.searchParams.has('e') ? (url.searchParams.get('e') === 'wait' ? 'Too many tries. Wait a minute.' : 'That is not the owner secret.') : undefined }));
       const first = box.qr(addr());
-      if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0 }), nonce); }
-      return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, boxKey: box.state.key }));
+      if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0, where: whereIs }), nonce); }
+      return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, where: whereIs,
+        door: { url: o.url, seen: sideSeen, side: o.sidePort !== undefined }, now: nowS() }));
     }
     if (method === 'GET' && path === '/admin/state') return s ? json(res, 200, { accounts: box.accounts().length }) : json(res, 401, { error: 'login' });
 
@@ -136,7 +139,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
             if (form.get('sure') !== '1') return told(res, 'Tick the box to remove an account.');
             box.removeAccount(account ?? ''); log('keykin box: admin removed an account'); return told(res, 'The account is removed.');
           }
-          case '/admin/code': { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: box.newSetupCode(addr(), nowS()), csrf: s.csrf, nonce, logout: !o.behindLogin, first: false, count: box.accounts().length }), nonce); }
+          case '/admin/code': { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: box.newSetupCode(addr(), nowS()), csrf: s.csrf, nonce, logout: !o.behindLogin, first: false, count: box.accounts().length, where: whereIs }), nonce); }
         }
       } catch (e) { if (e instanceof KeykinError) return told(res, 'That did not work: ' + e.code); throw e; }
     }
@@ -149,6 +152,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   const server: ReturnType<typeof createServer> = createServer(guard(route));
   // The side door: nothing but the two shared paths.
   const side = o.sidePort === undefined ? null : createServer(guard(async (req, res) => {
+    sideSeen = nowS();
     if (!(await shared(req, res, new URL(req.url ?? '/', 'http://box').pathname))) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('Not found\n'); }
   }));
   const listen = (srv: ReturnType<typeof createServer>, port: number) => new Promise<number>((ok) => srv.listen(port, o.addr ?? '127.0.0.1', () => ok((srv.address() as any).port)));

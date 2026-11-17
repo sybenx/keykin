@@ -7,7 +7,7 @@ import { eventId, type UnsignedEvent } from './event.ts';
 import { seal, type Signed, type Fingerprint } from './member.ts';
 import { sealTo, openFrom } from './seal.ts';
 import { commitmentFrom, scalarFrom, scalarHex, interpolate, mul, compHex, mod, derivePoint } from './curve.ts';
-import { randomBytes, bytesToHex } from './bytes.ts';
+import { randomBytes, bytesToHex, hexToBytes, shaHex } from './bytes.ts';
 import { ecdhPart, ecdhShared, nip44Key } from './ecdh.ts';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { refuse } from './bytes.ts';
@@ -27,14 +27,14 @@ const call = async (send: Send, req: Signed) => { const r = await send(req); if 
  */
 async function current(me: Me, h: Held, send: Send, t: number, body: (h: Held) => object, fp?: Fingerprint) {
   for (let tries = 0; ; tries++) {
-    const r = await send(await seal({ ...body(h), epoch: h.epoch }, me.sk, t, fp));
+    const r = await send(await seal({ ...body(h), epoch: h.epoch, account: h.npub }, me.sk, t, fp));
     if (r?.error !== 'stale' || tries || !Array.isArray(r.catchups)) { if (r?.error) refuse(r.error); return r; }
     let share = h.piece.share;
     for (const c of r.catchups) share = mod(share + scalarFrom(openFrom(me.sk, c.from, 'cycle', c.sealed)));
     const C = commitmentFrom(r.commitment);
     if (compHex(C[0]).slice(2) !== h.npub || !mul(share).equals(derivePoint(C, BigInt(h.piece.i)))) refuse('bad_piece');
     h.piece = { C, i: h.piece.i, share }; h.epoch = r.epoch;
-    await call(send, await seal({ op: 'caught_up' }, me.sk, t));
+    await call(send, await seal({ op: 'caught_up', account: h.npub }, me.sk, t));
   }
 }
 const now = () => Math.floor(Date.now() / 1000);
@@ -49,34 +49,35 @@ export function readQr(text: string): { addr: string; key: string; code: string 
 /** After scanning the box's QR: the device and the box make the key together. No whole key exists. */
 export async function createWithBox(me: Me, qr: { key: string; code: string }, send: Send, t = now()): Promise<Held> {
   const one = F.dkg1(1, 2);
-  const r1 = await call(send, await seal({ op: 'create1', code: qr.code, pkg: one.pkg, name: me.name, chip: me.chip }, me.sk, t));
+  const r1 = await call(send, await seal({ op: 'create1', request: qr.code, code: qr.code, pkg: one.pkg, name: me.name, chip: me.chip }, me.sk, t));
   const box: [number, string][] = [[2, r1.pkg]];
   const two = F.dkg2(one.secret, box);
-  const r2 = await call(send, await seal({ op: 'create2', pkg2: sealTo(me.sk, qr.key, 'keygen', two.pkgs.get(2)!) }, me.sk, t));
+  const r2 = await call(send, await seal({ op: 'create2', request: qr.code, pkg2: sealTo(me.sk, qr.key, 'keygen', two.pkgs.get(2)!) }, me.sk, t));
   const done = F.dkg3(two.secret, box, [[2, openFrom(me.sk, qr.key, 'keygen', r2.pkg2)]]);
   if (done.npub !== r2.npub) refuse('bad_keygen');
   return { piece: { C: done.C, i: 1, share: done.share }, npub: done.npub, boxKey: qr.key, epoch: 0 };
 }
 
-export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now()) {
+/** `grant` names the site or app this signature is for (SPEC 11.5); leave it out for the person's own use. */
+export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string) {
   const id = eventId(ev);
   let mine = ask(h.piece, id);
-  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(h.piece, id)).commit }));
+  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(h.piece, id)).commit, grant }));
   if (r.id !== id) refuse('wrong_id');
   return { ...ev, id, sig: finish(h.piece, id, mine, { commit: r.commit, z: r.z }) };
 }
 
-export async function members(me: Me, send: Send, t = now()) { return call(send, await seal({ op: 'members' }, me.sk, t)); }
-export async function block(me: Me, key: string, send: Send, t = now()) { return call(send, await seal({ op: 'block', key }, me.sk, t)); }
+export async function members(me: Me, send: Send, t = now(), account?: string) { return call(send, await seal({ op: 'members', account }, me.sk, t)); }
+export async function block(me: Me, key: string, send: Send, t = now(), account?: string) { return call(send, await seal({ op: 'block', key, account }, me.sk, t)); }
 /** Needs the fingerprint. */
-export async function unblock(me: Me, key: string, send: Send, t = now()) { return call(send, await seal({ op: 'unblock', key }, me.sk, t, me.fp)); }
+export async function unblock(me: Me, key: string, send: Send, t = now(), account?: string) { return call(send, await seal({ op: 'unblock', key, account }, me.sk, t, me.fp)); }
 
 /**
  * Adds a device (or a second box). Needs the fingerprint. This device and the box each give half
  * of the newcomer's piece; neither sees the piece, and the key is never whole.
  */
 export async function addMember(me: Me, h: Held, m: { key: string; name: string; kind: 'device' | 'box'; chip?: string }, send: Send, t = now()) {
-  const list = await members(me, send, t);
+  const list = await members(me, send, t, h.npub);
   const i: number = list.next;
   const boxI = list.members.find((x: any) => x.key === h.boxKey)?.i ?? refuse('no_box');
   const helpers = [h.piece.i, boxI].sort((a, b) => a - b);
@@ -86,13 +87,13 @@ export async function addMember(me: Me, h: Held, m: { key: string; name: string;
     return { op: 'add', member: { ...m, i }, delta: sealTo(me.sk, h.boxKey, 'repair-delta', mine.get(boxI)!) };
   }, me.fp);
   const sigma = F.repairSigma([mine.get(h.piece.i)!, openFrom(me.sk, h.boxKey, 'repair-delta', r.delta)]);
-  await call(send, await seal({ op: 'welcome_put', key: m.key, sigma: sealTo(me.sk, m.key, 'repair-sigma', sigma) }, me.sk, t));
+  await call(send, await seal({ op: 'welcome_put', account: h.npub, key: m.key, sigma: sealTo(me.sk, m.key, 'repair-sigma', sigma) }, me.sk, t));
   return i;
 }
 
 /** The new device's side: collect both halves and build its piece. `npub` must be the one it was told. */
 export async function join(me: Me, boxKey: string, npub: string, send: Send, t = now()): Promise<Held> {
-  const r = await call(send, await seal({ op: 'welcome' }, me.sk, t));
+  const r = await call(send, await seal({ op: 'welcome', account: npub }, me.sk, t));
   if (r.npub !== npub) refuse('wrong_account');
   const C = commitmentFrom(r.commitment);
   if (compHex(C[0]).slice(2) !== npub) refuse('wrong_account');
@@ -113,16 +114,16 @@ export async function formNsec(me: Me, h: Held, send: Send, t = now()): Promise<
 }
 
 /** The NIP-44 conversation key with `peer` (x-only hex), made with the box. The key is never whole. */
-export async function conversationKey(me: Me, h: Held, peer: string, send: Send, t = now()): Promise<Uint8Array> {
-  const r = await current(me, h, send, t, () => ({ op: 'ecdh', peer }));
+export async function conversationKey(me: Me, h: Held, peer: string, send: Send, t = now(), grant?: string): Promise<Uint8Array> {
+  const r = await current(me, h, send, t, () => ({ op: 'ecdh', peer, grant }));
   return nip44Key(ecdhShared(ecdhPart(h.piece.i, h.piece.share, r.i, peer), r.part));
 }
-export async function nip44Encrypt(me: Me, h: Held, peer: string, text: string, send: Send, t = now()) {
-  return nip44.encrypt(text, await conversationKey(me, h, peer, send, t));
+export async function nip44Encrypt(me: Me, h: Held, peer: string, text: string, send: Send, t = now(), grant?: string) {
+  return nip44.encrypt(text, await conversationKey(me, h, peer, send, t, grant));
 }
 /** A wrong part from the box cannot forge a message: NIP-44's MAC check fails instead. */
-export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: string, send: Send, t = now()) {
-  return nip44.decrypt(payload, await conversationKey(me, h, peer, send, t));
+export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: string, send: Send, t = now(), grant?: string) {
+  return nip44.decrypt(payload, await conversationKey(me, h, peer, send, t, grant));
 }
 
 /**
@@ -130,7 +131,7 @@ export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: strin
  * stops fitting with anyone's. The key itself, and so the npub, does not change.
  */
 export async function cycle(me: Me, h: Held, send: Send, t = now()) {
-  const list = await members(me, send, t);
+  const list = await members(me, send, t, h.npub);
   let b1 = 0n;
   const r = await current(me, h, send, t, () => {
     b1 = scalarFrom(bytesToHex(randomBytes(32)));
@@ -152,11 +153,11 @@ export async function approveLogin(me: Me, h: Held, text: string, send: Send, t 
   let q: any; try { q = JSON.parse(text)?.login; } catch { return refuse('bad_qr'); }
   if (!q || typeof q.code !== 'string') refuse('bad_qr');
   if (q.key !== h.boxKey) refuse('wrong_box');          // only this account's own box
-  await call(send, await seal({ op: 'login', code: q.code }, me.sk, t, me.fp));
+  await call(send, await seal({ op: 'login', account: h.npub, code: q.code }, me.sk, t, me.fp));
 }
 
 /** Tells the box where this device listens for other devices (see helper.ts), or with no address, that it stopped. */
-export async function setAddress(me: Me, addr: string | undefined, send: Send, t = now()) { return call(send, await seal({ op: 'address', addr }, me.sk, t)); }
+export async function setAddress(me: Me, addr: string | undefined, send: Send, t = now(), account?: string) { return call(send, await seal({ op: 'address', addr, account }, me.sk, t)); }
 
 /**
  * Asks the box first and, if it cannot be reached, other devices that listen. Only signing and message
@@ -173,3 +174,48 @@ export function withHelpers(box: Send, helpers: Send[]): Send {
     }
   };
 }
+
+// --- Asking for an account on a box that needs the admin's yes (SPEC 11.4) --------------------------
+
+/** Asks to make an account (or move one) on a box. Returns the request id to wait on. */
+export async function askBox(me: Me, what: 'make' | 'transfer', note: string, send: Send, t = now(), account?: string): Promise<string> {
+  return (await call(send, await seal({ op: 'ask', what, name: me.name, note, chip: me.chip, account }, me.sk, t))).request;
+}
+/** `waiting`, `approved`, `refused` or `gone`. Once approved, pass the id as the `code` to createWithBox. */
+export async function asked(me: Me, request: string, send: Send, t = now()): Promise<string> {
+  return (await call(send, await seal({ op: 'asked', request }, me.sk, t))).state;
+}
+
+// --- Username and password for the account page (SPEC 11.3) ----------------------------------------
+
+/** The verifier for a password: PBKDF2-HMAC-SHA256, 600000 rounds, 32 bytes, over the NFKC form. Hex. */
+export async function passwordVerifier(password: string, saltHex: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password.normalize('NFKC')), 'PBKDF2', false, ['deriveBits']);
+  const salt = Uint8Array.from(saltHex.match(/../g)!.map((b) => parseInt(b, 16)));
+  return bytesToHex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 600000 }, key, 256)));
+}
+/** What the box stores for a verifier. */
+export const passwordCheck = (verifierHex: string) => shaHex('keykin2-pw', hexToBytes(verifierHex));
+/** Sets or changes the username and password. Needs the fingerprint. The box never sees the password. */
+export async function passwordSet(me: Me, h: Held, username: string, password: string, send: Send, t = now()) {
+  const salt = bytesToHex(randomBytes(16));
+  const check = passwordCheck(await passwordVerifier(password, salt));
+  await call(send, await seal({ op: 'password_set', account: h.npub, username, salt, check }, me.sk, t, me.fp));
+}
+export async function passwordClear(me: Me, h: Held, send: Send, t = now()) { await call(send, await seal({ op: 'password_clear', account: h.npub }, me.sk, t, me.fp)); }
+
+// --- What this device has let in, and revoking (SPEC 11.5) -----------------------------------------
+
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number }
+export const newGrant = (kind: 'site' | 'app', name: string, t = now()): Grant => ({ id: bytesToHex(randomBytes(16)), kind, name, since: t });
+/** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
+export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<string[]> {
+  return (await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t))).revoked;
+}
+export async function revoke(me: Me, h: Held, grant: string, send: Send, t = now()) { await call(send, await seal({ op: 'revoke', account: h.npub, grant }, me.sk, t)); }
+
+// --- Things the account page started for a device to finish (SPEC 11.6) ----------------------------
+
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker'; text: string; at: number }
+export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
+export async function noteDone(me: Me, h: Held, note: string, result: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_done', account: h.npub, note, result }, me.sk, t)); }

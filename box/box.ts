@@ -25,7 +25,16 @@ export interface Account {
   members: Member[];
   welcomes: Record<string, Welcome>;
   catchups: Record<string, Catchup[]>;
+  /** Username and password for the account page (SPEC 11.3). The box never has the password. */
+  login?: { username: string; salt: string; check: string; fails?: number; lockedUntil?: number };
+  /** What each device has let in (SPEC 11.5), by the device's member key. */
+  grants?: Record<string, Grant[]>;
+  /** Grants that were revoked. The box refuses any request naming one. */
+  revoked?: string[];
 }
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number }
+/** Something the account page started for a device to finish (SPEC 11.6). */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker'; text: string; at: number; result?: string }
 /** Someone asking to make an account here or move one here (SPEC 11.4). The admin decides. */
 export interface Ask {
   id: string; what: 'make' | 'transfer';
@@ -34,12 +43,13 @@ export interface Ask {
   asked: number; state: 'waiting' | 'approved' | 'refused'; decided?: number;
 }
 /** `owner` is the hash of the owner secret that logs in to the admin page. Accounts are keyed by npub, hex. */
-export interface BoxState { sk: string; key: string; owner?: string; accounts: Record<string, Account>; requests: Record<string, Ask> }
+export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: string; accounts: Record<string, Account>; requests: Record<string, Ask> }
 
 const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
+export const USERNAME = /^[a-z0-9._-]{3,32}$/;
 
 export class Box {
   state: BoxState;
@@ -50,6 +60,9 @@ export class Box {
   onChange: (s: BoxState) => void = () => {};
   /** Set by the server: approves a login to the box's page that a device scanned. Returns false if unknown or expired. */
   onLogin: (code: string, account: string, by: string) => boolean = () => false;
+  /** Set by the page API: the notes waiting for an account's devices, and a device's answer to one. */
+  onNotes: (account: string) => Note[] = () => [];
+  onNoteDone: (account: string, note: string, result: string) => boolean = () => false;
 
   constructor(state: BoxState | null = null) {
     const s: any = state ?? { ...newMemberKey() };
@@ -125,6 +138,7 @@ export class Box {
       if (EPOCH_OPS.has(body.op) && body.epoch !== s.epoch) {
         return { error: 'stale', epoch: s.epoch, commitment: s.commitment, catchups: s.catchups[from.key] ?? [] };
       }
+      if ((body.op === 'sign' || body.op === 'ecdh') && body.grant !== undefined && (s.revoked ?? []).includes(body.grant)) refuse('revoked');
       switch (body.op) {
         case 'cycle': return this.#cycle(s, from, req, body);
         case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
@@ -142,6 +156,36 @@ export class Box {
           if (body.addr !== undefined && (typeof body.addr !== 'string' || body.addr.length > 200 || !/^https?:\/\//.test(body.addr))) refuse('bad_address');
           if (body.addr) from.addr = body.addr; else delete from.addr;
           this.#save();
+          return { ok: true };
+        }
+        case 'password_set': {
+          this.#needFingerprint(from, req);
+          const u = body.username;
+          if (typeof u !== 'string' || !USERNAME.test(u)) refuse('bad_username');
+          if (!/^[0-9a-f]{32}$/.test(body.salt ?? '') || !HEX64.test(body.check ?? '')) refuse('bad_request');
+          if (this.accounts().some((a) => a !== s && a.login?.username === u)) refuse('username_taken');
+          s.login = { username: u, salt: body.salt, check: body.check };
+          this.#save();
+          return { ok: true };
+        }
+        case 'password_clear': this.#needFingerprint(from, req); delete s.login; this.#save(); return { ok: true };
+        case 'grants': {
+          const list = body.grants;
+          if (!Array.isArray(list) || list.length > 200) refuse('bad_request');
+          const clean: Grant[] = list.map((g: any) => {
+            if (!/^[0-9a-f]{32}$/.test(g?.id ?? '') || (g.kind !== 'site' && g.kind !== 'app') || typeof g.name !== 'string' || !Number.isInteger(g.since)) refuse('bad_request');
+            return { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
+          });
+          const revoked = new Set(s.revoked ?? []);
+          (s.grants ??= {})[from.key] = clean.filter((g) => !revoked.has(g.id));
+          this.#save();
+          return { ok: true, revoked: clean.filter((g) => revoked.has(g.id)).map((g) => g.id) };
+        }
+        case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
+        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at }) => ({ id, kind, text, at })) };
+        case 'note_done': {
+          if (from.kind !== 'device') refuse('devices_only');
+          if (typeof body.result !== 'string' || body.result.length > 2000 || !this.onNoteDone(s.npub, body.note, body.result)) refuse('gone');
           return { ok: true };
         }
         case 'login': {
@@ -187,6 +231,19 @@ export class Box {
     this.#save();
     return { ok: true, request: id };
   }
+
+  /** Ends a grant for good (SPEC 11.5): from a device, or from the account page. */
+  revokeGrant(npub: string, grant: unknown) {
+    const s = this.state.accounts[npub] ?? refuse('unknown_account');
+    if (typeof grant !== 'string' || !/^[0-9a-f]{32}$/.test(grant)) refuse('bad_request');
+    const r = (s.revoked ??= []);
+    if (!r.includes(grant as string)) r.push(grant as string);
+    if (r.length > 2000) r.splice(0, r.length - 2000);
+    for (const k of Object.keys(s.grants ?? {})) s.grants![k] = s.grants![k].filter((g) => g.id !== grant);
+    this.#save();
+  }
+  /** Saves after the page API changed something in the state (a password try count, say). */
+  touch() { this.#save(); }
 
   /** The admin's Block button. */
   ownerBlock(key: string, npub?: string) { return this.#block(this.#holding(key, npub), key); }

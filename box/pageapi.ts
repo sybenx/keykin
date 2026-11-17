@@ -11,7 +11,8 @@ const FREE_TRIES = 5, FIRST_LOCK = 15 * 60, LONGEST_LOCK = 24 * 3600, TRIES_A_MI
 const HEX32 = /^[0-9a-f]{32}$/, HEX64 = /^[0-9a-f]{64}$/;
 
 export class PageApi {
-  #sessions = new Map<string, { account: string; until: number }>();
+  #sessions = new Map<string, { account: string; until: number; how: 'password' | 'device' }>();
+  #noteBy = new Map<string, string>();      // note id -> the session that left it
   #logins = new Map<string, { until: number; browser: string; account?: string }>();
   #notes = new Map<string, Note[]>();
   #tries: number[] = [];
@@ -24,7 +25,15 @@ export class PageApi {
     box.onLogin = (code, account) => {
       const l = this.#logins.get(code);
       if (!l || l.account) return false;
-      l.account = account; return true;
+      l.account = account; this.box.happened(account, 'A browser was signed in to the account page by a device', Math.floor(Date.now() / 1000)); return true;
+    };
+    box.onNoteRefused = (account, id) => {
+      const list = this.#notes.get(account) ?? [];
+      if (!list.some((x) => x.id === id && x.result === undefined)) return false;
+      this.#notes.set(account, list.filter((x) => x.id !== id));
+      const by = this.#noteBy.get(id); if (by) this.#sessions.delete(by);      // No ends that browser's session
+      this.#noteBy.delete(id);
+      return true;
     };
     box.onNotes = (account) => this.#notes.get(account) ?? [];
     box.onNoteDone = (account, id, result) => {
@@ -37,7 +46,7 @@ export class PageApi {
   /** Every call from the page comes through here. Returns `{ ok, ... }` or `{ error }`. */
   call(body: any, now: number): any {
     try {
-      this.#tidy(now);
+      this.#tidy(now); this.lastCall = now;
       switch (body?.call) {
         case 'pw_salt': return { ok: true, salt: this.#saltFor(String(body.username ?? '')) };
         case 'pw_login': return this.#pwLogin(body, now);
@@ -53,24 +62,32 @@ export class PageApi {
           if (!l || l.browser !== body.browser) refuse('gone');
           if (!l!.account) return { ok: true, waiting: true };
           this.#logins.delete(body.code);
-          return { ok: true, session: this.#newSession(l!.account!, now) };
+          return { ok: true, session: this.#newSession(l!.account!, now, 'device') };
         }
       }
       // Everything below needs a session.
       const ses = this.#sessions.get(body?.session) ?? refuse('login');
       const a = this.box.state.accounts[ses.account] ?? refuse('login');
       switch (body.call) {
-        case 'me': return { ok: true, ...this.#view(a) };
-        case 'block': this.box.ownerBlock(body.key, a.npub); return { ok: true };
-        case 'revoke': this.box.revokeGrant(a.npub, body.grant); return { ok: true };
+        case 'me': return { ok: true, how: ses.how, ...this.#view(a) };
+        case 'block': { const n = this.#name(a, body.key); this.box.ownerBlock(body.key, a.npub); this.box.happened(a.npub, `${n} was blocked from the account page`, now); return { ok: true }; }
+        case 'unblock': { const n = this.#name(a, body.key); this.box.unblockIn(a.npub, body.key); this.box.happened(a.npub, `${n} was unblocked from the account page`, now); return { ok: true }; }
+        case 'revoke': {
+          const g = Object.values(a.grants ?? {}).flat().find((x) => x.id === body.grant);
+          this.box.revokeGrant(a.npub, body.grant); this.box.happened(a.npub, `${g?.name ?? 'A sign-in'} was revoked from the account page`, now); return { ok: true };
+        }
+        case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
+        case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
         case 'logout': this.#sessions.delete(body.session); return { ok: true };
         case 'logout_all': for (const [t, s] of this.#sessions) if (s.account === a.npub) this.#sessions.delete(t); return { ok: true };
         case 'note_put': {
-          if (!['nostrconnect', 'invite', 'bunker'].includes(body.kind) || typeof body.text !== 'string' || body.text.length > 4000) refuse('bad_request');
+          if (!['nostrconnect', 'invite', 'bunker', 'cycle'].includes(body.kind) || typeof body.text !== 'string' || body.text.length > 4000) refuse('bad_request');
           const list = this.#notes.get(a.npub) ?? [];
           if (list.length >= 10) refuse('too_many');
-          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now };
-          this.#notes.set(a.npub, [...list, note]);
+          // Only the hard-to-undo one asks the person on a device. The rest a device just does.
+          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle' };
+          this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, body.session);
+          this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page' }[body.kind as Note['kind']], now);
           return { ok: true, note: note.id };
         }
         case 'note_get': {
@@ -88,13 +105,17 @@ export class PageApi {
   #tidy(now: number) {
     for (const [t, s] of this.#sessions) if (s.until < now) this.#sessions.delete(t);
     for (const [c, l] of this.#logins) if (l.until < now) this.#logins.delete(c);
+    for (const id of this.#noteBy.keys()) if (![...this.#notes.values()].some((l) => l.some((n) => n.id === id))) this.#noteBy.delete(id);
     for (const [a, list] of this.#notes) { const keep = list.filter((n) => now - n.at < NOTE_SECONDS); if (keep.length) this.#notes.set(a, keep); else this.#notes.delete(a); }
   }
-  #newSession(account: string, now: number) {
+  #newSession(account: string, now: number, how: 'password' | 'device') {
     const token = bytesToHex(randomBytes(32));
-    this.#sessions.set(token, { account, until: now + SESSION_SECONDS });
+    this.#sessions.set(token, { account, until: now + SESSION_SECONDS, how });
     return token;
   }
+  #name(a: Account, key: unknown) { return a.members.find((m) => m.key === key)?.name ?? 'A device'; }
+  /** When the account page last reached the box, for the admin page's "outside door" card. */
+  lastCall = 0;
   #byUsername(u: string): Account | undefined { return this.box.accounts().find((a) => a.login?.username === u); }
   // A username that does not exist still gets a salt, the same one every time, so asking tells nothing.
   #saltFor(username: string): string {
@@ -121,13 +142,15 @@ export class PageApi {
       return refuse('wrong');
     }
     if (l.fails || l.lockedUntil) { delete l.fails; delete l.lockedUntil; this.box.touch(); }
-    return { ok: true, session: this.#newSession(a!.npub, now) };
+    this.box.happened(a!.npub, 'A browser signed in to the account page with the password', now);
+    return { ok: true, session: this.#newSession(a!.npub, now, 'password') };
   }
   #view(a: Account) {
     const name = (key: string) => a.members.find((m) => m.key === key)?.name ?? 'A device that was removed';
     return {
       npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key,
-      devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, added: m.added, fingerprint: !!m.chip })),
+      devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
+      log: [...(a.log ?? [])].reverse(),
       grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, device: key, deviceName: name(key) }))),
     };
   }

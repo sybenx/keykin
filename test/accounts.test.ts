@@ -123,12 +123,14 @@ test('the account page: password login, its limits, and what it may and may not 
   assert.deepEqual(me.devices.map((d: any) => [d.name, d.kind, d.blocked, d.fingerprint]), [['Phone', 'device', false, true], ['Box', 'box', false, false], ['Laptop', 'device', false, true]]);
   assert.deepEqual(call({ call: 'me', session: 'f'.repeat(64) }), { error: 'login' });
 
-  // It may block. It has no call at all for unblock, add, sign, cycle or the key.
+  // A signed-in page blocks and unblocks. It has no call that signs or hands over a key or a piece.
   assert.deepEqual(call({ call: 'block', session, key: laptop.key }), { ok: true });
   await assert.rejects(D.signEvent(laptop, lh, note(held.npub), send, NOW), /blocked/);
-  for (const c of ['unblock', 'add', 'sign', 'cycle', 'reveal', 'password_set']) assert.deepEqual(call({ call: c, session, key: laptop.key }), { error: 'unknown_call' });
+  assert.equal(call({ call: 'me', session }).how, 'password');
+  for (const c of ['add', 'sign', 'cycle', 'reveal', 'ecdh', 'members']) assert.deepEqual(call({ call: c, session, key: laptop.key }), { error: 'unknown_call' });
   assert.deepEqual(call({ call: 'block', session, key: box.state.key }), { error: 'cannot_block_box' });
-  await D.unblock(phone, laptop.key, send, NOW, held.npub);                    // the way back is a device's fingerprint
+  assert.deepEqual(call({ call: 'unblock', session, key: laptop.key }), { ok: true });
+  assert.ok(valid(await D.signEvent(laptop, lh, note(held.npub), send, NOW)));
 
   // Five wrong tries lock the username; the right password does not help until the lock ends.
   for (let k = 0; k < 5; k++) assert.deepEqual(call({ call: "pw_login", username: "aaron", verifier: bad }), { error: "wrong" });
@@ -147,9 +149,17 @@ test('the account page: password login, its limits, and what it may and may not 
   const s3 = call({ call: 'pw_login', username: 'aaron', verifier: good }).session;
   tick(12 * 3600 + 1);
   assert.deepEqual(call({ call: 'me', session: s3 }), { error: 'login' });
+  // The page changes the password itself: the new one works, the old one does not.
+  const s4 = call({ call: 'pw_login', username: 'aaron', verifier: good }).session;
+  const salt2 = bytesToHex(randomBytes(16)), v2 = await D.passwordVerifier('a new one', salt2);
+  assert.deepEqual(call({ call: 'pw_set', session: s4, username: 'aaron', salt: salt2, check: D.passwordCheck(v2) }), { ok: true });
+  assert.deepEqual(call({ call: 'pw_login', username: 'aaron', verifier: good }), { error: 'wrong' });
+  assert.match(call({ call: 'pw_login', username: 'aaron', verifier: v2 }).session, /^[0-9a-f]{64}$/);
+  assert.deepEqual(call({ call: 'pw_set', session: 'f'.repeat(64), username: 'aaron', salt: salt2, check: D.passwordCheck(v2) }), { error: 'login' });
+  assert.ok(call({ call: 'me', session: s4 }).log.some((l: any) => /password was changed/.test(l.text)));
   // Clearing the password ends that way in.
   await D.passwordClear(phone, held, send, now());
-  assert.deepEqual(call({ call: 'pw_login', username: 'aaron', verifier: good }), { error: 'wrong' });
+  assert.deepEqual(call({ call: 'pw_login', username: 'aaron', verifier: v2 }), { error: 'wrong' });
 });
 
 test('the account page: logging in by a device, per account', async () => {
@@ -227,4 +237,75 @@ test('notes: the page starts something and a device finishes it', async () => {
   assert.deepEqual(call({ call: 'note_get', session, note: id2 }), { error: 'login' }.error ? call({ call: 'note_get', session, note: id2 }) : {});
   assert.equal(call({ call: 'note_get', session, note: id2 }).state, 'gone');
   assert.deepEqual(call({ call: 'note_put', session, kind: 'evil', text: '' }), { error: 'bad_request' });
+});
+
+test('a signed-in page has the person\'s authority: devices do what it asks, and only hard-to-undo things ask first', async () => {
+  const { box, send, call } = world();
+  const phone = device('Phone'), old = device('Old tablet');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.addMember(phone, held, { key: old.key, name: 'Old tablet', kind: 'device', chip: old.chip }, send, NOW);
+  await D.join(old, held.boxKey, held.npub, send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const login = async () => call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const session = await login();
+  const asked: string[] = [];
+  const can = (yes: boolean) => ({ addr: 'https://account.example', tap: async (t: string) => { asked.push(t); return yes; }, bunker: async () => 'bunker://abc?relay=wss%3A%2F%2Fr' });
+  const noFp = { ...phone, fp: undefined };          // the phone is at home: nobody is there to give a fingerprint
+
+  // Adding a device from the page: the phone does it with no prompt and no fingerprint.
+  const laptop = device('Work laptop');
+  const invite = JSON.stringify({ keykin: 2, invite: { key: laptop.key, name: 'Work laptop', chip: laptop.chip } });
+  const { note: n1 } = call({ call: 'note_put', session, kind: 'invite', text: invite });
+  assert.deepEqual(await D.answerNotes(noFp, held, send, can(true), NOW), ['added Work laptop']);
+  assert.deepEqual(asked, []);
+  const join = JSON.parse(call({ call: 'note_get', session, note: n1 }).result).join;
+  assert.deepEqual(join, { addr: 'https://account.example', boxKey: held.boxKey, npub: held.npub });
+  const lh = await D.join(laptop, join.boxKey, join.npub, send, NOW);
+  assert.ok(valid(await D.signEvent(laptop, lh, note(held.npub), send, NOW)));
+  // Without a note from a signed-in page, the same request with no fingerprint is still refused.
+  const stray = device('Stray');
+  await assert.rejects(D.addMember(noFp, held, { key: stray.key, name: 'Stray', kind: 'device' }, send, NOW), /needs_fingerprint/);
+  await assert.rejects(D.addMember(noFp, held, { key: stray.key, name: 'Stray', kind: 'device' }, send, NOW, 'f'.repeat(32)), /gone/);
+
+  // A bunker link: no prompt either.
+  const { note: n3 } = call({ call: 'note_put', session, kind: 'bunker', text: '' });
+  assert.ok((await D.answerNotes(noFp, held, send, can(true), NOW)).includes('gave a bunker link'));
+  assert.equal(call({ call: 'note_get', session, note: n3 }).result, 'bunker://abc?relay=wss%3A%2F%2Fr');
+  assert.deepEqual(asked, []);
+
+  // Removing blocked devices for good is hard to undo: the device asks. No ends that browser's session.
+  call({ call: 'block', session, key: old.key });
+  call({ call: 'note_put', session, kind: 'cycle', text: '' });
+  assert.deepEqual(await D.answerNotes(noFp, held, send, can(false), NOW), ['said No to removing blocked devices']);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(call({ call: 'me', session }), { error: 'login' });
+  assert.equal(box.only()!.epoch, 0);
+  // Yes does it.
+  const s2 = await login();
+  const { note: n5 } = call({ call: 'note_put', session: s2, kind: 'cycle', text: '' });
+  assert.deepEqual(await D.answerNotes(noFp, held, send, can(true), NOW), ['removed blocked devices']);
+  assert.equal(call({ call: 'note_get', session: s2, note: n5 }).state, 'done');
+  assert.equal(box.only()!.epoch, 1);
+  assert.deepEqual(box.only()!.members.map((m) => m.name), ['Phone', 'Box', 'Work laptop']);
+  const me = call({ call: 'me', session: s2 });
+  assert.equal(me.how, 'password');
+  assert.ok(me.log.some((l: any) => /said No/.test(l.text)) && me.log.some((l: any) => /Old tablet was blocked/.test(l.text)));
+  // And a note for one invite cannot be used to add someone else.
+  const { note: n2 } = call({ call: 'note_put', session: s2, kind: 'invite', text: invite.replace(laptop.key, device('Other').key) });
+  await assert.rejects(D.addMember(noFp, held, { key: stray.key, name: 'Stray', kind: 'device' }, send, NOW, n2), /bad_member/);
+});
+
+test('hard-to-undo signatures need a Yes on the device; ordinary ones do not', async () => {
+  const { box, send } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  const ev = (kind: number, tags: string[][], content = '') => ({ pubkey: held.npub, created_at: NOW, kind, tags, content });
+  const many = ['1', '2', '3', '4', '5'].map((x) => ['e', x.repeat(64)]);
+  const hard = [ev(62, [['relay', 'ALL_RELAYS']]), ev(5, many), ev(3, []), ev(0, [], '{}'), ev(0, [], '{"name":"  "}')];
+  const fine = [ev(1, []), ev(5, many.slice(0, 4)), ev(3, [['p', 'a'.repeat(64)]]), ev(0, [], '{"name":"Aaron"}'), ev(7, [['e', 'a'.repeat(64)]], '+')];
+  for (const e of hard) await assert.rejects(D.signEvent(phone, held, e, send, NOW), /needs_tap/);
+  for (const e of hard) assert.ok(valid(await D.signEvent(phone, held, e, send, NOW, undefined, true)));
+  for (const e of fine) assert.ok(valid(await D.signEvent(phone, held, e, send, NOW)));
+  // The box notes when the device last signed.
+  assert.ok(box.only()!.members[0].last! > 0);
 });

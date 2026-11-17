@@ -59,10 +59,11 @@ export async function createWithBox(me: Me, qr: { key: string; code: string }, s
 }
 
 /** `grant` names the site or app this signature is for (SPEC 11.5); leave it out for the person's own use. */
-export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string) {
+/** `tapped`: the person said Yes on this device to a hard-to-undo event (see destructive.ts). Without it the box answers `needs_tap`. */
+export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean) {
   const id = eventId(ev);
   let mine = ask(h.piece, id);
-  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(h.piece, id)).commit, grant }));
+  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(h.piece, id)).commit, grant, tapped }));
   if (r.id !== id) refuse('wrong_id');
   return { ...ev, id, sig: finish(h.piece, id, mine, { commit: r.commit, z: r.z }) };
 }
@@ -76,7 +77,7 @@ export async function unblock(me: Me, key: string, send: Send, t = now(), accoun
  * Adds a device (or a second box). Needs the fingerprint. This device and the box each give half
  * of the newcomer's piece; neither sees the piece, and the key is never whole.
  */
-export async function addMember(me: Me, h: Held, m: { key: string; name: string; kind: 'device' | 'box'; chip?: string }, send: Send, t = now()) {
+export async function addMember(me: Me, h: Held, m: { key: string; name: string; kind: 'device' | 'box'; chip?: string }, send: Send, t = now(), note?: string) {
   const list = await members(me, send, t, h.npub);
   const i: number = list.next;
   const boxI = list.members.find((x: any) => x.key === h.boxKey)?.i ?? refuse('no_box');
@@ -84,8 +85,8 @@ export async function addMember(me: Me, h: Held, m: { key: string; name: string;
   let mine = new Map<number, string>();
   const r = await current(me, h, send, t, (h) => {
     mine = F.repairDeltas(h.piece.C, helpers, h.piece.i, h.piece.share, i);
-    return { op: 'add', member: { ...m, i }, delta: sealTo(me.sk, h.boxKey, 'repair-delta', mine.get(boxI)!) };
-  }, me.fp);
+    return { op: 'add', member: { ...m, i }, delta: sealTo(me.sk, h.boxKey, 'repair-delta', mine.get(boxI)!), note };
+  }, note ? undefined : me.fp);
   const sigma = F.repairSigma([mine.get(h.piece.i)!, openFrom(me.sk, h.boxKey, 'repair-delta', r.delta)]);
   await call(send, await seal({ op: 'welcome_put', account: h.npub, key: m.key, sigma: sealTo(me.sk, m.key, 'repair-sigma', sigma) }, me.sk, t));
   return i;
@@ -130,7 +131,8 @@ export async function nip44Decrypt(me: Me, h: Held, peer: string, payload: strin
  * Cycles the keys. Needs the fingerprint. Every blocked device is dropped for good and its piece
  * stops fitting with anyone's. The key itself, and so the npub, does not change.
  */
-export async function cycle(me: Me, h: Held, send: Send, t = now()) {
+/** `note`: a signed-in account page asked for it and the person tapped Yes here, in place of the fingerprint. */
+export async function cycle(me: Me, h: Held, send: Send, t = now(), note?: string) {
   const list = await members(me, send, t, h.npub);
   let b1 = 0n;
   const r = await current(me, h, send, t, () => {
@@ -140,8 +142,8 @@ export async function cycle(me: Me, h: Held, send: Send, t = now()) {
       if (m.blocked || m.key === me.key || m.key === h.boxKey) continue;
       changes[m.key] = sealTo(me.sk, m.key, 'cycle', scalarHex(mod(b1 * BigInt(m.i))));
     }
-    return { op: 'cycle', b1: sealTo(me.sk, h.boxKey, 'cycle', scalarHex(b1)), changes };
-  }, me.fp);
+    return { op: 'cycle', b1: sealTo(me.sk, h.boxKey, 'cycle', scalarHex(b1)), changes, note };
+  }, note ? undefined : me.fp);
   const C = commitmentFrom(r.commitment);
   const share = mod(h.piece.share + b1 * BigInt(h.piece.i));
   if (!mul(share).equals(derivePoint(C, BigInt(h.piece.i)))) refuse('bad_piece');
@@ -216,6 +218,41 @@ export async function revoke(me: Me, h: Held, grant: string, send: Send, t = now
 
 // --- Things the account page started for a device to finish (SPEC 11.6) ----------------------------
 
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker'; text: string; at: number }
+/** `tap` is true when the device must ask the person Yes or No before doing it. */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean }
 export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
 export async function noteDone(me: Me, h: Held, note: string, result: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_done', account: h.npub, note, result }, me.sk, t)); }
+/** The person tapped No. The note goes, and the browser that asked is signed out of the account page. */
+export async function noteRefuse(me: Me, h: Held, note: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_refuse', account: h.npub, note }, me.sk, t)); }
+
+/**
+ * Does what the account page asked, for every note waiting (SPEC 11.6). A signed-in account page has
+ * the person's authority, so a device just does these; only a note marked `tap` asks first.
+ *   `addr`         where the new device will reach the box, for the join text it is handed.
+ *   `tap(text)`    asks the person Yes or No. Called only for hard-to-undo notes.
+ *   `bunker()`     makes a bunker:// link, or null if this device runs no remote signer.
+ *   `connect(uri)` becomes the signer for a nostrconnect:// code, or false if this device cannot.
+ * Returns what it did, for the device to show or log.
+ */
+export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: () => Promise<string | null>; connect?: (uri: string) => Promise<boolean> }, t = now()): Promise<string[]> {
+  const did: string[] = [];
+  for (const n of await notes(me, h, send, t)) {
+    try {
+      if (n.kind === 'invite') {
+        const inv = JSON.parse(n.text).invite;
+        await addMember(me, h, { key: inv.key, name: String(inv.name ?? 'Device'), kind: 'device', chip: inv.chip }, send, t, n.id);
+        await noteDone(me, h, n.id, JSON.stringify({ keykin: 2, join: { addr: can.addr, boxKey: h.boxKey, npub: h.npub } }), send, t);
+        did.push(`added ${inv.name}`);
+      } else if (n.kind === 'bunker') {
+        const link = await can.bunker?.();
+        if (link) { await noteDone(me, h, n.id, link, send, t); did.push('gave a bunker link'); }
+      } else if (n.kind === 'nostrconnect') {
+        if (await can.connect?.(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push('signed a site in'); }
+      } else if (n.kind === 'cycle') {
+        if (await can.tap('Remove blocked devices for good? Their pieces stop working. This cannot be undone.')) { await cycle(me, h, send, t, n.id); await noteDone(me, h, n.id, 'ok', send, t); did.push('removed blocked devices'); }
+        else { await noteRefuse(me, h, n.id, send, t); did.push('said No to removing blocked devices'); }
+      }
+    } catch (e: any) { did.push(`could not do ${n.kind}: ${e?.code ?? e?.message ?? e}`); }
+  }
+  return did;
+}

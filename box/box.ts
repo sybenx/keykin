@@ -6,13 +6,16 @@ import * as F from '../src/frost.ts';
 import { answer } from '../src/round.ts';
 import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
+import { destructive } from '../src/destructive.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, type Commitment } from '../src/curve.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex } from '../src/bytes.ts';
 
 /** `addr` is where a device that can listen answers other devices when the box is off. */
-export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; addr?: string; blocked: boolean; added: number }
+export interface Member { key: string; i: number; name: string; kind: 'device' | 'box'; chip?: string; addr?: string; blocked: boolean; added: number;
+  /** When it last signed or made a message key, and when it was blocked. Unix seconds. */
+  last?: number; blockedAt?: number }
 /** What waits for a newly added member: the two values its piece is built from. */
 export interface Welcome { by: string; box: string; device?: string; fetched?: boolean }
 /** A change of piece waiting for a member that was not there when the keys were cycled. */
@@ -31,10 +34,15 @@ export interface Account {
   grants?: Record<string, Grant[]>;
   /** Grants that were revoked. The box refuses any request naming one. */
   revoked?: string[];
+  /** Recent activity, newest last, at most 60 lines. */
+  log?: Happened[];
 }
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number }
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number }
 /** Something the account page started for a device to finish (SPEC 11.6). */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker'; text: string; at: number; result?: string }
+/** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string }
+/** One line of an account's recent activity. */
+export interface Happened { at: number; text: string }
 /** Someone asking to make an account here or move one here (SPEC 11.4). The admin decides. */
 export interface Ask {
   id: string; what: 'make' | 'transfer';
@@ -63,6 +71,8 @@ export class Box {
   /** Set by the page API: the notes waiting for an account's devices, and a device's answer to one. */
   onNotes: (account: string) => Note[] = () => [];
   onNoteDone: (account: string, note: string, result: string) => boolean = () => false;
+  /** A device's person tapped No: the note goes, and so does the page session that left it. */
+  onNoteRefused: (account: string, note: string) => boolean = () => false;
 
   constructor(state: BoxState | null = null) {
     const s: any = state ?? { ...newMemberKey() };
@@ -182,7 +192,8 @@ export class Box {
           return { ok: true, revoked: clean.filter((g) => revoked.has(g.id)).map((g) => g.id) };
         }
         case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
-        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at }) => ({ id, kind, text, at })) };
+        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap }) => ({ id, kind, text, at, tap })) };
+        case 'note_refuse': if (from.kind !== 'device' || !this.onNoteRefused(s.npub, body.note)) refuse('gone'); this.happened(s.npub, `${from.name} said No to a request from the account page`, now); return { ok: true };
         case 'note_done': {
           if (from.kind !== 'device') refuse('devices_only');
           if (typeof body.result !== 'string' || body.result.length > 2000 || !this.onNoteDone(s.npub, body.note, body.result)) refuse('gone');
@@ -244,6 +255,32 @@ export class Box {
   }
   /** Saves after the page API changed something in the state (a password try count, say). */
   touch() { this.#save(); }
+  /** Adds a line to an account's recent activity. */
+  happened(npub: string, text: string, now: number) {
+    const a = this.state.accounts[npub]; if (!a) return;
+    (a.log ??= []).push({ at: now, text });
+    if (a.log.length > 60) a.log.splice(0, a.log.length - 60);
+    this.#save();
+  }
+  // Notes when a device and a grant were last used. Saved at most once a minute, so signing stays cheap.
+  #lastSave = 0;
+  #used(s: Account, from: Member, grant: unknown) {
+    const t = Math.floor(Date.now() / 1000);
+    from.last = t;
+    if (typeof grant === 'string') for (const list of Object.values(s.grants ?? {})) for (const g of list) if (g.id === grant) g.last = t;
+    if (t - this.#lastSave >= 60) { this.#lastSave = t; this.#save(); }
+  }
+  /** The account page's Unblock (a page session may do it) and the admin's. */
+  unblockIn(npub: string, key: string) { return this.ownerUnblock(key, npub); }
+  /** Sets the username and password for an account from a signed-in account page. */
+  setLogin(npub: string, username: unknown, salt: unknown, check: unknown) {
+    const s = this.state.accounts[npub] ?? refuse('unknown_account');
+    if (typeof username !== 'string' || !USERNAME.test(username)) refuse('bad_username');
+    if (typeof salt !== 'string' || !/^[0-9a-f]{32}$/.test(salt) || typeof check !== 'string' || !HEX64.test(check)) refuse('bad_request');
+    if (this.accounts().some((a) => a !== s && a.login?.username === username)) refuse('username_taken');
+    s.login = { username: username as string, salt: salt as string, check: check as string };
+    this.#save();
+  }
 
   /** The admin's Block button. */
   ownerBlock(key: string, npub?: string) { return this.#block(this.#holding(key, npub), key); }
@@ -255,7 +292,7 @@ export class Box {
   ownerUnblock(key: string, npub?: string) {
     const s = this.#holding(key, npub);
     const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
-    m.blocked = false;
+    m.blocked = false; delete m.blockedAt;
     this.#save();
     return { ok: true };
   }
@@ -315,9 +352,12 @@ export class Box {
     const ev = body.event as UnsignedEvent;
     const msg = eventId(ev);
     if (ev.pubkey !== s.npub) refuse('wrong_account');
+    // Hard to undo: the device must have asked the person, and says so.
+    if (destructive(ev) && body.tapped !== true) refuse('needs_tap');
     const c = body.commit;
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
     const a = answer({ C: this.#C(s), i: s.i, share: BigInt('0x' + s.share) }, msg, c);
+    this.#used(s, from, body.grant);
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
   }
@@ -326,7 +366,9 @@ export class Box {
   // messages. It is useless without the asking device's own part.
   #ecdh(s: Account, from: Member, body: any) {
     if (from.kind !== 'device') refuse('devices_only');
-    return { ok: true, i: s.i, part: ecdhPart(s.i, BigInt('0x' + s.share), from.i, body.peer) };
+    const part = ecdhPart(s.i, BigInt('0x' + s.share), from.i, body.peer);
+    this.#used(s, from, body.grant);
+    return { ok: true, i: s.i, part };
   }
 
   // --- The list -----------------------------------------------------------------------------
@@ -335,7 +377,7 @@ export class Box {
   #block(s: Account, key: string) {
     const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
     if (m.kind === 'box') refuse('cannot_block_box');
-    m.blocked = true;
+    m.blocked = true; m.blockedAt = Math.floor(Date.now() / 1000);
     delete s.welcomes[m.key];
     this.#save();
     return { ok: true };
@@ -344,7 +386,7 @@ export class Box {
   #unblock(s: Account, from: Member, req: Signed, key: string) {
     this.#needFingerprint(from, req);
     const m = s.members.find((x) => x.key === key) ?? refuse('unknown_member');
-    m.blocked = false;
+    m.blocked = false; delete m.blockedAt;
     this.#save();
     return { ok: true };
   }
@@ -353,8 +395,14 @@ export class Box {
   // for a new index without either seeing it and without the key ever being whole. The box's half
   // waits here, sealed to the new member; the device's half arrives with `welcome_put`.
   #add(s: Account, from: Member, req: Signed, body: any, now: number) {
-    this.#needFingerprint(from, req);
     const m = body.member;
+    // Either the person asked on this device (fingerprint), or a signed-in account page asked (its note).
+    if (body.note !== undefined) {
+      const n = this.onNotes(s.npub).find((x) => x.id === body.note && x.kind === 'invite' && x.result === undefined) ?? refuse('gone');
+      let inv: any; try { inv = JSON.parse(n.text).invite; } catch { inv = null; }
+      if (!inv || inv.key !== m?.key) refuse('bad_member');
+      if (from.kind !== 'device') refuse('devices_only');
+    } else this.#needFingerprint(from, req);
     if (!m || !HEX64.test(m.key) || !Number.isInteger(m.i) || m.i < 1) refuse('bad_member');
     if (m.kind !== 'device' && m.kind !== 'box') refuse('bad_member');
     if (m.chip !== undefined && !CHIP.test(m.chip)) refuse('bad_chip_key');
@@ -393,7 +441,11 @@ export class Box {
   // (one number, `b1`): it sends it to the box sealed, and each other member's share of it sealed
   // to that member. Nobody learns anything about the key from it.
   #cycle(s: Account, from: Member, req: Signed, body: any) {
-    this.#needFingerprint(from, req);
+    // Either a fingerprint on this device, or a signed-in account page asked and the person tapped Yes here.
+    if (body.note !== undefined) {
+      if (!this.onNotes(s.npub).some((x) => x.id === body.note && x.kind === 'cycle' && x.result === undefined)) refuse('gone');
+      if (from.kind !== 'device') refuse('devices_only');
+    } else this.#needFingerprint(from, req);
     // A newcomer that has not collected its piece yet would be left with halves of the old line.
     if (Object.values(s.welcomes).some((w) => !w.fetched)) refuse('pending_welcome');
     s.welcomes = {};

@@ -47,7 +47,8 @@ test('Keykin Login passes devices and the page\'s calls to the box, and nothing 
 
     // Another site cannot make the page's calls: they need a header only this page can send.
     assert.equal((await w.api({ call: 'pw_salt', username: 'aaron' }, '', {})).status, 403);
-    assert.deepEqual((await w.api({ call: 'unblock', key: laptop.key })).body, { error: 'unknown_call' });
+    assert.deepEqual((await w.api({ call: 'reveal', key: laptop.key })).body, { error: 'unknown_call' });
+    assert.deepEqual((await w.api({ call: 'unblock', key: laptop.key })).body, { error: 'login' });
     assert.deepEqual((await w.api({ call: 'me' })).body, { error: 'login' });
 
     // Password login: the session comes back as a cookie the page's script cannot read, never in the body.

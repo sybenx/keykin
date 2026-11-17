@@ -2,6 +2,7 @@
 // keykin: this computer as a Keykin device.
 //
 //   keykin create '<QR text from the box page>' [name]   make an account with the box
+//   keykin import '<setup code>' <nsec> [name]           the same, with a key you already have (nsec1… or hex)
 //   keykin invite [name]                                 on a NEW device: print its invite
 //   keykin add '<invite>'                                on a device in the account: add it, print the join text
 //   keykin join '<join text>'                            on the new device: collect its piece
@@ -30,13 +31,13 @@ import { newBunker, runBunker, signOut, bunkerUrl, syncGrants } from '../src/nip
 import { readCode, answerCode, newTicket } from '../src/ticket.ts';
 import { getPublicKey } from 'nostr-tools/pure';
 import { createInterface } from 'node:readline/promises';
-import { nsecEncode, npubEncode } from 'nostr-tools/nip19';
+import { nsecEncode, npubEncode, decode as nip19decode } from 'nostr-tools/nip19';
 import { hexToBytes } from '../src/bytes.ts';
 
 export async function main(argv: string[], out: (s: string) => void = console.log, home = process.env.KEYKIN_HOME ?? pathJoin(homedir(), '.keykin')) {
   const file = pathJoin(home, 'device.json');
   const [cmd, a, b] = argv;
-  const s = load(file, cmd === 'create' ? b : cmd === 'invite' ? a : undefined);
+  const s = load(file, cmd === 'create' ? b : cmd === 'invite' ? a : cmd === 'import' ? argv[3] : undefined);
   const me = meOf(s);
   // The box first; if it cannot be reached, other devices that listen (from the list last seen at the box).
   const box = () => D.withHelpers(sender(s.addr ?? fail('This device does not know a box yet.')),
@@ -54,6 +55,16 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       const held = await D.createWithBox(me, qr, sender(qr.addr));
       keep(s, held, qr.addr); save(file, s);
       return out(`Account made. npub (hex): ${held.npub}`);
+    }
+    case 'import': {
+      if (s.held) fail('This device is already in an account.');
+      const qr = D.readQr(a);
+      const raw = (b ?? '').trim();
+      let hex: string;
+      try { hex = raw.startsWith('nsec1') ? Buffer.from(nip19decode(raw).data as Uint8Array).toString('hex') : raw; } catch { hex = ''; }
+      const held = await D.importWithBox(me, qr, hex, sender(qr.addr));
+      keep(s, held, qr.addr); save(file, s);
+      return out(`Account brought in. ${npubEncode(held.npub)}`);
     }
     case 'invite': {
       if (s.held) fail('This device is already in an account.');
@@ -178,7 +189,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
+    default: out('Commands: create, import, invite, add, join, status, sign, block, unblock, cycle, serve, bunker, scan, sites, signout, login, nsec'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

@@ -12,7 +12,7 @@ android {
     defaultConfig {
         applicationId = "cc.aaro.keykin"
         minSdk = 30; targetSdk = 35
-        versionCode = 1; versionName = "0.1.0"
+        versionCode = 2; versionName = "0.1.1"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     buildTypes { release { isMinifyEnabled = false } }
@@ -26,6 +26,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("keykin.frostlib", file("../../frost/target/release/libkeykin_frost.dylib").absolutePath)
     environment("KEYKIN_BOX_QR", System.getenv("KEYKIN_BOX_QR") ?: "")
     environment("KEYKIN_BOX_MANY", System.getenv("KEYKIN_BOX_MANY") ?: "")
+    environment("KEYKIN_BOX_IMPORT", System.getenv("KEYKIN_BOX_IMPORT") ?: "")
     environment("KEYKIN_NIP44_VECTOR", System.getenv("KEYKIN_NIP44_VECTOR") ?: "")
     outputs.upToDateWhen { false }
     testLogging { events("passed", "failed", "skipped"); showStandardStreams = true; exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }

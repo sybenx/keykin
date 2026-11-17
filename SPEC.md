@@ -1,6 +1,6 @@
 # Keykin v2
 
-Draft 0.6, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
+Draft 0.7, 2026-11-17. The direction and the reasons are in `DIRECTION.md`. This file says what
 the code does. It replaces Keykin Core draft 14.26 (weights, seats, paper, helper), which stays
 in the `cosign` repo's history.
 
@@ -29,6 +29,20 @@ make their pieces together (FROST distributed key generation, two parties, thres
 
 A device that was shown the wrong box key cannot finish, because it cannot open the box's
 sealed package.
+
+### Bringing in a key the person already has
+
+The other way to start an account, for someone who already has an nsec (Aaron, 2026-11-17).
+The whole key is on that one device for a moment; from then on it lives in pieces.
+
+1. The device takes the nsec, in its even-y form, as `a0`, picks a random `a1`, and so has the
+   line. Its own piece is `f(1)` and the box's is `f(2)`.
+2. It sends `{ op: "import", request, commitment: [a0·G, a1·G], share, name, chip }`, where
+   `share` is `f(2)` sealed to the box with the purpose `import`, and `request` is a setup code
+   or an approved request as for `create1`.
+3. The box checks that the piece lies on that line, refuses a key it already holds
+   (`already_here`), and stores the account. The npub is the one the nsec always had.
+4. The device forgets the nsec.
 
 ## 3. Signing
 
@@ -508,8 +522,6 @@ last used. The page shows them.
 - **A phone or a browser helping when the box is off.** Only the command-line device listens.
 - **The camera scan on a real phone.** The scanner is wired in but was only exercised through
   pasted and intent-fed codes on an emulator.
-- **Importing an existing nsec.** It would put a raw nsec on a device, which section 2 rules
-  out. The splitting code exists and only tests use it.
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
 - **Per-site limits.** A site that is allowed can ask for any signature.
 - **Removing a box.** A device is removed by blocking it and cycling; a box cannot be blocked.

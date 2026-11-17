@@ -88,6 +88,18 @@ object Bech32 {
         val mod = polymod(exp + five + List(6) { 0 }) xor 1
         return hrp + "1" + (five + List(6) { (mod ushr (5 * (5 - it))) and 31 }).joinToString("") { CHARS[it].toString() }
     }
+    /** The 32 bytes of an `nsec1…` or `npub1…`, hex. Throws `bad_key` if it is not one. */
+    fun decode(hrp: String, text: String): String {
+        val t = text.trim().lowercase()
+        if (!t.startsWith(hrp + "1")) refuse("bad_key")
+        val vals = t.substring(hrp.length + 1).map { CHARS.indexOf(it).also { v -> if (v < 0) refuse("bad_key") } }
+        val exp = hrp.map { it.code ushr 5 } + 0 + hrp.map { it.code and 31 }
+        if (vals.size < 7 || polymod(exp + vals) != 1) refuse("bad_key")
+        var acc = 0; var bits = 0; val out = ArrayList<Byte>()
+        for (v in vals.dropLast(6)) { acc = (acc shl 5) or v; bits += 5; if (bits >= 8) { bits -= 8; out.add(((acc ushr bits) and 0xff).toByte()) } }
+        if (out.size != 32) refuse("bad_key")
+        return hex(out.toByteArray())
+    }
     fun npub(hexKey: String) = encode("npub", unhex(hexKey))
     fun nsec(hexKey: String) = encode("nsec", unhex(hexKey))
 }

@@ -124,6 +124,26 @@ object Device {
         return Held(Piece(done.c, 1, done.share), done.npub, qr.key, qr.addr)
     }
 
+    /**
+     * Brings in a key the person already has (hex). This device splits it, keeps one piece and sends the
+     * box the other, sealed. The caller must forget the whole key afterwards.
+     */
+    fun importKey(me: Me, qr: Qr, nsecHex: String, send: Send = http(qr.addr)): Held {
+        if (!Regex("^[0-9a-f]{64}$").matches(nsecHex)) refuse("bad_key")
+        var a0 = BigInteger(nsecHex, 16).mod(N)
+        if (a0.signum() == 0) refuse("bad_key")
+        if (Secp.mulG(a0).startsWith("03")) a0 = N.subtract(a0)          // the form whose public key has even y (BIP-340)
+        var a1 = BigInteger(1, random(32)).mod(N)
+        while (a1.signum() == 0) a1 = BigInteger(1, random(32)).mod(N)
+        val c = listOf(Secp.mulG(a0), Secp.mulG(a1))
+        val piece = { i: Int -> a0.add(a1.multiply(BigInteger.valueOf(i.toLong()))).mod(N) }
+        val npub = c[0].substring(2)
+        val r = call(send, seal(JSONObject().put("op", "import").put("request", qr.code).put("commitment", JSONArray(c))
+            .put("share", Seal.to(me.sk, qr.key, "import", scalarHex(piece(2)))).put("name", me.name).apply { if (me.chip != null) put("chip", me.chip) }, me))
+        if (r.getString("npub") != npub) refuse("bad_keygen")
+        return Held(Piece(c, 1, piece(1)), npub, qr.key, qr.addr)
+    }
+
     /** Signs a Nostr event with the box. Returns the whole signed event. */
     /** `grant` names the site or app this signature is for (SPEC 11.5); leave it null for the person's own use. */
     fun sign(me: Me, h: Held, kind: Int, content: String, tags: List<List<String>> = emptyList(), createdAt: Long = now(), send: Send = http(h.addr), grant: String? = null, tapped: Boolean = false): JSONObject {

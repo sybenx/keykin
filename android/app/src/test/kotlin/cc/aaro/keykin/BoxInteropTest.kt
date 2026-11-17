@@ -159,6 +159,21 @@ class BoxInteropTest {
         assertEquals("login", page(JSONObject().put("call", "me").put("session", session)).getString("error"))
     }
 
+    @Test fun bringingInAKeyThePersonAlreadyHas() {
+        val text = System.getenv("KEYKIN_BOX_IMPORT") ?: ""
+        assumeTrue("set KEYKIN_BOX_IMPORT to a setup text", text.isNotEmpty())
+        val nsec = hex(random(32)); val npub = Secp.pub(unhex(nsec))
+        assertEquals(nsec, Bech32.decode("nsec", Bech32.nsec(nsec)))
+        assertThrows(KeykinException::class.java) { Bech32.decode("nsec", Bech32.npub(nsec)) }
+        val (phone, chip) = device("Pixel (Kotlin, import)")
+        val held = Device.importKey(phone, Texts.qr(text), nsec)
+        assertEquals(npub, held.npub)
+        val ev = Device.sign(phone, held, 1, "same identity, now in pieces")
+        assertEquals(npub, ev.getString("pubkey"))
+        assertTrue(Secp.schnorrVerify(ev.getString("sig"), unhex(ev.getString("id")), npub))
+        assertEquals(npub, Secp.pub(unhex(Device.formNsec(phone, held, chip.fp))))
+    }
+
     @Test fun nip44MatchesTheReference() {
         // "<conversation key hex>|<nonce hex>|<plaintext>|<payload>", made by nostr-tools.
         val v = (System.getenv("KEYKIN_NIP44_VECTOR") ?: "").split("|")

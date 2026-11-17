@@ -309,3 +309,36 @@ test('hard-to-undo signatures need a Yes on the device; ordinary ones do not', a
   // The box notes when the device last signed.
   assert.ok(box.only()!.members[0].last! > 0);
 });
+
+test('bringing in a key the person already has: same npub, in pieces from then on', async () => {
+  const { box, send, call } = world();
+  const nsec = bytesToHex(randomBytes(32));
+  const npub = bytesToHex(schnorr.getPublicKey(hexToBytes(nsec)));
+  const phone = device('Phone');
+  const qr = D.readQr(box.qr('http://box')!);
+  // A wrong code, and a piece that is not on the line it claims, are refused.
+  await assert.rejects(D.importWithBox(phone, { ...qr, code: 'nope' }, nsec, send, NOW), /bad_code/);
+  await assert.rejects(D.importWithBox(phone, qr, 'zz', send, NOW), /bad_key/);
+  const other = bytesToHex(randomBytes(32));
+  const forged = await seal({ op: 'import', request: qr.code, commitment: (await import('../src/frost.ts')).deal(BigInt('0x' + nsec)).commitment.map((p: any) => p.toHex(true)),
+    share: (await import('../src/seal.ts')).sealTo(phone.sk, qr.key, 'import', other), name: 'x' }, phone.sk, NOW);
+  assert.deepEqual(box.handle(forged, NOW), { error: 'bad_piece' });
+
+  const held = await D.importWithBox(phone, qr, nsec, send, NOW);
+  assert.equal(held.npub, npub);                                   // the same identity as before
+  assert.doesNotMatch(JSON.stringify(box.state), new RegExp(nsec));
+  const ev = await D.signEvent(phone, held, note(npub), send, NOW);
+  assert.ok(valid(ev)); assert.equal(ev.pubkey, npub);
+  // Everything else works as for a key made together: another device, messages, and the key formed again by fingerprint.
+  const laptop = device('Laptop');
+  await D.addMember(phone, held, { key: laptop.key, name: 'Laptop', kind: 'device', chip: laptop.chip }, send, NOW);
+  const lh = await D.join(laptop, held.boxKey, held.npub, send, NOW);
+  assert.ok(valid(await D.signEvent(laptop, lh, note(npub), send, NOW)));
+  const formed = await D.formNsec(laptop, lh, send, NOW);
+  assert.equal(bytesToHex(schnorr.getPublicKey(hexToBytes(formed))), npub);
+  // The same key cannot be brought to this box twice, and the first-run code is spent.
+  await assert.rejects(D.importWithBox(device('Again'), D.readQr(box.newSetupCode('http://box', NOW)), nsec, send, NOW), /already_here/);
+  assert.equal(box.accounts().length, 1);
+  assert.ok(box.only()!.log!.some((l) => /existing key/.test(l.text)));
+  assert.ok(call);
+});

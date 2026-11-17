@@ -35,6 +35,7 @@ sealed interface Screen {
     data object Start : Screen
     data object Home : Screen
     data object Invite : Screen                       // this new device shows its invite
+    data object Import : Screen                       // bring in a key the person already has
     data class Paste(val back: Screen) : Screen
     data class JoinCode(val text: String, val name: String) : Screen   // shown to the device just added
     data class Nsec(val nsec: String) : Screen
@@ -51,6 +52,8 @@ class MainActivity : FragmentActivity() {
     private var busy by mutableStateOf(false)
     private var note by mutableStateOf<String?>(null)
     private var problem by mutableStateOf<String?>(null)
+    /** A key typed in on the import screen, waiting for the box's code. Never saved. */
+    private var pendingNsec: String? = null
     private var apps by mutableStateOf<List<String>>(emptyList())
     private fun own(h: Held): Held { h.changed = { store.keep(it) }; store.keep(h); held = h; return h }
     override fun onResume() { super.onResume(); if (::store.isInitialized) apps = Apps.all(this) }
@@ -96,6 +99,9 @@ class MainActivity : FragmentActivity() {
         "cancelled" -> "Cancelled."
         "not_ready", "no_welcome" -> "The other device has not finished adding this one yet."
         "bad_qr", "bad_invite", "bad_join" -> "That is not a Keykin code."
+        "bad_key" -> "That is not an nsec."
+        "already_here" -> "That key already has an account on this box."
+        "unknown_account", "unknown_member" -> "The box does not know this account any more. Forget it on this phone and start again."
         "wrong_box" -> "That code is from a different box."
         "site_silent" -> "The site did not answer. Show its code again and retry."
         "site_declined" -> "The site did not take the sign-in."
@@ -132,6 +138,12 @@ class MainActivity : FragmentActivity() {
             t.contains("\"join\"") -> work { own(Device.join(me, Texts.readJoin(t))); screen = Screen.Home; loadMembers() }
             else -> work {
                 if (held != null) refuse("already_set_up")
+                val nsec = pendingNsec
+                if (nsec != null) {
+                    own(Device.importKey(me, Texts.qr(t), nsec)); pendingNsec = null
+                    screen = Screen.Home; loadMembers(); note = "Your key is in pieces now. This phone no longer holds the whole key."
+                    return@work
+                }
                 own(Device.create(me, Texts.qr(t))); screen = Screen.Home; loadMembers()
             }
         }
@@ -177,6 +189,7 @@ class MainActivity : FragmentActivity() {
                 Screen.Start -> Start()
                 Screen.Home -> Home()
                 Screen.Invite -> InviteScreen()
+                Screen.Import -> ImportScreen()
                 is Screen.Paste -> PasteScreen(s)
                 is Screen.JoinCode -> JoinCodeScreen(s)
                 is Screen.Nsec -> NsecScreen(s)
@@ -198,7 +211,38 @@ class MainActivity : FragmentActivity() {
             Dim("Add this phone from a device that is already in it.")
             Btn("Add this phone", enabled = !busy, modifier = Modifier.fillMaxWidth()) { screen = Screen.Invite }
         }
+        Card {
+            Head("Use a key you already have")
+            Dim("Bring your nsec in. This phone splits it with the box and then forgets the whole key.")
+            Btn("Bring in my nsec", enabled = !busy, modifier = Modifier.fillMaxWidth()) { screen = Screen.Import }
+        }
         if (me.chip == null) Dim("This phone has no fingerprint or face set up. It will be able to sign, but not to add devices, unblock them or form the whole key.")
+    }
+
+    @Composable private fun ImportScreen() {
+        BackHandler { pendingNsec = null; screen = Screen.Start }
+        var text by remember { mutableStateOf("") }
+        var ready by remember { mutableStateOf(false) }
+        val p = palette()
+        Card {
+            Head("1. Your nsec")
+            Dim("Paste the key that starts with nsec1. It is used once, to make the pieces, and is not saved.")
+            BasicTextField(text, { text = it; ready = false }, Modifier.fillMaxWidth().heightIn(min = 72.dp).background(p.bg, RoundedCornerShape(8.dp)).border(1.dp, p.line, RoundedCornerShape(8.dp)).padding(12.dp),
+                textStyle = TextStyle(color = p.text, fontSize = 14.sp), cursorBrush = SolidColor(p.accent))
+            Btn("Use this key", Kind.Main, !busy && text.isNotBlank(), Modifier.fillMaxWidth()) {
+                try {
+                    val t = text.trim()
+                    pendingNsec = if (t.startsWith("nsec1")) Bech32.decode("nsec", t) else t.lowercase().also { if (!Regex("^[0-9a-f]{64}$").matches(it)) refuse("bad_key") }
+                    text = ""; ready = true; problem = null
+                } catch (_: KeykinException) { problem = "That is not an nsec." }
+            }
+        }
+        if (ready) Card {
+            Head("2. Scan the box's code")
+            Dim("Open the box's admin page and scan the setup code it shows.")
+            Btn("Scan the box's code", Kind.Main, !busy, Modifier.fillMaxWidth()) { scan("Scan the code on the box's page") }
+            Btn("Paste the code instead", enabled = !busy, modifier = Modifier.fillMaxWidth()) { screen = Screen.Paste(Screen.Import) }
+        }
     }
 
     @Composable private fun InviteScreen() {
@@ -277,6 +321,13 @@ class MainActivity : FragmentActivity() {
                 Body(Apps.label(this@MainActivity, pkg), Modifier.weight(1f))
                 Btn("Sign out", enabled = !busy) { Apps.signOut(this@MainActivity, pkg); apps = Apps.all(this@MainActivity) }
             }
+        }
+        Card {
+            var sure by remember { mutableStateOf(false) }
+            Head("This phone")
+            Dim("Forgetting the account here removes this phone's piece. The account itself is untouched. Without another device that can sign with the box, it cannot be used again.")
+            if (!sure) Btn("Forget the account on this phone", Kind.Danger, !busy, Modifier.fillMaxWidth()) { sure = true }
+            else Btn("Yes, forget it", Kind.Danger, !busy, Modifier.fillMaxWidth()) { store.forget(); held = null; members = emptyList(); sure = false; screen = Screen.Start; note = "This phone has no account now." }
         }
         Card {
             Head("The whole key")

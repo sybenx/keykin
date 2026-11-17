@@ -141,6 +141,7 @@ export class Box {
       if (body.op === 'asked') return { ok: true, state: this.state.requests[body.request]?.state ?? 'gone' };
       if (body.op === 'create1') return this.#create1(body, req.key);
       if (body.op === 'create2') return this.#create2(body, req.key, now);
+      if (body.op === 'import') return this.#import(body, req.key, now);
       const s = this.#accountOf(body);
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
       if (from.blocked) refuse('blocked');
@@ -317,6 +318,32 @@ export class Box {
     const mine = F.dkg1(BOX_I, 2);
     this.#pending.set(id, { device, secret: mine.secret, pkg: body.pkg, name: String(body.name ?? 'First device'), chip: body.chip });
     return { ok: true, pkg: mine.pkg };
+  }
+
+  // Bringing in a key the person already has. The device split it; this is the box's piece. The whole
+  // key existed on that device for a moment, which making a key together (create1, create2) avoids.
+  #import(body: any, device: string, now: number) {
+    const id = this.#usable(body.request ?? body.code, device, 'make');
+    if (body.chip !== undefined && !CHIP.test(body.chip)) refuse('bad_chip_key');
+    let C: Commitment, share: bigint;
+    try { C = commitmentFrom(body.commitment); share = scalarFrom(openFrom(this.state.sk, device, 'import', body.share)); }
+    catch (e) { if (e instanceof KeykinError && e.code === 'bad_seal') throw e; return refuse('bad_piece'); }
+    // The piece must lie on the line the device says it is on: share·G = C0 + 2·C1.
+    if (share === 0n || !mul(share).equals(C[0].add(C[1].multiply(BigInt(BOX_I))))) refuse('bad_piece');
+    const npub = commitmentHex(C)[0].slice(2);
+    if (commitmentHex(C)[0].slice(0, 2) !== '02') refuse('bad_piece');          // the key in its even-y form, as BIP-340 wants
+    if (this.state.accounts[npub]) refuse('already_here');
+    delete this.state.requests[id];
+    this.state.accounts[npub] = {
+      commitment: commitmentHex(C), npub, i: BOX_I, share: scalarHex(share),
+      members: [
+        { key: device, i: DEVICE_I, name: String(body.name ?? 'First device').slice(0, 60), kind: 'device', chip: body.chip, blocked: false, added: now },
+        { key: this.state.key, i: BOX_I, name: 'Box', kind: 'box', blocked: false, added: now },
+      ],
+      welcomes: {}, catchups: {}, epoch: 0, next: 3,
+    };
+    this.happened(npub, 'The account was brought here from an existing key', now);
+    return { ok: true, npub };
   }
 
   #create2(body: any, device: string, now: number) {

@@ -60,6 +60,19 @@ export async function createWithBox(me: Me, qr: { key: string; code: string }, s
 
 /** `grant` names the site or app this signature is for (SPEC 11.5); leave it out for the person's own use. */
 /** `tapped`: the person said Yes on this device to a hard-to-undo event (see destructive.ts). Without it the box answers `needs_tap`. */
+/**
+ * Brings in a key the person already has (hex). This device splits it, keeps one piece and sends the
+ * box the other, sealed. The caller must forget the whole key afterwards: from then on it lives in pieces.
+ */
+export async function importWithBox(me: Me, qr: { key: string; code: string }, nsecHex: string, send: Send, t = now()): Promise<Held> {
+  if (!/^[0-9a-f]{64}$/.test(nsecHex)) refuse('bad_key');
+  const { commitment: C, a0, a1 } = F.deal(BigInt('0x' + nsecHex));
+  const npub = compHex(C[0]).slice(2);
+  const r = await call(send, await seal({ op: 'import', request: qr.code, commitment: C.map(compHex), share: sealTo(me.sk, qr.key, 'import', scalarHex(F.pieceAt(a0, a1, 2))), name: me.name, chip: me.chip }, me.sk, t));
+  if (r.npub !== npub) refuse('bad_keygen');
+  return { piece: { C, i: 1, share: F.pieceAt(a0, a1, 1) }, npub, boxKey: qr.key, epoch: 0 };
+}
+
 export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean) {
   const id = eventId(ev);
   let mine = ask(h.piece, id);

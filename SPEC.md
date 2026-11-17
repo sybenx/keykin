@@ -536,6 +536,12 @@ box and nothing else: device requests (`POST /keykin`, unchanged), and the page'
   signature, the kind, that the challenge is one it gave and unused, and that `created_at` is
   within ten minutes. The session is for the event's `pubkey`.
 
+On a phone the page shows a button, not a code, since a phone cannot scan its own screen. The
+button is a `nostrconnect://` link (NIP-46) with a fresh page key and secret; the signer app
+opens on it and answers on the relays, and the rest is the same challenge. The page listens
+again from the start time each time it comes back to the front, because a phone drops a page's
+connections while the app is in front.
+
 The account page used to show a code of its own (`{ keykin: 2, login: … }`, answered by
 `{ op: "login" }`). The page no longer shows it. The box still answers it, for apps built before
 this.

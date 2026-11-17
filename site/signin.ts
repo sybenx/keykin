@@ -56,3 +56,47 @@ export function start(box: HTMLElement, o: { relays: string[]; words?: { scan?: 
   });
   return { done: run.done.then((ticket) => ({ pubkey: ticket.pubkey, signer: signer!, ticket })), cancel: run.cancel };
 }
+
+// ---- On the same phone as the signer: a link to tap, not a code to scan ------------------------------
+//
+//   const { uri, done, cancel } = KeykinSignIn.link({ relays, name: 'Your account' });
+//
+// `uri` is a nostrconnect:// link (NIP-46). The signer app opens on it, and answers on the relays. A phone
+// drops a page's connections while the page is in the background, which is exactly when the answer comes,
+// so the page asks again from the start time whenever it is looked at again.
+
+import { getPublicKey } from 'nostr-tools/pure';
+import { createNostrConnectURI } from 'nostr-tools/nip46';
+import { SimplePool } from 'nostr-tools/pool';
+import * as nip44 from 'nostr-tools/nip44';
+
+export function link(o: { relays: string[]; name?: string }): { uri: string; done: Promise<{ pubkey: string; signer: BunkerSigner }>; cancel: () => void } {
+  const sk = generateSecretKey(), me = getPublicKey(sk);
+  const secret = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const uri = createNostrConnectURI({ clientPubkey: me, relays: o.relays, secret, name: o.name ?? location.host, url: location.origin });
+  const since = Math.floor(Date.now() / 1000) - 10;
+  const pool = new SimplePool();
+  let sub: { close: () => void } | undefined, stopped = false, found: ((signerKey: string) => void) | undefined;
+  const listen = () => {
+    sub?.close();
+    sub = pool.subscribe(o.relays, { kinds: [24133], '#p': [me], since }, {
+      onevent: (e) => {
+        try {
+          const answer = JSON.parse(nip44.v2.decrypt(e.content, nip44.v2.utils.getConversationKey(sk, e.pubkey)));
+          if (answer.result === secret) found?.(e.pubkey);
+        } catch { /* not for us */ }
+      },
+    });
+  };
+  const seen = () => { if (!stopped && document.visibilityState === 'visible') listen(); };
+  const stop = () => { stopped = true; document.removeEventListener('visibilitychange', seen); sub?.close(); pool.close(o.relays); };
+  const done = (async () => {
+    document.addEventListener('visibilitychange', seen);
+    listen();
+    const signerKey = await new Promise<string>((resolve) => { found = resolve; });
+    stop();
+    const signer = BunkerSigner.fromBunker(sk, { pubkey: signerKey, relays: o.relays, secret });
+    return { pubkey: await signer.getPublicKey(), signer };
+  })();
+  return { uri, done, cancel: stop };
+}

@@ -94,7 +94,7 @@
     app.replaceChildren(el('div', { className: 'signin' },
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
       el('div', { className: 'panel' },
-        el('div', { className: 'half scan' }, el('h2', {}, 'Scan with your phone'), scan),
+        el('div', { className: 'half scan' }, el('h2', {}, /Android|iPhone|iPad/i.test(navigator.userAgent) ? 'Use this phone' : 'Scan with your phone'), scan),
         el('div', { className: 'rule' }),
         el('div', { className: 'half' }, el('h2', {}, 'Or use your password'), err, form,
           el('div', { className: 'small dim', style: 'line-height:1.45' }, 'Your password signs you in fully. A few things that cannot be undone still ask for a Yes on one of your devices.'))),
@@ -103,19 +103,31 @@
     // The same sign-in any site uses: the phone scans the code, and then proves who it is by signing a
     // one-time challenge from the box. A code lasts a few minutes, so a new one is drawn when it runs out.
     let run = null, live = true;
+    const onPhone = /Android|iPhone|iPad/i.test(navigator.userAgent);
     leave = () => { live = false; run?.cancel(); };
     const begin = async () => {
       if (!live) return;
       const c = await api('signin_start').catch(() => ({ error: 'no_box' }));
       if (!live) return;
       if (!c.ok) { scan.replaceChildren(el('p', { className: 'err small', role: 'alert' }, say(c.error))); return void setTimeout(begin, 5000); }
-      // No "Sign in?" question here: the phone already asked, and the box checks the phone's signature before it lets this browser in.
-      run = KeykinSignIn.start(scan, { relays: c.relays, ask: false, words: {
-        scan: 'Open Marble on your phone and scan this.',
-        digits: 'Your phone shows five digits. They should be:', differ: 'If they differ, say no on your phone.',
-      } });
+      if (onPhone) {
+        // Marble is on this very phone: a button that opens it, since a phone cannot scan its own screen.
+        const l = KeykinSignIn.link({ relays: c.relays, name: 'Your account' });
+        run = l;
+        scan.replaceChildren(
+          el('a', { className: 'btn go linkbtn', id: 'withapp', href: l.uri }, 'Sign in with Marble'),
+          el('p', { className: 'kk-dim' }, 'Marble opens. Say yes there, then come back to this page.'),
+          el('a', { className: 'small', id: 'getapp', href: 'https://github.com/sybenx/marble/releases/latest', rel: 'noopener' }, 'Get Marble'));
+      } else {
+        // No "Sign in?" question here: the phone already asked, and the box checks the phone's signature before it lets this browser in.
+        run = KeykinSignIn.start(scan, { relays: c.relays, ask: false, words: {
+          scan: 'Open Marble on your phone and scan this.',
+          digits: 'Your phone shows five digits. They should be:', differ: 'If they differ, say no on your phone.',
+        } });
+      }
       try {
         const { signer } = await run.done;
+        if (onPhone) scan.replaceChildren(el('p', { className: 'kk-dim' }, 'Signing in…'));
         const event = await signer.signEvent({ kind: 22242, created_at: Math.floor(Date.now() / 1000), tags: [['relay', location.origin], ['challenge', c.challenge]], content: '' });
         signer.close().catch(() => {});
         const r = await api('signin', { event });

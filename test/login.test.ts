@@ -255,6 +255,12 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     assert.equal(await phonePage.locator('#username').count(), 0);
     await phonePage.click('#here');
     await phonePage.waitForSelector('#username');
+    // On a phone there is no code to scan: a button opens the app on this phone (a nostrconnect link, NIP-46).
+    await phonePage.waitForSelector('#withapp');
+    const tap = new URL((await phonePage.getAttribute('#withapp', 'href'))!);
+    assert.equal(tap.protocol, 'nostrconnect:'); assert.match(tap.host, /^[0-9a-f]{64}$/);
+    assert.deepEqual(tap.searchParams.getAll('relay'), [w.relay]); assert.match(tap.searchParams.get('secret')!, /^[0-9a-f]{32}$/);
+    assert.equal(await phonePage.locator('.kk-qr').count(), 0);
     await page.setViewportSize({ width: 390, height: 800 });
     for (const s of ['Devices', 'Sites and apps', 'Security', 'Home']) {
       await page.click(`nav >> text=${s}`);

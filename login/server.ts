@@ -114,7 +114,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       if (!session) return json(res, 200, { error: 'login' });
       const { call: _c, session: _s, browser: _b, ...rest } = body;
       const r = await toBox('/page', { ...rest, call, session });
-      if (call === 'me' && r.ok) r.npubText = npubEncode(r.npub);
+      if (call === 'me' && r.ok) { r.npubText = npubEncode(r.npub); r.relays = relays; }
       if (call === 'protect' && r.ok) { const qr = qrcode(0, 'M'); qr.addData(r.text); qr.make(); r.svg = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
       const gone = call === 'logout' || call === 'logout_all' || r.error === 'login';
       return json(res, 200, r, gone ? [cookie('ks', '', 0)] : []);

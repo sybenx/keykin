@@ -14,6 +14,8 @@
 //                        address the browser used.
 //   KEYKIN_POLICY        JSON that overrides the account page's policy (SPEC 11.6), e.g.
 //                        {"calls":{"note_put:invite":"any"},"weakSiteLimit":"posts"}
+//   KEYKIN_LOGIN_URL     the login page's origin (https://, nothing after), when Keykin Login is in front. The box's
+//                        codes carry it, so the device that scans one publishes the account's login-page pointer.
 //   KEYKIN_OPEN          set to 1 to let anyone who signs in on the account page bring their account onto this
 //                        box. Without it, a new account needs a code from the admin page or the admin's approval.
 //   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the admin page already asks who you are (the
@@ -32,12 +34,13 @@ import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/by
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; policy?: ConstructorParameters<typeof PageApi>[3]; log?: (s: string) => void }) {
+export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; login?: string; policy?: ConstructorParameters<typeof PageApi>[3]; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   mkdirSync(o.dir, { recursive: true, mode: 0o700 });
   const file = join(o.dir, 'state.json');
   const state: BoxState | null = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
   const box = new Box(state);
+  if (o.login !== undefined) { if (!/^https:\/\/[a-z0-9.-]+(:[0-9]+)?$/.test(o.login)) throw new Error(`KEYKIN_LOGIN_URL must be https:// and a host, nothing after: ${o.login}`); box.login = o.login; }
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
   const nowS = () => Math.floor(Date.now() / 1000);
@@ -172,6 +175,6 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
 if (import.meta.url === `file://${process.argv[1]}`) {
   const e = process.env;
   startBox({ dir: e.KEYKIN_DIR ?? './box-data', addr: e.KEYKIN_ADDR, port: Number(e.KEYKIN_PORT ?? 7460), sidePort: e.KEYKIN_SIDE_PORT ? Number(e.KEYKIN_SIDE_PORT) : undefined,
-    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1',
+    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1', login: e.KEYKIN_LOGIN_URL?.replace(/\/+$/, ''),
     policy: e.KEYKIN_POLICY ? JSON.parse(e.KEYKIN_POLICY) : undefined });
 }

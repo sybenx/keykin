@@ -407,10 +407,23 @@ thing `marble.syb.lol` reads to find where to send someone.
 - To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
   wins. A reader checks the signature, shows the address to the person, and only then goes there.
 - To remove it, publish the same event with no `url` tag.
-- A device signs it like any other event (section 3). The account page checks its relays for it
-  after a sign-in, and when it is missing offers to publish it, signed by the remote signer a scan
-  left behind. After a password or a passkey the page has no signer, so it says to publish it
-  from Marble instead. **Not built:** Marble publishing it.
+- A device signs it like any other event (section 3).
+- **Where a device learns the origin.** A box with Keykin Login in front is started with
+  `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"loginPage": "https://…"` (not `login`, which is the account page's own sign-in code).
+  A device's join text carries it too, when the device knows it. A device given a code without it
+  may use the box address, if posting to `<addr>/api` without the page's header gets Keykin Login's
+  `403 forbidden` (a bare box has no `/api`).
+- **Who publishes it, and keeps it there.** A device in the account checks right after it joins,
+  and each time it signs a site in by a `nostrconnect://` code. A site that looked the person up by
+  name and found no pointer marks its code `kk_login=missing` (next to `kk=account`); the check is
+  the same either way, and the site looks again once the device has answered. It asks the account's write relays (kind 10002) and its own.
+  - If the newest pointer names this origin, and some write relay that answered lacks it, the
+    device sends that same signed event there again. No new signature, no box.
+  - If no relay has any pointer, it signs a new one (device and box, as usual) and publishes it.
+  - If the newest pointer has no `url` (removed on purpose) or names another origin, it does
+    nothing: the person chose that.
+  - If no relay answers, it does nothing this time.
+  The account page's "Publish it" button stays as the fallback.
 
 ### 11.2 Accounts on a box, and how a request names its account
 
@@ -579,8 +592,8 @@ each device tells the box what it has let in.
 **Built:** the box, the account page (a "Posts only" switch on each row of Sites and apps), and
 `reportGrants` / `revoke` / `limit` / the `grant` field in both device cores. The command-line
 signer and the browser extension report each site they let in and name it on every request. The
-Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. **Not wired:** the
-Android app does not report its grants to the box yet.
+Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. The Android app (Marble)
+reports its grants every 30 seconds.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -719,7 +732,9 @@ with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kin
 1059) and computes message keys with other people's keys only. **Not built:** the page's
 "Confirm with a passkey or your phone" prompt, since nothing asks for it today.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). **Not wired:** the phone app does not look for notes or report grants yet.
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
+`invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every
+30 seconds from its background service (verified 2026-11-18, with the app closed).
 
 ## 9. Not built yet
 

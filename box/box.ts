@@ -95,14 +95,17 @@ export class Box {
   only(): Account | null { return this.accounts()[0] ?? null; }
 
   /** What the QR on an empty box says. `addr` is where devices reach it. Null once it holds an account. */
-  qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode }); }
+  /** The login page's origin (Keykin Login in front of this box), if set. Codes carry it so the device can publish the pointer (SPEC 11.1). */
+  login: string | undefined;
+  #login() { return this.login ? { login: this.login } : {}; }
+  qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode, ...this.#login() }); }
 
   /** The admin makes room for one more account: a request approved in advance, as a setup code. */
   newSetupCode(addr: string, now: number, only?: string): string {
     const id = bytesToHex(randomBytes(16));
     this.state.requests[id] = { id, what: 'make', asked: now, state: 'approved', decided: now, ...(only ? { only } : {}) };
     this.#save();
-    return JSON.stringify({ keykin: 2, addr, key: this.state.key, code: id });
+    return JSON.stringify({ keykin: 2, addr, key: this.state.key, code: id, ...this.#login() });
   }
   /** The admin's answer to someone asking (SPEC 11.4). */
   decide(id: string, approve: boolean, now: number) {

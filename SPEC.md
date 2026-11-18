@@ -408,17 +408,20 @@ thing `marble.syb.lol` reads to find where to send someone.
   wins. A reader checks the signature, shows the address to the person, and only then goes there.
 - To remove it, publish the same event with no `url` tag.
 - A device signs it like any other event (section 3).
-- **Who publishes it.** A phone that has just come into an account on a box (the box's setup code,
-  or another device's invite) publishes it with no question, naming the address it reaches the box
-  at, when that address is an `https://` origin with Keykin Login in front. It checks that by
-  posting to `<origin>/api` without the page's header: Keykin Login answers `403 forbidden`, a
-  bare box has no `/api`. First it looks on the account's write relays (kind 10002) and its own.
-  If a pointer is there already, even one naming another box, or one with no `url` (removed on
-  purpose), it leaves it alone. If no relay answers, it publishes nothing. The account page's
-  "Publish it" button stays as the fallback.
-- *Proposed:* the box's codes and join text could carry the login origin outright
-  (`"login": "https://account.syb.lol"`, from a `KEYKIN_LOGIN_URL` setting) so a device need not
-  infer it from the box address. Today `KEYKIN_URL` is that address when Keykin Login is in front.
+- **Where a device learns the origin.** A box with Keykin Login in front is started with
+  `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"login": "https://…"`.
+  A device's join text carries it too, when the device knows it. A device given a code without it
+  may use the box address, if posting to `<addr>/api` without the page's header gets Keykin Login's
+  `403 forbidden` (a bare box has no `/api`).
+- **Who publishes it, and keeps it there.** A device in the account checks right after it joins,
+  and about once a day after that. It asks the account's write relays (kind 10002) and its own.
+  - If the newest pointer names this origin, and some write relay that answered lacks it, the
+    device sends that same signed event there again. No new signature, no box.
+  - If no relay has any pointer, it signs a new one (device and box, as usual) and publishes it.
+  - If the newest pointer has no `url` (removed on purpose) or names another origin, it does
+    nothing: the person chose that.
+  - If no relay answers, it does nothing this time.
+  The account page's "Publish it" button stays as the fallback.
 
 ### 11.2 Accounts on a box, and how a request names its account
 

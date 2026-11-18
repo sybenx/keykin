@@ -414,7 +414,9 @@ thing `marble.syb.lol` reads to find where to send someone.
   may use the box address, if posting to `<addr>/api` without the page's header gets Keykin Login's
   `403 forbidden` (a bare box has no `/api`).
 - **Who publishes it, and keeps it there.** A device in the account checks right after it joins,
-  and about once a day after that. It asks the account's write relays (kind 10002) and its own.
+  and each time it signs a site in by a `nostrconnect://` code. A site that looked the person up by
+  name and found no pointer marks its code `kk_login=missing` (next to `kk=account`); the check is
+  the same either way, and the site looks again once the device has answered. It asks the account's write relays (kind 10002) and its own.
   - If the newest pointer names this origin, and some write relay that answered lacks it, the
     device sends that same signed event there again. No new signature, no box.
   - If no relay has any pointer, it signs a new one (device and box, as usual) and publishes it.

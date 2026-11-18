@@ -407,7 +407,18 @@ thing `marble.syb.lol` reads to find where to send someone.
 - To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
   wins. A reader checks the signature, shows the address to the person, and only then goes there.
 - To remove it, publish the same event with no `url` tag.
-- A device signs it like any other event (section 3). The account page offers to publish it.
+- A device signs it like any other event (section 3).
+- **Who publishes it.** A phone that has just come into an account on a box (the box's setup code,
+  or another device's invite) publishes it with no question, naming the address it reaches the box
+  at, when that address is an `https://` origin with Keykin Login in front. It checks that by
+  posting to `<origin>/api` without the page's header: Keykin Login answers `403 forbidden`, a
+  bare box has no `/api`. First it looks on the account's write relays (kind 10002) and its own.
+  If a pointer is there already, even one naming another box, or one with no `url` (removed on
+  purpose), it leaves it alone. If no relay answers, it publishes nothing. The account page's
+  "Publish it" button stays as the fallback.
+- *Proposed:* the box's codes and join text could carry the login origin outright
+  (`"login": "https://account.syb.lol"`, from a `KEYKIN_LOGIN_URL` setting) so a device need not
+  infer it from the box address. Today `KEYKIN_URL` is that address when Keykin Login is in front.
 
 ### 11.2 Accounts on a box, and how a request names its account
 
@@ -552,8 +563,8 @@ each device tells the box what it has let in.
 **Built:** the box, the account page (a "Posts only" switch on each row of Sites and apps), and
 `reportGrants` / `revoke` / `limit` / the `grant` field in both device cores. The command-line
 signer and the browser extension report each site they let in and name it on every request. The
-Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. **Not wired:** the
-Android app does not report its grants to the box yet.
+Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. The Android app (Marble)
+reports its grants every 30 seconds.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -646,7 +657,9 @@ Kotlin core are the test both sides use.
 the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
 last used. The page shows them.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). **Not wired:** the phone app does not look for notes or report grants yet.
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
+`invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every
+30 seconds from its background service (verified 2026-11-18, with the app closed).
 
 ## 9. Not built yet
 

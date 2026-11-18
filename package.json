@@ -1,6 +1,6 @@
 {
   "name": "keykin",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Keykin v2: my devices and my box. Any two pieces sign.",
   "type": "module",
   "private": true,

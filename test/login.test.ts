@@ -147,7 +147,7 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.goto(w.base + '/');
 
     // Sign-in screen: a code for a device, and the password form.
-    if (w.hasRelay) await page.waitForSelector('#scan .kk-qr svg');
+    if (w.hasRelay) { await page.waitForSelector('#scan .kk-qr svg'); assert.match((await page.textContent('#kk-uri'))!, /&kk=account$/); }
     await page.waitForSelector('#username');
     await shot('signin');
     await page.fill('#username', 'aaron'); await page.fill('#password', 'wrong one');
@@ -259,6 +259,7 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await phonePage.waitForSelector('#withapp');
     const tap = new URL((await phonePage.getAttribute('#withapp', 'href'))!);
     assert.equal(tap.protocol, 'nostrconnect:'); assert.match(tap.host, /^[0-9a-f]{64}$/);
+    assert.equal(tap.searchParams.get('kk'), 'account');          // an account page says so: a signer uses the main account there
     assert.deepEqual(tap.searchParams.getAll('relay'), [w.relay]); assert.match(tap.searchParams.get('secret')!, /^[0-9a-f]{32}$/);
     assert.equal(await phonePage.locator('.kk-qr').count(), 0);
     await page.setViewportSize({ width: 390, height: 800 });

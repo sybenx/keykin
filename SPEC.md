@@ -577,6 +577,12 @@ opens on it and answers on the relays, and the rest is the same challenge. The p
 again from the start time each time it comes back to the front, because a phone drops a page's
 connections while the app is in front.
 
+**An account page marks its code and its link** with the parameter `kk=account` (QRST ignores
+unknown parameters, and so does NIP-46). The page is about the account's own key, so a signer
+that would otherwise offer a child key for a new site (section 8k) uses the account's key there,
+on any origin and whoever runs it. The mark asks for nothing more than the person could choose
+anyway, and the signer still asks before it connects.
+
 The account page used to show a code of its own (`{ keykin: 2, login: … }`, answered by
 `{ op: "login" }`). The page no longer shows it. The box still answers it, for apps built before
 this.

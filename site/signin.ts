@@ -16,13 +16,17 @@ const el = (tag: string, props: Record<string, any> = {}, ...kids: (Node | strin
 
 /** `ask: false` skips the page's own "Sign in?" question, for a page that proves who signed in some other way before it trusts the signer. */
 /** `words` replaces the wording, for a page that speaks to people who have never heard of a signer. */
-export function start(box: HTMLElement, o: { relays: string[]; words?: { scan?: string; digits?: string; differ?: string; ask?: string }; ask?: boolean }): { done: Promise<SignedIn>; cancel: () => void } {
+/** What a Keykin account page adds to its code and its link (SPEC 11.6): it is about the main account, so a signer never offers another one there. */
+const mark = (account?: boolean) => (account ? '&kk=account' : '');
+
+export function start(box: HTMLElement, o: { relays: string[]; words?: { scan?: string; digits?: string; differ?: string; ask?: string }; ask?: boolean; account?: boolean }): { done: Promise<SignedIn>; cancel: () => void } {
   let signer: BunkerSigner | undefined;
   let answer: ((yes: boolean) => void) | undefined;
   const draw = (v: SignInView) => {
     box.replaceChildren();
     if (v.state === 'starting') return void box.append(el('p', { className: 'kk-dim', textContent: 'Getting a code ready…' }));
     if (v.state === 'showing' && v.uri) {
+      v = { ...v, uri: v.uri + mark(o.account) };
       const qr = qrcode(0, 'L'); qr.addData(v.uri); qr.make();
       const pic = el('div', { className: 'kk-qr', role: 'img', ariaLabel: 'Sign-in code' }); pic.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 0, scalable: true });
       const copy = el('button', { type: 'button', className: 'kk-copy', textContent: 'Copy the code as a link' }) as HTMLButtonElement;
@@ -70,10 +74,10 @@ import { createNostrConnectURI } from 'nostr-tools/nip46';
 import { SimplePool } from 'nostr-tools/pool';
 import * as nip44 from 'nostr-tools/nip44';
 
-export function link(o: { relays: string[]; name?: string }): { uri: string; done: Promise<{ pubkey: string; signer: BunkerSigner }>; cancel: () => void } {
+export function link(o: { relays: string[]; name?: string; account?: boolean }): { uri: string; done: Promise<{ pubkey: string; signer: BunkerSigner }>; cancel: () => void } {
   const sk = generateSecretKey(), me = getPublicKey(sk);
   const secret = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
-  const uri = createNostrConnectURI({ clientPubkey: me, relays: o.relays, secret, name: o.name ?? location.host, url: location.origin });
+  const uri = createNostrConnectURI({ clientPubkey: me, relays: o.relays, secret, name: o.name ?? location.host, url: location.origin }) + mark(o.account);
   const since = Math.floor(Date.now() / 1000) - 10;
   const pool = new SimplePool();
   let sub: { close: () => void } | undefined, stopped = false, found: ((signerKey: string) => void) | undefined;

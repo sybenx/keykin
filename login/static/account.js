@@ -112,7 +112,7 @@
       if (!c.ok) { scan.replaceChildren(el('p', { className: 'err small', role: 'alert' }, say(c.error))); return void setTimeout(begin, 5000); }
       if (onPhone) {
         // Marble is on this very phone: a button that opens it, since a phone cannot scan its own screen.
-        const l = KeykinSignIn.link({ relays: c.relays, name: 'Your account' });
+        const l = KeykinSignIn.link({ relays: c.relays, name: 'Your account', account: true });
         run = l;
         scan.replaceChildren(
           el('a', { className: 'btn go linkbtn', id: 'withapp', href: l.uri }, 'Sign in with Marble'),
@@ -120,7 +120,7 @@
           el('a', { className: 'small', id: 'getapp', href: 'https://github.com/sybenx/marble/releases/latest', rel: 'noopener' }, 'Get Marble'));
       } else {
         // No "Sign in?" question here: the phone already asked, and the box checks the phone's signature before it lets this browser in.
-        run = KeykinSignIn.start(scan, { relays: c.relays, ask: false, words: {
+        run = KeykinSignIn.start(scan, { relays: c.relays, ask: false, account: true, words: {
           scan: 'Open Marble on your phone and scan this.',
           digits: 'Your phone shows five digits. They should be:', differ: 'If they differ, say no on your phone.',
         } });

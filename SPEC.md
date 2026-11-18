@@ -409,7 +409,7 @@ thing `marble.syb.lol` reads to find where to send someone.
 - To remove it, publish the same event with no `url` tag.
 - A device signs it like any other event (section 3).
 - **Where a device learns the origin.** A box with Keykin Login in front is started with
-  `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"login": "https://…"`.
+  `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"loginPage": "https://…"` (not `login`, which is the account page's own sign-in code).
   A device's join text carries it too, when the device knows it. A device given a code without it
   may use the box address, if posting to `<addr>/api` without the page's header gets Keykin Login's
   `403 forbidden` (a bare box has no `/api`).

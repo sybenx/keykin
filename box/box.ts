@@ -97,7 +97,7 @@ export class Box {
   /** What the QR on an empty box says. `addr` is where devices reach it. Null once it holds an account. */
   /** The login page's origin (Keykin Login in front of this box), if set. Codes carry it so the device can publish the pointer (SPEC 11.1). */
   login: string | undefined;
-  #login() { return this.login ? { login: this.login } : {}; }
+  #login() { return this.login ? { loginPage: this.login } : {}; }
   qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode, ...this.#login() }); }
 
   /** The admin makes room for one more account: a request approved in advance, as a setup code. */

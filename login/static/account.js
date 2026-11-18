@@ -31,6 +31,7 @@
     cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.', not_open: 'The owner of this server has to let you in first.', not_here: 'This server does not look after your account yet.', gone: 'That ran out. Try again.',
     bad_username: 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.', username_taken: 'That username is taken on this box.',
   }[code] ?? `That did not work (${code}).`);
+  const HOW = { password: 'a password', passkey: 'a passkey', scan: 'a device' };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   let timers = [];
   const every = (ms, f) => { const t = setInterval(f, ms); timers.push(t); return t; };
@@ -52,7 +53,7 @@
   // The code is read once, taken out of the address bar and history, and kept in this tab's
   // sessionStorage so it lives through the password or the scan. Once signed in, the page hands it to
   // one of the account's devices as a `nostrconnect` note (section 11.6), which signs the site in.
-  const PENDING = 'kk-connect', NOPW = 'kk-skip-pw';
+  const PENDING = 'kk-connect', NOPK = 'kk-skip-pk';
   const store = {
     get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
     set: (k, v) => { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch {} },
@@ -172,7 +173,7 @@
     const r = await api('me').catch(() => ({ error: 'no_box' }));
     if (!r.ok || r.held === false) { close(); return showAccount(); }
     me = r;
-    if (r.how === 'device' && !r.username && store.get(NOPW) !== '1') await askPassword();
+    if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
     const c = pending();
     const found = await findPointer(r.npub, r.relays ?? []);
     if (!c && (!signer || found.state !== 'none')) { close(); return showAccount(); }
@@ -184,33 +185,54 @@
     return api('pw_set', { username: username.trim().toLowerCase(), salt, check: await checkOf(await verifier(password, salt)) });
   }
 
-  function askPassword() {
+  // ---- Passkeys (SPEC 11.3) ---------------------------------------------------------------------------
+  // The box makes the options and checks the answers; this page only carries them to the browser.
+  const b64 = { to: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)).buffer,
+    from: (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') };
+  const passkeysHere = () => !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+  async function addPasskey() {
+    const s = await api('pk_add_start');
+    if (!s.ok) return s;
+    const o = s.options;
+    const c = await navigator.credentials.create({ publicKey: { ...o, challenge: b64.to(o.challenge), user: { ...o.user, id: b64.to(o.user.id) },
+      excludeCredentials: (o.excludeCredentials ?? []).map((x) => ({ ...x, id: b64.to(x.id) })) } });
+    const r = c.response;
+    return api('pk_add', { response: { id: c.id, rawId: b64.from(c.rawId), type: c.type, clientExtensionResults: c.getClientExtensionResults(), authenticatorAttachment: c.authenticatorAttachment ?? undefined,
+      response: { clientDataJSON: b64.from(r.clientDataJSON), attestationObject: b64.from(r.attestationObject), transports: r.getTransports?.() ?? [] } } });
+  }
+  async function usePasskey() {
+    const s = await api('pk_login_start');
+    if (!s.ok) return s;
+    const o = s.options;
+    const c = await navigator.credentials.get({ publicKey: { ...o, challenge: b64.to(o.challenge), allowCredentials: [] } });
+    const r = c.response;
+    return api('pk_login', { response: { id: c.id, rawId: b64.from(c.rawId), type: c.type, clientExtensionResults: c.getClientExtensionResults(), authenticatorAttachment: c.authenticatorAttachment ?? undefined,
+      response: { clientDataJSON: b64.from(r.clientDataJSON), authenticatorData: b64.from(r.authenticatorData), signature: b64.from(r.signature), userHandle: r.userHandle ? b64.from(r.userHandle) : undefined } } });
+  }
+  const pkError = (x) => x?.name === 'NotAllowedError' ? 'No passkey was used.' : x?.name === 'InvalidStateError' ? 'This passkey is already saved for your account.' : say('no_box');
+
+  // After a scan: an offer, never a push. Skip goes on, and the page does not ask again in this tab.
+  function askPasskey() {
     return new Promise((resolve) => {
-      const user = el('input', { className: 'field', type: 'text', id: 'newuser', autocomplete: 'username', autocapitalize: 'none', spellcheck: false });
-      const pass = el('input', { className: 'field', type: 'password', id: 'newpass', autocomplete: 'new-password' });
       const line = el('p', { className: 'err small', role: 'alert' });
-      const save = el('button', { className: 'btn go', type: 'submit', id: 'savepw' }, 'Set password');
-      const skip = el('button', { className: 'btn', type: 'button', id: 'skippw', on: { click: () => { store.set(NOPW, '1'); resolve(); } } }, 'Skip');
-      const form = el('form', { style: 'display:flex;flex-direction:column;gap:12px', on: { submit: async (e) => {
-        e.preventDefault();
-        if (!user.value.trim()) { line.textContent = 'Pick a username first.'; return; }
-        if (pass.value.length < 10) { line.textContent = 'Use at least 10 characters.'; return; }
+      const save = el('button', { className: 'btn go', type: 'button', id: 'savepk' }, 'Save a passkey');
+      const skip = el('button', { className: 'btn', type: 'button', id: 'skippk', on: { click: () => { store.set(NOPK, '1'); resolve(); } } }, 'Skip');
+      save.onclick = async () => {
         save.disabled = true; line.textContent = '';
         try {
-          const r = await savePassword(user.value, pass.value);
+          const r = await addPasskey();
           if (r.error === 'login') return showLogin(say('login'));
           if (r.ok) return resolve();
           line.textContent = say(r.error);
-        } catch (x) { line.textContent = x.message === 'insecure' ? 'This only works when the page is opened over https.' : say('no_box'); }
+        } catch (x) { line.textContent = pkError(x); }
         save.disabled = false;
-      } } }, el('label', { htmlFor: 'newuser' }, 'Username'), user, el('label', { htmlFor: 'newpass' }, 'Password'), pass, line, el('div', { className: 'with-note' }, save, skip));
+      };
       app.replaceChildren(el('div', { className: 'signin' }, asking(),
         el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'You are signed in'), el('div', { className: 'dim' }, location.host)),
         el('div', { className: 'panel' }, el('div', { className: 'half' },
-          el('h2', {}, 'Set a password so next time you can sign in here'),
-          el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, 'Then this computer needs no phone to sign in. A few things that cannot be undone still ask for a Yes on one of your devices.'),
-          form))));
-      user.focus();
+          el('h2', {}, 'Save a passkey so next time it’s one tap'),
+          el('div', { className: 'sub dim', style: 'font-size:14px;line-height:1.45' }, `Your computer or password manager keeps it, for ${location.host} only. You can still sign in by scanning, or with a password.`),
+          line, el('div', { className: 'with-note' }, save, skip)))));
     });
   }
 
@@ -289,8 +311,19 @@
       btn.disabled = false; btn.textContent = 'Sign in';
     } } }, el('label', { htmlFor: 'username' }, 'Username'), user, el('label', { htmlFor: 'password' }, 'Password'), pass, btn);
 
+    const pkErr = el('p', { className: 'err small', role: 'alert', hidden: true });
+    const pk = passkeysHere() ? el('button', { className: 'btn go', type: 'button', id: 'pkgo', on: { click: async () => {
+      pk.disabled = true; pkErr.hidden = true;
+      try {
+        const r = await usePasskey();
+        if (r.ok) return afterSignIn(null);
+        pkErr.textContent = r.error === 'wrong' ? 'That passkey is not one this account knows.' : say(r.error);
+      } catch (x) { pkErr.textContent = pkError(x); }
+      pkErr.hidden = false; pk.disabled = false;
+    } } }, 'Sign in with a passkey') : null;
     app.replaceChildren(el('div', { className: 'signin' }, asking(),
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
+      pk ? el('div', { className: 'card', id: 'pkcard' }, pk, pkErr) : null,
       el('div', { className: 'panel' },
         el('div', { className: 'half scan' }, el('h2', {}, /Android|iPhone|iPad/i.test(navigator.userAgent) ? 'Use this phone' : 'Scan with your phone'), scan),
         el('div', { className: 'rule' }),
@@ -470,10 +503,11 @@
       security: () => [
         head('Security', 'How you get in to this page, and what still asks a device.'),
         card(el('h2', {}, 'Password'), el('div', { className: 'sub' }, me.username ? ['Your username is ', el('strong', {}, me.username), '. Typing a new password here replaces the old one.'] : 'No password is set. Setting one lets you sign in here from any browser.'), passwordForm()),
+        passkeysCard(),
         card(el('h2', {}, 'What asks for a Yes on a device'),
           el('div', { className: 'sub' }, 'Signing in here, with your password or a device, lets you do everything on this page. A few things are hard to undo, so a device of yours shows a Yes or No first. No signs that browser out.'),
           el('ul', { className: 'plain' }, ['Removing blocked devices for good', 'Forming the whole key', 'Asking every relay to erase the account', 'Deleting five or more posts at once', 'Emptying your profile or your follow list'].map((t) => el('li', {}, t)))),
-        card(el('h2', {}, 'This browser'), el('div', { className: 'sub' }, `Signed in with ${me.how === 'password' ? 'a password' : 'a device'}. It lasts 12 hours.`),
+        card(el('h2', {}, 'This browser'), el('div', { className: 'sub' }, `Signed in with ${HOW[me.how] ?? 'a device'}. It lasts 12 hours.`),
           el('div', { className: 'with-note' },
             el('button', { className: 'btn', id: 'signout', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out'),
             el('button', { className: 'btn', on: { click: async () => { await api('logout_all'); showLogin(); } } }, 'Sign out every browser')))],
@@ -490,7 +524,7 @@
 
     app.replaceChildren(
       el('div', { className: 'top' }, el('div', { className: 'brand' }, 'Your account'),
-        el('div', { className: 'who' }, el('span', {}, `${name} · signed in with ${me.how === 'password' ? 'a password' : 'a device'}`),
+        el('div', { className: 'who' }, el('span', {}, `${name} · signed in with ${HOW[me.how] ?? 'a device'}`),
           el('button', { className: 'go-link linkish', style: 'margin:0', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out'))),
       el('div', { className: 'shell' },
         el('nav', { ariaLabel: 'Sections' }, SECTIONS.map(([id, label]) => el('button', { ariaCurrent: section === id ? 'page' : 'false', on: { click: () => go(id) } }, label))),
@@ -538,6 +572,26 @@
     const form = noteForm({ kind: 'bunker', button: 'Ask my phone for a link', plain: true, waiting: 'Waiting for one of your devices…',
       done: (result) => { slot.textContent = result; slot.classList.add('has'); copy.hidden = false; return copy; } });
     return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, slot, form);
+  }
+  function passkeysCard() {
+    const list = me.passkeys ?? [];
+    const line = el('span', { className: 'small dim', role: 'status' });
+    const add = passkeysHere() ? el('button', { className: 'btn go', id: 'addpk', on: { click: async () => {
+      add.disabled = true; line.textContent = '';
+      try {
+        const r = await addPasskey();
+        if (r.error === 'login') return showLogin(say('login'));
+        if (r.ok) { flash = 'Passkey saved.'; await refresh(); return draw(); }
+        line.textContent = say(r.error);
+      } catch (x) { line.textContent = pkError(x); }
+      add.disabled = false;
+    } } }, 'Save a passkey') : null;
+    return card(el('h2', {}, 'Passkeys'),
+      el('div', { className: 'sub' }, list.length ? 'A passkey signs you in here with one tap. Each works on the page it was made on.' : 'No passkey yet. One lets you sign in here with one tap.'),
+      list.length ? el('div', { className: 'rows' }, list.map((p) => el('div', { className: 'row' },
+        el('div', { className: 'grow' }, el('div', { className: 'name' }, `Passkey for ${p.host}`), el('div', { className: 'detail' }, [`added ${day(p.added)}`, p.last ? `used ${ago(p.last)}` : 'not used yet'].join(' · '))),
+        el('button', { className: 'btn danger', ariaLabel: `Remove passkey ${p.id.slice(0, 8)}`, on: { click: (e) => { if (confirm('Remove this passkey? It will no longer sign you in here.')) act(e.currentTarget, 'pk_remove', { id: p.id }, 'Passkey removed.'); } } }, 'Remove')))) : null,
+      el('div', { className: 'with-note' }, add, line));
   }
   function passwordForm() {
     const user = el('input', { className: 'field', type: 'text', id: 'newuser', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, value: me.username ?? '' });

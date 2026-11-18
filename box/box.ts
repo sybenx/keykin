@@ -22,6 +22,8 @@ export interface Member { key: string; i: number; name: string; kind: 'device' |
 export interface Welcome { by: string; box: string; device?: string; fetched?: boolean }
 /** A change of piece waiting for a member that was not there when the keys were cycled. */
 export interface Catchup { from: string; sealed: string }
+export interface Passkey { id: string; key: string; counter: number; rpId: string; origin: string; added: number; last?: number }
+
 export interface Account {
   commitment: string[]; npub: string;
   i: number; share: string;            // the box's own piece
@@ -32,19 +34,21 @@ export interface Account {
   catchups: Record<string, Catchup[]>;
   /** Username and password for the account page (SPEC 11.3). The box never has the password. */
   login?: { username: string; salt: string; check: string; fails?: number; lockedUntil?: number };
+  /** Passkeys that sign in to the account page (SPEC 11.3): WebAuthn credentials, each bound to the page's host. */
+  passkeys?: Passkey[];
   /** What each device has let in (SPEC 11.5), by the device's member key. */
   grants?: Record<string, Grant[]>;
   /** Grants that were revoked. The box refuses any request naming one. */
   revoked?: string[];
   /** Grants the person limited (SPEC 11.5): `posts` lets that site or app post and nothing else. */
-  limits?: Record<string, 'posts'>;
+  limits?: Record<string, Limit>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
 }
 export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number }
 /** Something the account page started for a device to finish (SPEC 11.6). */
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string }
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean }
 /** One line of an account's recent activity. */
 export interface Happened { at: number; text: string }
 /** Someone asking to make an account here or move one here (SPEC 11.4). The admin decides. */
@@ -65,6 +69,18 @@ const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
 /** What a grant limited to `posts` may still sign: notes, reposts, reactions, comments, zap requests, media posts, and site logins (NIP-42). */
 export const POST_KINDS = new Set([1, 6, 7, 16, 1111, 9734, 20, 21, 22, 22242]);
+/** Direct messages: NIP-04 (4), NIP-17 seals, chat and files (13, 14, 15), and gift wraps (1059). */
+export const DM_KINDS = new Set([4, 13, 14, 15, 1059]);
+/** A grant's limit (SPEC 11.5): `posts` signs posts only and gets no message keys; `dms` also signs and
+ *  reads direct messages, with other people's keys only, so not the account's own private lists. */
+export type Limit = 'posts' | 'dms';
+export const LIMITS = new Set<Limit>(['posts', 'dms']);
+const sameKey = (peer: unknown, npub: string) => typeof peer === 'string' && peer.toLowerCase().slice(-64) === npub;
+export function allowedBy(limit: Limit | undefined, op: string, kind: unknown, peer: unknown, npub: string) {
+  if (!limit) return true;
+  if (op === 'ecdh') return limit === 'dms' && !sameKey(peer, npub);
+  return POST_KINDS.has(kind as number) || (limit === 'dms' && DM_KINDS.has(kind as number));
+}
 
 export class Box {
   state: BoxState;
@@ -77,7 +93,7 @@ export class Box {
   onLogin: (code: string, account: string, by: string) => boolean = () => false;
   /** Set by the page API: the notes waiting for an account's devices, and a device's answer to one. */
   onNotes: (account: string) => Note[] = () => [];
-  onNoteDone: (account: string, note: string, result: string) => boolean = () => false;
+  onNoteDone: (account: string, note: string, result: string, device: string) => boolean = () => false;
   /** A device's person tapped No: the note goes, and so does the page session that left it. */
   onNoteRefused: (account: string, note: string) => boolean = () => false;
 
@@ -169,8 +185,11 @@ export class Box {
       }
       if ((body.op === 'sign' || body.op === 'ecdh') && body.grant !== undefined) {
         if ((s.revoked ?? []).includes(body.grant)) refuse('revoked');
+        // A site let in from a password-only page session is limited to posting from its first request on.
+        if (typeof body.grant === 'string' && /^[0-9a-f]{32}$/.test(body.grant) && !s.limits?.[body.grant] && this.#limitNext(s.npub, from.key, now)
+          && !Object.values(s.grants ?? {}).flat().some((g) => g.id === body.grant)) this.limitGrant(s.npub, body.grant, this.#limited.get(`${s.npub}/${from.key}`)!.to);
         // A grant limited to posting signs only posts, and gets no message keys: it cannot read messages.
-        if (s.limits?.[body.grant] === 'posts' && (body.op === 'ecdh' || !POST_KINDS.has(body.event?.kind))) refuse('not_allowed');
+        if (!allowedBy(s.limits?.[body.grant], body.op, body.event?.kind, body.peer, s.npub)) refuse('not_allowed');
       }
       switch (body.op) {
         case 'cycle': return this.#cycle(s, from, req, body);
@@ -210,6 +229,13 @@ export class Box {
             return { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
           });
           const revoked = new Set(s.revoked ?? []);
+          const known = new Set((s.grants?.[from.key] ?? []).map((g) => g.id));
+          if (this.#limitNext(s.npub, from.key, now)) {
+            const fresh = clean.filter((g) => g.kind === 'site' && !known.has(g.id));
+            const to = this.#limited.get(`${s.npub}/${from.key}`)!.to;
+            for (const g of fresh) this.limitGrant(s.npub, g.id, to);
+            if (fresh.length) this.#limited.delete(`${s.npub}/${from.key}`);
+          }
           (s.grants ??= {})[from.key] = clean.filter((g) => !revoked.has(g.id));
           this.#save();
           return { ok: true, revoked: clean.filter((g) => revoked.has(g.id)).map((g) => g.id) };
@@ -220,7 +246,7 @@ export class Box {
         case 'note_refuse': if (from.kind !== 'device' || !this.onNoteRefused(s.npub, body.note)) refuse('gone'); this.happened(s.npub, `${from.name} said No to a request from the account page`, now); return { ok: true };
         case 'note_done': {
           if (from.kind !== 'device') refuse('devices_only');
-          if (typeof body.result !== 'string' || body.result.length > 2000 || !this.onNoteDone(s.npub, body.note, body.result)) refuse('gone');
+          if (typeof body.result !== 'string' || body.result.length > 2000 || !this.onNoteDone(s.npub, body.note, body.result, from.key)) refuse('gone');
           return { ok: true };
         }
         case 'login': {
@@ -278,12 +304,22 @@ export class Box {
     if (s.limits) delete s.limits[grant as string];
     this.#save();
   }
+  // Sites a device lets in for a password-only page session (SPEC 11.6): the next new site grant that
+  // device reports, or first uses, within ten minutes is limited to posting.
+  #limited = new Map<string, { until: number; to: Limit }>();
+  limitNextSiteOf(npub: string, device: string, until: number, to: Limit) { this.#limited.set(`${npub}/${device}`, { until, to }); }
+  #limitNext(npub: string, device: string, now: number) {
+    const k = `${npub}/${device}`, x = this.#limited.get(k);
+    if (x === undefined) return false;
+    if (x.until < now) { this.#limited.delete(k); return false; }
+    return true;
+  }
   /** Limits a grant to posting (`posts`), or lifts the limit (`null`). From a device or the account page. */
   limitGrant(npub: string, grant: unknown, to: unknown) {
     const s = this.state.accounts[npub] ?? refuse('unknown_account');
-    if (typeof grant !== 'string' || !/^[0-9a-f]{32}$/.test(grant) || (to !== 'posts' && to !== null)) refuse('bad_request');
+    if (typeof grant !== 'string' || !/^[0-9a-f]{32}$/.test(grant) || (to !== null && !LIMITS.has(to as Limit))) refuse('bad_request');
     const l = (s.limits ??= {});
-    if (to === 'posts') { l[grant as string] = 'posts'; if (Object.keys(l).length > 2000) delete l[Object.keys(l)[0]]; }
+    if (to !== null) { l[grant as string] = to as Limit; if (Object.keys(l).length > 2000) delete l[Object.keys(l)[0]]; }
     else delete l[grant as string];
     this.#save();
   }

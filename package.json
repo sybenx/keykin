@@ -16,6 +16,7 @@
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@scure/base": "^2.0.0",
+    "@simplewebauthn/server": "^13.2.2",
     "nostr-tools": "^2.26.1",
     "qrcode-generator": "^2.0.4"
   },

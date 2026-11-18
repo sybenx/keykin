@@ -407,7 +407,10 @@ thing `marble.syb.lol` reads to find where to send someone.
 - To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
   wins. A reader checks the signature, shows the address to the person, and only then goes there.
 - To remove it, publish the same event with no `url` tag.
-- A device signs it like any other event (section 3). The account page offers to publish it.
+- A device signs it like any other event (section 3). The account page checks its relays for it
+  after a sign-in, and when it is missing offers to publish it, signed by the remote signer a scan
+  left behind. After a password or a passkey the page has no signer, so it says to publish it
+  from Marble instead. **Not built:** Marble publishing it.
 
 ### 11.2 Accounts on a box, and how a request names its account
 
@@ -453,6 +456,30 @@ They live on the box, per account. The box never sees the password.
   what stands between a guesser and that.
 
 **Built:** the box, both device cores (`passwordSet`), and the account page's sign-in. No app has a screen for setting it yet.
+
+**Passkeys (added 2026-11-18).** A passkey is another way into the page, worth the same as a
+password or a scan. They live on the box, per account, as WebAuthn credentials:
+
+- **Relying party:** the login page's own host (`rpId`), taken by Keykin Login from the request it
+  served, never from the page. `https://` only, except `localhost` and `127.0.0.1` for testing. A
+  resident (discoverable) key, user verification required, no attestation.
+- **Stored on the box:** `{ id, key, counter, rpId, origin, added, last }` per passkey (the
+  credential id, its COSE public key, base64url). A passkey signs in only on the host it was made on.
+- **Adding** needs a page session: `pk_add_start` returns WebAuthn creation options, and
+  `pk_add { response }` checks the answer and stores it. `pk_remove { id }` removes one.
+- **Signing in:** `pk_login_start` returns request options with no list of credentials (the
+  browser offers what it holds for this host), and `pk_login { response }` returns a page session.
+  The box finds the account by the credential id, checks the signature, the challenge (one use,
+  three minutes), the origin, the host and user verification, and keeps the signature counter.
+- The page offers to save one right after a scan sign-in ("Save a passkey so next time it's one
+  tap", with Skip). It is an offer: a password stays a first-class way in, and the Security section
+  adds or removes passkeys at any time. On the sign-in screen "Sign in with a passkey" comes first,
+  then the scan and the password.
+- Verification uses `@simplewebauthn/server` 13.2.2 on the box. The page calls
+  `navigator.credentials` itself.
+
+**Built:** all of the above on the box, in Keykin Login and on the account page; tested with a
+virtual authenticator in Chromium. **Not built:** passkeys in the apps (they have no use for them).
 
 ### 11.4 Asking to make or transfer an account
 
@@ -564,6 +591,7 @@ box and nothing else: device requests (`POST /keykin`, unchanged), and the page'
 **Logging in to the page** gives a page session, a random token the box issues for 12 hours:
 
 - by password (section 11.3), or
+- by passkey (section 11.3), or
 - by a scanned code, the way any site signs in (section 8j). The page shows a QRST `signer-ticket`
   code and ends up with a remote signer for the account. It asks the box for a challenge
   (`signin_start`), has the signer sign a kind 22242 event with the tags `["relay", <page origin>]`
@@ -595,8 +623,31 @@ in (`import`), keeping the whole key as its backup. The code is refused for any 
 and for making a new one. `protect` works only on an open box (`KEYKIN_OPEN=1`); otherwise it
 answers `not_open` and the account needs a code from the admin page.
 
+**A site can send the person here to sign in.** A link to the page may carry a site's NIP-46
+code in the fragment: `https://<login page>/#connect=<encodeURIComponent(nostrconnect://…)>`.
+Marble's name-first sign-in reads the account's pointer (section 11.1) and sends the person there
+this way. The page:
+
+- reads `connect=` once, checks it starts with `nostrconnect://`, has a 64-hex client key, at least
+  one `relay` and a `secret`, and takes the site's name and url from `name`/`url` (or the older
+  `metadata` JSON) to show "A site is asking you to sign in" above the sign-in card, with the relay;
+- takes the parameter out of the address bar and history at once (`history.replaceState`), keeping
+  any other fragment parameters, and keeps the code in the tab's `sessionStorage` (`kk-connect`) so
+  it lives through the scan, the passkey or the password;
+- once signed in, leaves it as a `nostrconnect` note at once, shows "Waiting for one of your
+  devices…", then "Done. Go back to <site>" linking to the site's `url`. After 60 seconds with no
+  answer it says a device needs to be online with an up-to-date Marble, and keeps waiting while the
+  note lives. The code leaves `sessionStorage` as soon as the note is left, so a reload does not send
+  it twice;
+- shows a code that is not a `nostrconnect://` code as wrong and leaves it alone.
+
+`connect` is about the site, and `kk=account` about the page's own code (above): they do not mix. A
+code passed in `connect` is answered like any pasted one, with the site's own child key or the main
+key as the signer decides (section 8k).
+
 **A page session has the person's authority, however it was made** (Aaron, 2026-11-17: "the
-password *is* the auth"). The page still holds no piece of the key, so two kinds of thing
+password *is* the auth"). The box records how it was made (`me` returns `how`: `password`,
+`passkey` or `scan`), and today that changes nothing. The page still holds no piece of the key, so two kinds of thing
 happen differently:
 
 | The box does it at once | A device does it, with no prompt | A device asks Yes or No first |
@@ -646,7 +697,29 @@ Kotlin core are the test both sides use.
 the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
 last used. The page shows them.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). **Not wired:** the phone app does not look for notes or report grants yet.
+**Possible later: tiered sign-in strength (not adopted).** An idea from 2026-11-18, kept for
+later. A passkey or a scan would be strong and a password alone weak:
+
+| | Password alone | Passkey or phone scan | A device's Yes/No tap |
+|---|---|---|---|
+| See devices, grants, activity | yes | yes | |
+| Block a device, revoke or limit a site | yes (stopping a thief is never gated) | yes | |
+| Sign in to a site | posts and DMs (`limit: dms`) | full | |
+| A site's DMs | yes | yes | |
+| A site's private lists (the account's own key) | no | yes | |
+| Add a device (`invite`), hand out a `bunker://` link | no | yes | |
+| Change or clear the password, add or remove passkeys | no | yes | |
+| Remove blocked devices for good (`cycle`), empty Trash, purge history | | | yes |
+
+The box has the switch but it is off: `POLICY` in `box/pageapi.ts` maps calls to `strong` (empty
+today) and `WEAK_SITE_LIMIT` is null. A weak session asking for a strong call would get
+`need_strong`, and the page would then offer to confirm with a passkey or the phone (`pk_login` or
+`signin` made while signed in swaps the session for a stronger one). A box owner can switch rows on
+with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kinds (4, 13, 14, 15,
+1059) and computes message keys with other people's keys only. **Not built:** the page's
+"Confirm with a passkey or your phone" prompt, since nothing asks for it today.
+
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). **Not wired:** the phone app does not look for notes or report grants yet.
 
 ## 9. Not built yet
 
@@ -665,7 +738,7 @@ last used. The page shows them.
   11.6). The Kotlin core has the calls; the app does not use them yet.
 - **Screens for moving an account to another box.** Built in the device cores and on the command
   line only.
-- **Limits other than posting only.** A grant is either limited to posts or not limited.
+- **Limits other than posting only, on the page.** The box also knows `dms` (posts and direct messages, section 11.6), but the page offers only posts only.
 - **Paper backup and undo.** Not decided.
 - **QRST sign-in to the account page.** It signs in by Keykin's own device login or a password.
 - **Firefox and Safari.** The extension is Chromium only.

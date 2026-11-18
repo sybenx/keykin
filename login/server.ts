@@ -23,8 +23,8 @@ const FILES: Record<string, [string, string]> = {
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.
-const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'note_put', 'note_get', 'protect']);
-const OPEN = new Set(['pw_salt', 'pw_login', 'login_start', 'login_wait', 'signin_start', 'signin']);
+const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'note_put', 'note_get', 'protect', 'pk_add_start', 'pk_add', 'pk_remove']);
+const OPEN = new Set(['pw_salt', 'pw_login', 'login_start', 'login_wait', 'signin_start', 'signin', 'pk_login_start', 'pk_login']);
 /** Where the page and a phone meet for sign-in by a scanned code, unless KEYKIN_RELAYS says otherwise. */
 const RELAYS = ['wss://syb.lol', 'wss://nos.lol', 'wss://relay.primal.net'];
 const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180;
@@ -95,8 +95,16 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
         const r = await toBox('/page', { call });
         return json(res, 200, r.ok ? { ...r, relays } : r);
       }
+      // A passkey's relying party is this page's own host, taken from the request, never from the page.
+      const origin = `${https ? 'https' : 'http'}://${req.headers.host ?? ''}`;
+      if (call === 'pk_login_start') return json(res, 200, await toBox('/page', { call, origin }));
+      if (call === 'pk_login') {
+        const r = await toBox('/page', { call, origin, response: body.response, session: cookieOf(req, 'ks', 64) });
+        return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS)]) : json(res, 200, r);
+      }
       if (call === 'signin') {
-        const r = await toBox('/page', { call, event: body.event });
+        // A scan made while signed in with a password confirms that session: the box swaps it for a strong one.
+        const r = await toBox('/page', { call, event: body.event, session: cookieOf(req, 'ks', 64) });
         return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS)]) : json(res, 200, r);
       }
       if (call === 'login_start') {
@@ -113,7 +121,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       const session = cookieOf(req, 'ks', 64);
       if (!session) return json(res, 200, { error: 'login' });
       const { call: _c, session: _s, browser: _b, ...rest } = body;
-      const r = await toBox('/page', { ...rest, call, session });
+      const r = await toBox('/page', { ...rest, call, session, ...(call.startsWith('pk_') ? { origin } : {}) });
       if (call === 'me' && r.ok) { r.npubText = npubEncode(r.npub); r.relays = relays; }
       if (call === 'protect' && r.ok) { const qr = qrcode(0, 'M'); qr.addData(r.text); qr.make(); r.svg = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
       const gone = call === 'logout' || call === 'logout_all' || r.error === 'login';

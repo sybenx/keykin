@@ -12,6 +12,8 @@
 //   KEYKIN_URL           the address devices reach this box at, for the codes its pages show. With Keykin
 //                        Login in front, this is the public address. Otherwise the admin page uses the
 //                        address the browser used.
+//   KEYKIN_POLICY        JSON that overrides the account page's policy (SPEC 11.6), e.g.
+//                        {"calls":{"note_put:invite":"any"},"weakSiteLimit":"posts"}
 //   KEYKIN_OPEN          set to 1 to let anyone who signs in on the account page bring their account onto this
 //                        box. Without it, a new account needs a code from the admin page or the admin's approval.
 //   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the admin page already asks who you are (the
@@ -30,7 +32,7 @@ import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/by
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; log?: (s: string) => void }) {
+export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; policy?: ConstructorParameters<typeof PageApi>[3]; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   mkdirSync(o.dir, { recursive: true, mode: 0o700 });
   const file = join(o.dir, 'state.json');
@@ -40,7 +42,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   box.onChange = save;
   const nowS = () => Math.floor(Date.now() / 1000);
   const where = (): string => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
-  const page = new PageApi(box, () => o.url || where(), () => !!o.open);
+  const page = new PageApi(box, () => o.url || where(), () => !!o.open, o.policy ?? {});
 
   // The owner secret is shown once, here. Only its hash is kept.
   let ownerSecret: string | null = null;
@@ -90,7 +92,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
     if (req.method !== 'POST' || (path !== '/keykin' && path !== '/page')) return false;
     let parsed: any;
     try { parsed = JSON.parse(await readBody(req)); } catch { json(res, 400, { error: 'bad_json' }); return true; }
-    json(res, 200, path === '/keykin' ? box.handle(parsed, nowS()) : page.call(parsed, nowS()));
+    json(res, 200, path === '/keykin' ? box.handle(parsed, nowS()) : await page.request(parsed, nowS()));
     return true;
   }
 
@@ -170,5 +172,6 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
 if (import.meta.url === `file://${process.argv[1]}`) {
   const e = process.env;
   startBox({ dir: e.KEYKIN_DIR ?? './box-data', addr: e.KEYKIN_ADDR, port: Number(e.KEYKIN_PORT ?? 7460), sidePort: e.KEYKIN_SIDE_PORT ? Number(e.KEYKIN_SIDE_PORT) : undefined,
-    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1' });
+    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1',
+    policy: e.KEYKIN_POLICY ? JSON.parse(e.KEYKIN_POLICY) : undefined });
 }

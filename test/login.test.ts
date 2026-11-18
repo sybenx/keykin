@@ -1,7 +1,7 @@
 // Keykin Login: the public door in front of the box, and the account page in a real browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -341,7 +341,7 @@ async function nakRelay() {
 const freePort = async () => { const { createServer } = await import('node:net'); const s = createServer(); await new Promise<void>((r) => s.listen(0, '127.0.0.1', r)); const p = (s.address() as any).port; await new Promise((r) => s.close(r)); return p; };
 let hasNak = false; try { execFileSync('which', ['nak']); hasNak = true; } catch {}
 
-test('a site sends you here with its code: sign in, set a password, and a device signs the site in', { skip: (!exe && 'no Chromium found') || (!hasNak && 'nak is not installed'), timeout: 120_000 }, async () => {
+test('a site sends you here with its code: scan, save a passkey, sign in with it or a password, and a device signs the site in', { skip: (!exe && 'no Chromium found') || (!hasNak && 'nak is not installed'), timeout: 120_000 }, async () => {
   const { chromium: pw } = await import('playwright-core');
   const { main } = await import('../cli/keykin.ts');
   const { BunkerSigner, createNostrConnectURI } = await import('nostr-tools/nip46');
@@ -349,7 +349,8 @@ test('a site sends you here with its code: sign in, set a password, and a device
   const cli = async (home: string, ...argv: string[]) => { const lines: string[] = []; const r = await main(argv, (s) => lines.push(s), home); return { text: lines.join('\n'), run: r as any }; };
   const relay = await nakRelay();
   const port = await freePort(), base = `http://127.0.0.1:${port}`;
-  const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, sidePort: 0, behindLogin: true, url: base, log: () => {} });
+  const boxDir = mkdtempSync(join(tmpdir(), 'kk-box-'));
+  const box = await startBox({ dir: boxDir, port: 0, sidePort: 0, behindLogin: true, url: base, log: () => {} });
   const login = await startLogin({ box: `http://127.0.0.1:${box.sidePort}`, port, relays: [relay.url], log: () => {} });
   const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
   const sites: Awaited<ReturnType<typeof BunkerSigner.fromURI>>[] = [];
@@ -381,18 +382,23 @@ test('a site sends you here with its code: sign in, set a password, and a device
     const signed = await fetch(base + '/api', { method: 'POST', headers: { 'content-type': 'application/json', 'x-keykin': '1', connection: 'close' }, body: JSON.stringify({ call: 'signin', event: proof }) });
     const ks = signed.headers.getSetCookie().find((x) => x.startsWith('ks='))!.split(';')[0].slice(3);
     await ctx.addCookies([{ name: 'ks', value: ks, url: base }]);
+    // A passkey needs a host name, not an address: the browser comes in by localhost.
+    const page0 = base.replace('127.0.0.1', 'localhost');
+    await ctx.addCookies([{ name: 'ks', value: ks, url: page0 }]);
+    const cdp = await ctx.newCDPSession(page);
+    await cdp.send('WebAuthn.enable');
+    await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
     const first = await site('Marble');
-    await page.goto(base + '/#connect=' + encodeURIComponent(first.uri));
-    await page.waitForSelector('text=Set a password so next time you can sign in here');
+    await page.goto(page0 + '/#connect=' + encodeURIComponent(first.uri));
+    await page.waitForSelector('text=Save a passkey so next time it’s one tap');
     assert.equal(new URL(page.url()).hash, '', 'the code is gone from the address bar');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), first.uri);
     assert.equal(await page.textContent('#askname'), 'Marble');
     assert.match((await page.textContent('#asking'))!, /marble\.example/);
     assert.match((await page.textContent('#askrelay'))!, new RegExp(relay.url));
     await page.reload();                                             // it lives through a reload
-    await page.waitForSelector('#savepw');
-    await page.fill('#newuser', 'aaron'); await page.fill('#newpass', 'correct horse battery');
-    await page.click('#savepw');
+    await page.waitForSelector('#savepk');
+    await page.click('#savepk');
     await page.waitForSelector('text=Waiting for one of your devices…');
     // No pointer yet, and no signer here to sign one: the page says so plainly.
     await page.waitForSelector('text=does not name a sign-in page yet');
@@ -403,6 +409,27 @@ test('a site sends you here with its code: sign in, set a password, and a device
     assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), null);
     const s1 = await first.waiting; sites.push(s1);
     assert.equal(await s1.getPublicKey(), npub);
+    const held = JSON.parse(readFileSync(join(boxDir, 'state.json'), 'utf8')).accounts[npub];
+    assert.equal(held.passkeys.length, 1); assert.equal(held.passkeys[0].rpId, 'localhost');
+
+    // Signed out, the passkey is the first way in, and it signs in the next site too.
+    await ctx.clearCookies();
+    const again = await site('Marble');
+    await page.goto('about:blank');
+    await page.goto(page0 + '/#connect=' + encodeURIComponent(again.uri));
+    await page.waitForSelector('#pkgo');
+    assert.ok(await page.evaluate(() => { const pk = document.getElementById('pkcard')!, panel = document.querySelector('.panel')!; return !!(pk.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING); }), 'the passkey comes before the scan and the password');
+    await page.click('#pkgo');
+    await page.waitForSelector('text=Waiting for one of your devices…');
+    await tickUntil(page, '#backto');
+    sites.push(await again.waiting);
+    await page.click('#toaccount');
+    await page.waitForSelector('text=signed in with a passkey');
+    // A password is still a full way in: set one here.
+    await page.click('nav >> text=Security');
+    await page.fill('#newuser', 'aaron'); await page.fill('#newpass', 'correct horse battery');
+    await page.click('#savepw');
+    await page.waitForSelector('text=Password saved.');
 
     // The account names this page (as a device would publish it): the page no longer offers one.
     const pointer = JSON.parse((await cli(home, 'sign', JSON.stringify({ kind: 30078, created_at: now(), tags: [['d', 'keykin/login'], ['url', base]], content: '' }))).text);
@@ -417,7 +444,7 @@ test('a site sends you here with its code: sign in, set a password, and a device
     await p2.fill('#username', 'aaron'); await p2.fill('#password', 'correct horse battery');
     await p2.click('#pwgo');
     await p2.waitForSelector('text=Waiting for one of your devices…');
-    assert.equal(await p2.locator('#savepw').count(), 0, 'a password is set: no offer');
+    assert.equal(await p2.locator('#savepk').count(), 0, 'a password sign-in is not pushed to a passkey');
     assert.equal(await p2.locator('#pointerline').count(), 0, 'the account names its page: nothing to offer');
     await tickUntil(p2, '#backto');
     const s2 = await second.waiting; sites.push(s2);
@@ -426,4 +453,40 @@ test('a site sends you here with its code: sign in, set a password, and a device
     await p2.waitForSelector('text=Welcome, Aaron');
     assert.deepEqual(errors, []);
   } finally { for (const s of sites) await s.close().catch(() => {}); agent?.close(); await browser.close(); await login.close(); await box.close(); relay.kill(); }
+});
+
+test('sign-in strength: one session for every way in today, and tiers a box owner can switch on', async () => {
+  const { allowedBy } = await import('../box/box.ts');
+  const now = () => Math.floor(Date.now() / 1000);
+  for (const policy of [undefined, { calls: { 'note_put:invite': 'strong' as const, 'limit:none': 'strong' as const }, weakSiteLimit: 'dms' as const }]) {
+    const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, url: 'http://box', policy, log: () => {} });
+    try {
+      const send: D.Send = async (r) => box.box.handle(r as any, now());
+      const phone = device('Phone');
+      const held = await D.createWithBox(phone, D.readQr(box.qr()!), send);
+      await D.passwordSet(phone, held, 'aaron', 'correct horse battery', send);
+      const { salt } = box.page.call({ call: 'pw_salt', username: 'aaron' }, now());
+      const session = box.page.call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('correct horse battery', salt) }, now()).session;
+      assert.equal(box.page.call({ call: 'me', session }, now()).how, 'password');
+      const invite = box.page.call({ call: 'note_put', session, kind: 'invite', text: '{}' }, now());
+      const put = box.page.call({ call: 'note_put', session, kind: 'nostrconnect', text: 'nostrconnect://' + 'a'.repeat(64) + '?relay=wss://r&secret=s' }, now());
+      await D.answerNotes({ ...phone, fp: undefined }, held, send, { addr: 'http://box', tap: async () => true, connect: async () => true });
+      const grant = D.newGrant('site', 'https://site.example');
+      await D.reportGrants(phone, held, [grant], send);
+      const limit = box.page.call({ call: 'me', session }, now()).grants[0].limit;
+      const lift = box.page.call({ call: 'limit', session, grant: grant.id, to: null }, now());
+      if (!policy) {
+        // Today: a password is a full session. Nothing is refused and nothing is limited.
+        assert.equal(invite.ok, true); assert.equal(put.limit, undefined); assert.equal(limit, null); assert.equal(lift.ok, true);
+      } else {
+        assert.deepEqual(invite, { error: 'need_strong' }); assert.equal(put.limit, 'dms'); assert.equal(limit, 'dms'); assert.deepEqual(lift, { error: 'need_strong' });
+      }
+    } finally { await box.close(); }
+  }
+  // The `dms` limit: posts and direct messages with other people's keys, but not the account's own key (private lists).
+  const me = 'b'.repeat(64);
+  assert.equal(allowedBy('dms', 'sign', 1, undefined, me), true); assert.equal(allowedBy('dms', 'sign', 1059, undefined, me), true);
+  assert.equal(allowedBy('dms', 'sign', 30000, undefined, me), false); assert.equal(allowedBy('dms', 'ecdh', undefined, 'c'.repeat(64), me), true);
+  assert.equal(allowedBy('dms', 'ecdh', undefined, '02' + me, me), false); assert.equal(allowedBy('posts', 'ecdh', undefined, 'c'.repeat(64), me), false);
+  assert.equal(allowedBy('posts', 'sign', 4, undefined, me), false); assert.equal(allowedBy(undefined, 'sign', 30000, undefined, me), true);
 });

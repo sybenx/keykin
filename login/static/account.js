@@ -49,10 +49,11 @@
   const checkOf = async (verifierHex) => sha256hex(new Uint8Array([...new TextEncoder().encode('keykin2-pw'), ...verifierHex.match(/../g).map((b) => parseInt(b, 16))]));
 
 
-  // ---- A site sent you here to sign in: #connect=<encodeURIComponent(nostrconnect:// code)> ------------
-  // The code is read once, taken out of the address bar and history, and kept in this tab's
-  // sessionStorage so it lives through the password or the scan. Once signed in, the page hands it to
-  // one of the account's devices as a `nostrconnect` note (section 11.6), which signs the site in.
+  // ---- A site sent you here to sign in: #connect=<nostrconnect:// code> ---------------------------------
+  // `connect=` is the last fragment parameter: everything after it is the code, as it is when it starts with
+  // nostrconnect:// (a raw code), else URL-decoded once. It is read once, taken out of the address bar and
+  // history, and kept with the sender's origin (document.referrer) in this tab's sessionStorage, so it lives
+  // through the passkey, the password or the scan. Nothing goes to a device until the person clicks (SPEC 11.6).
   const PENDING = 'kk-connect', NOPK = 'kk-skip-pk';
   const store = {
     get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
@@ -72,27 +73,48 @@
     try { url = url && /^https?:$/.test(new URL(url).protocol) ? new URL(url).href : null; } catch { url = null; }
     return { uri, name, url, host: url ? new URL(url).host : null, relays };
   }
+  const senderOf = () => {
+    try { const o = document.referrer ? new URL(document.referrer).origin : null; return o && /^https?:\/\//.test(o) ? o : null; } catch { return null; }
+  };
   function takeConnect() {
-    const parts = location.hash.slice(1).split('&');
-    const mine = parts.find((x) => x.startsWith('connect='));
-    if (mine === undefined) return;
-    const rest = parts.filter((x) => x && !x.startsWith('connect='));
+    const hash = location.hash.slice(1);
+    const at = hash.startsWith('connect=') ? 0 : hash.indexOf('&connect=') + 1;
+    if (at === 0 && !hash.startsWith('connect=')) return;
+    const raw = hash.slice(at + 'connect='.length);
+    const rest = hash.slice(0, Math.max(0, at - 1)).split('&').filter(Boolean);
     history.replaceState(null, '', location.pathname + location.search + (rest.length ? '#' + rest.join('&') : ''));
-    let text = ''; try { text = decodeURIComponent(mine.slice('connect='.length)); } catch {}
+    let text = raw;
+    if (!raw.startsWith('nostrconnect://')) { try { text = decodeURIComponent(raw); } catch { text = ''; } }
     const c = readConnect(text);
-    if (c) store.set(PENDING, c.uri); else badConnect = true;
+    if (c) store.set(PENDING, JSON.stringify({ uri: c.uri, from: senderOf() })); else badConnect = true;
   }
-  const pending = () => readConnect(store.get(PENDING));
-  const siteName = (c) => c.name ?? c.host ?? 'the site';
+  // The code, the site it says it is, and the sender: `match` is the one-click case.
+  function pending() {
+    const v = store.get(PENDING);
+    let o = null; try { o = v && v.startsWith('{') ? JSON.parse(v) : v ? { uri: v, from: null } : null; } catch {}
+    const c = o && readConnect(o.uri);
+    if (!c) return null;
+    const from = typeof o.from === 'string' && /^https?:\/\/[^\s/?#]+$/.test(o.from) ? o.from : null;
+    const fromHost = from ? new URL(from).host : null;
+    return { ...c, from, fromHost, match: !!(fromHost && c.host && fromHost === c.host) };
+  }
+  const siteName = (c) => c.match ? (c.name ?? c.host) : (c.fromHost ?? 'the site');
+  // What the page can say about where the request came from, in plain words.
+  const senderLine = (c) => c.match ? null
+    : !c.from ? 'This page could not tell which site sent you here.'
+    : c.host ? `This request came from ${c.fromHost}, but says it is ${c.host}.`
+    : `This request came from ${c.fromHost}, but does not say which site it is.`;
   function asking() {
     if (badConnect) return el('div', { className: 'notice', id: 'asking', role: 'alert' }, 'A site sent you here with a sign-in code that is not a nostrconnect:// code, so it was left alone. Go back to the site and try again.');
     const c = pending();
     if (!c) return null;
+    const warn = senderLine(c);
     return el('div', { className: 'card', id: 'asking' },
       el('div', { className: 'small dim' }, 'A site is asking you to sign in'),
-      el('div', {}, el('strong', { id: 'askname' }, c.name ?? c.host ?? 'A site'), c.host && c.name ? el('span', { className: 'dim' }, ` · ${c.host}`) : null),
+      el('div', {}, el('strong', { id: 'askname' }, c.match ? (c.name ?? c.host) : (c.fromHost ?? 'A site')), c.match && c.name ? el('span', { className: 'dim' }, ` · ${c.host}`) : null),
+      warn ? el('div', { className: 'small err', id: 'askwarn' }, warn, c.name || c.host ? ` It calls itself ${c.name ?? c.host}.` : '') : null,
       el('div', { className: 'small dim mono', id: 'askrelay' }, `Relay: ${c.relays.join(', ')}`),
-      el('div', { className: 'small dim' }, 'Sign in below, and one of your devices signs you in there.'),
+      el('div', { className: 'small dim' }, 'Sign in below. You are asked once more before the site is signed in.'),
       el('button', { className: 'linkish small', id: 'notnow', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(PENDING, null); document.getElementById('asking')?.remove(); } } }, 'Do not sign in there'));
   }
 
@@ -121,6 +143,36 @@
           let d; try { d = JSON.parse(m.data); } catch { return; }
           if (d[0] === 'EVENT' && d[2]?.pubkey === author && d[2]?.kind === 30078 && (!newest || d[2].created_at > newest.created_at)) newest = d[2];
           if (d[0] === 'EOSE') { heard = true; end(); }
+        };
+        ws.onerror = end; ws.onclose = end;
+      }
+    });
+  }
+  // The account's name and picture (kind 0), for the sign-in card. Nothing is shown from it but those two.
+  function findProfile(author, relays) {
+    return new Promise((resolve) => {
+      let left = relays.length, newest = null, over = false;
+      const socks = [];
+      const finish = () => {
+        if (over) return; over = true; clearTimeout(timer);
+        socks.forEach((w) => { try { w.close(); } catch {} });
+        let p = {}; try { p = JSON.parse(newest?.content ?? '{}') ?? {}; } catch {}
+        const name = String(p.display_name || p.name || '').trim().slice(0, 60) || null;
+        let picture = null; try { picture = p.picture && new URL(p.picture).protocol === 'https:' ? new URL(p.picture).href : null; } catch {}
+        resolve({ name, picture });
+      };
+      const timer = setTimeout(finish, 3000);
+      if (!left) return finish();
+      for (const relay of relays) {
+        let ws, ended = false;
+        const end = () => { if (!ended) { ended = true; if (--left === 0) finish(); } };
+        try { ws = new WebSocket(relay); } catch { end(); continue; }
+        socks.push(ws);
+        ws.onopen = () => ws.send(JSON.stringify(['REQ', 'kkm', { kinds: [0], authors: [author], limit: 1 }]));
+        ws.onmessage = (m) => {
+          let d; try { d = JSON.parse(m.data); } catch { return; }
+          if (d[0] === 'EVENT' && d[2]?.pubkey === author && d[2]?.kind === 0 && (!newest || d[2].created_at > newest.created_at)) newest = d[2];
+          if (d[0] === 'EOSE') end();
         };
         ws.onerror = end; ws.onclose = end;
       }
@@ -175,9 +227,9 @@
     me = r;
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
     const c = pending();
-    const found = await findPointer(r.npub, r.relays ?? []);
+    const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c ? findProfile(r.npub, r.relays ?? []) : null]);
     if (!c && (!signer || found.state !== 'none')) { close(); return showAccount(); }
-    showFinish(c, found, signer, r.relays ?? []);
+    showFinish(c, found, signer, r.relays ?? [], profile);
   }
 
   async function savePassword(username, password) {
@@ -236,33 +288,64 @@
     });
   }
 
-  function showFinish(c, found, signer, relays) {
+  function showFinish(c, found, signer, relays, profile) {
     const parts = [];
-    if (c) {
-      const line = el('p', { className: 'sub', id: 'handoff', role: 'status' }, 'Waiting for one of your devices…');
-      const slow = el('p', { className: 'small dim', id: 'slow', hidden: true }, 'No device has answered yet. One of your devices needs to be online with an up-to-date Marble. This page keeps waiting for a few more minutes.');
-      parts.push(card(el('h2', {}, `Signing in to ${siteName(c)}`), el('div', { className: 'small dim mono' }, `Relay: ${c.relays.join(', ')}`), line, slow));
-      handOff(c, line, slow);
-    }
+    if (c) parts.push(connectCard(c, profile));
     if (found.state !== 'found' || signer) parts.push(pointerCard(found, signer, relays));
     parts.push(el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => { signer?.close().catch(() => {}); showAccount(); } } }, 'Go to your account'));
     app.replaceChildren(el('div', { className: 'signin' },
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'You are signed in'), el('div', { className: 'dim' }, location.host)), ...parts));
   }
 
-  async function handOff(c, line, slow) {
-    const r = await api('note_put', { kind: 'nostrconnect', text: c.uri }).catch(() => ({ error: 'no_box' }));
+  // "Sign in to <host> as <name>?" Nothing is sent to a device until a click here, even when this browser
+  // was signed in already. When the sender is unknown or not the site the code names, the card says so and
+  // the button asks a second time.
+  function connectCard(c, profile) {
+    const who = profile?.name ?? me?.username ?? (me?.npubText ? me.npubText.slice(0, 12) + '…' : 'your account');
+    const host = c.match ? c.host : c.fromHost;
+    const warn = senderLine(c);
+    const pic = profile?.picture
+      ? el('img', { className: 'avatar small', src: profile.picture, alt: '', referrerPolicy: 'no-referrer' })
+      : el('div', { className: 'avatar small', ariaHidden: 'true' }, who.charAt(0).toUpperCase());
+    const go = el('button', { className: 'btn go', type: 'button', id: 'connectgo' }, warn ? 'Sign in anyway' : 'Sign in');
+    const no = el('button', { className: 'btn', type: 'button', id: 'connectno' }, 'Not now');
+    const own = el('button', { className: 'linkish small', type: 'button', id: 'connectsite', style: 'align-self:flex-start' }, 'Use a separate account for this site');
+    const node = card(
+      el('h2', { id: 'connecttitle' }, host ? `Sign in to ${host} as ${who}?` : `Sign in to a site as ${who}?`),
+      el('div', { className: 'hello small-hello' }, pic, el('div', {}, el('div', { className: 'name', id: 'connectwho' }, who), me?.npubText ? el('div', { className: 'mono small dim' }, me.npubText.slice(0, 16) + '…' + me.npubText.slice(-6)) : null)),
+      c.from ? el('div', { className: 'small dim', id: 'askfrom' }, `Sent from ${c.from}`) : null,
+      warn ? el('div', { className: 'notice warn', id: 'connectwarn', role: 'alert' }, warn, c.name || c.host ? ` It calls itself ${c.name ?? c.host}. Only sign in if you trust it.` : ' Only sign in if you trust it.') : null,
+      el('div', { className: 'small dim mono', id: 'askrelay' }, `Relay: ${c.relays.join(', ')}`),
+      el('div', { className: 'with-note' }, go, no), own);
+    node.id = 'connectcard';
+    const yes = (as) => {
+      if (warn && !confirm(`Sign in to ${host ?? 'this site'} anyway? This page could not check which site is asking.`)) return;
+      const line = el('p', { className: 'sub', id: 'handoff', role: 'status' }, 'Waiting for one of your devices…');
+      const slow = el('p', { className: 'small dim', id: 'slow', hidden: true }, 'No device has answered yet. One of your devices needs to be online with an up-to-date Marble. This page keeps waiting for a few more minutes.');
+      const next = card(el('h2', {}, `Signing in to ${siteName(c)}`), el('div', { className: 'small dim mono' }, `Relay: ${c.relays.join(', ')}`), line, slow);
+      node.replaceWith(next);
+      handOff(c, line, slow, as);
+    };
+    go.onclick = () => yes('main');
+    own.onclick = () => yes('site');
+    no.onclick = () => { store.set(PENDING, null); node.replaceWith(el('p', { className: 'small dim', id: 'notsigned' }, `Nothing was sent to ${host ?? 'the site'}.`)); };
+    return node;
+  }
+
+  async function handOff(c, line, slow, as) {
+    const r = await api('note_put', { kind: 'nostrconnect', text: c.uri, from: c.from, as }).catch(() => ({ error: 'no_box' }));
     if (r.error === 'login') return showLogin(say('login'));
     if (!r.ok) { line.textContent = say(r.error); return; }
     store.set(PENDING, null);                    // the box holds it now; a reload must not send it twice
     const started = Date.now(), site = siteName(c);
+    const back = c.match ? c.url : c.from ? c.from + '/' : null;
     const t = every(2000, async () => {
       if (Date.now() - started > 60000) slow.hidden = false;
       const g = await api('note_get', { note: r.note }).catch(() => null);
       if (g && g.error === 'login') { clearInterval(t); return showLogin('A device said No, so this browser was signed out.'); }
       if (!g || !g.ok || g.state === 'waiting') return;
       clearInterval(t); slow.hidden = true;
-      if (g.state === 'done') line.replaceChildren('Done. ', c.url ? el('a', { href: c.url, id: 'backto', rel: 'noopener' }, `Go back to ${site}`) : `Go back to ${site}.`);
+      if (g.state === 'done') line.replaceChildren('Done. ', back ? el('a', { href: back, id: 'backto', rel: 'noopener' }, `Go back to ${site}`) : `Go back to ${site}.`);
       else line.textContent = `No device answered in time. One of your devices needs to be online with an up-to-date Marble. Go back to ${site} and try again.`;
     });
   }
@@ -425,7 +508,7 @@
     });
   }
   const refresh = async () => { const n = await api('me').catch(() => null); if (n && n.ok) me = n; };
-  function go(name) { section = name; flash = null; draw(); window.scrollTo(0, 0); }
+  async function go(name) { section = name; flash = null; if (name === 'security') await refresh(); draw(); window.scrollTo(0, 0); }
   async function act(button, call, more, done) {
     button.disabled = true;
     const r = await api(call, more).catch(() => ({ error: 'no_box' }));
@@ -507,10 +590,7 @@
         card(el('h2', {}, 'What asks for a Yes on a device'),
           el('div', { className: 'sub' }, 'Signing in here, with your password or a device, lets you do everything on this page. A few things are hard to undo, so a device of yours shows a Yes or No first. No signs that browser out.'),
           el('ul', { className: 'plain' }, ['Removing blocked devices for good', 'Forming the whole key', 'Asking every relay to erase the account', 'Deleting five or more posts at once', 'Emptying your profile or your follow list'].map((t) => el('li', {}, t)))),
-        card(el('h2', {}, 'This browser'), el('div', { className: 'sub' }, `Signed in with ${HOW[me.how] ?? 'a device'}. It lasts 12 hours.`),
-          el('div', { className: 'with-note' },
-            el('button', { className: 'btn', id: 'signout', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out'),
-            el('button', { className: 'btn', on: { click: async () => { await api('logout_all'); showLogin(); } } }, 'Sign out every browser')))],
+        browsersCard()],
       backup: () => [
         head('Backup', 'What brings the account back if devices are lost.'),
         card(el('h2', {}, 'A second device'), el('div', { className: 'sub' }, 'The backup that works today is another device. Any two pieces sign, so a second phone, a tablet or a computer keeps the account alive if one is lost.'), link('Add a device', 'devices')),
@@ -572,6 +652,42 @@
     const form = noteForm({ kind: 'bunker', button: 'Ask my phone for a link', plain: true, waiting: 'Waiting for one of your devices…',
       done: (result) => { slot.textContent = result; slot.classList.add('has'); copy.hidden = false; return copy; } });
     return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, slot, form);
+  }
+  // ---- Signed-in browsers (SPEC 11.6) -----------------------------------------------------------------
+  function browserOf(agent) {
+    const a = agent ?? '';
+    const b = /Edg(e|A|iOS)?\//.test(a) ? 'Edge' : /OPR\/|Opera/.test(a) ? 'Opera' : /SamsungBrowser/.test(a) ? 'Samsung Internet' : /Firefox\/|FxiOS/.test(a) ? 'Firefox'
+      : /Chrome\/|CriOS|Chromium/.test(a) ? 'Chrome' : /Safari\//.test(a) ? 'Safari' : null;
+    const os = /Windows/.test(a) ? 'Windows' : /Android/.test(a) ? 'Android' : /iPhone/.test(a) ? 'iPhone' : /iPad/.test(a) ? 'iPad' : /CrOS/.test(a) ? 'ChromeOS'
+      : /Macintosh|Mac OS X/.test(a) ? 'macOS' : /Linux/.test(a) ? 'Linux' : null;
+    return b && os ? `${b} on ${os}` : b ?? (os ? `A browser on ${os}` : 'A browser');
+  }
+  const shortDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const dayWord = (t) => {
+    const d = new Date(t * 1000), today = new Date(), y = new Date(Date.now() - 86400000);
+    return d.toDateString() === today.toDateString() ? 'today' : d.toDateString() === y.toDateString() ? 'yesterday' : shortDay(t);
+  };
+  const HOW_SHORT = { password: 'password', passkey: 'passkey', scan: 'scan' };
+  function browsersCard() {
+    const list = me.browsers ?? [];
+    const out = async (b, button) => {
+      button.disabled = true;
+      const r = await api('logout_browser', { id: b.id }).catch(() => ({ error: 'no_box' }));
+      if (r.error === 'login' || r.this) return showLogin(r.this ? undefined : say('login'));
+      flash = r.ok ? `${browserOf(b.agent)} is signed out.` : say(r.error);
+      await refresh(); draw();
+    };
+    return card(el('h2', {}, 'Signed-in browsers'),
+      el('div', { className: 'sub' }, me.how === 'passkey'
+        ? 'This browser signed in with a passkey. It stays signed in while you use it, and signs out after 90 days unused.'
+        : `This browser signed in with ${HOW[me.how] ?? 'a device'}. It signs out 12 hours after signing in.`),
+      list.length ? el('div', { className: 'rows', id: 'browsers' }, list.map((b) => el('div', { className: 'row' },
+        el('div', { className: 'grow' }, el('div', { className: 'name' }, browserOf(b.agent), b.this ? el('span', { className: 'tag' }, 'This browser') : null),
+          el('div', { className: 'detail' }, [HOW_SHORT[b.how] ?? b.how, `signed in ${shortDay(b.made)}`, `last used ${dayWord(b.last)}`].join(' · '))),
+        el('button', { className: 'btn', ariaLabel: `Sign out ${browserOf(b.agent)}${b.this ? ', this browser' : ''}`, 'data-browser': b.id, on: { click: (e) => out(b, e.currentTarget) } }, 'Sign out')))) : null,
+      el('div', { className: 'with-note' },
+        el('button', { className: 'btn', id: 'signout', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out here'),
+        el('button', { className: 'btn', id: 'signoutall', on: { click: async () => { await api('logout_all'); showLogin(); } } }, 'Sign out everywhere')));
   }
   function passkeysCard() {
     const list = me.passkeys ?? [];

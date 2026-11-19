@@ -359,8 +359,9 @@ async function nakRelay() {
 const freePort = async () => { const { createServer } = await import('node:net'); const s = createServer(); await new Promise<void>((r) => s.listen(0, '127.0.0.1', r)); const p = (s.address() as any).port; await new Promise((r) => s.close(r)); return p; };
 let hasNak = false; try { execFileSync('which', ['nak']); hasNak = true; } catch {}
 
-test('a site sends you here with its code: scan, save a passkey, sign in with it or a password, and a device signs the site in', { skip: (!exe && 'no Chromium found') || (!hasNak && 'nak is not installed'), timeout: 120_000 }, async () => {
+test('a site sends you here with its code: scan, save a passkey, sign in with it or a password, and a click signs the site in', { skip: (!exe && 'no Chromium found') || (!hasNak && 'nak is not installed'), timeout: 180_000 }, async () => {
   const { chromium: pw } = await import('playwright-core');
+  const { createServer } = await import('node:http');
   const { main } = await import('../cli/keykin.ts');
   const { BunkerSigner, createNostrConnectURI } = await import('nostr-tools/nip46');
   const { generateSecretKey, getPublicKey } = await import('nostr-tools/pure');
@@ -370,6 +371,10 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
   const boxDir = mkdtempSync(join(tmpdir(), 'kk-box-'));
   const box = await startBox({ dir: boxDir, port: 0, sidePort: 0, behindLogin: true, url: base, log: () => {} });
   const login = await startLogin({ box: `http://127.0.0.1:${box.sidePort}`, port, relays: [relay.url], log: () => {} });
+  // The site that sends people to the login page: a page of its own, so the browser gives its origin as the referrer.
+  const siteServer = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>Marble</title><p>Marble</p>'); });
+  await new Promise<void>((r) => siteServer.listen(0, '127.0.0.1', r));
+  const siteOrigin = `http://127.0.0.1:${(siteServer.address() as any).port}`;
   const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
   const sites: Awaited<ReturnType<typeof BunkerSigner.fromURI>>[] = [];
   let agent: any;
@@ -378,23 +383,52 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     const npub = /([0-9a-f]{64})/.exec((await cli(home, 'create', box.qr()!, 'MacBook')).text)![1];
     agent = (await cli(home, 'agent', relay.url)).run;
     const now = () => Math.floor(Date.now() / 1000);
-    const site = async (name: string) => {
-      const key = generateSecretKey();
-      const uri = createNostrConnectURI({ clientPubkey: getPublicKey(key), relays: [relay.url], secret: 'c0ffee' + Math.random().toString(16).slice(2, 8), name, url: 'https://marble.example/' });
-      return { uri, waiting: BunkerSigner.fromURI(key, uri, {}, 30_000) };
+    const publish = async (event: object) => {
+      const signed = JSON.parse((await cli(home, 'sign', JSON.stringify(event))).text);
+      await new Promise<void>((ok, no) => { const ws = new WebSocket(relay.url); ws.onopen = () => ws.send(JSON.stringify(['EVENT', signed])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; });
     };
+    // The account's name and picture, which the sign-in card shows.
+    await publish({ kind: 0, created_at: now(), tags: [], content: JSON.stringify({ name: 'Aaron', picture: 'https://pics.example/aaron.png' }) });
+    const code = (name: string, url = siteOrigin + '/') => {
+      const key = generateSecretKey();
+      return { key, uri: createNostrConnectURI({ clientPubkey: getPublicKey(key), relays: [relay.url], secret: 'c0ffee' + Math.random().toString(16).slice(2, 8), name, url }) };
+    };
+    const site = async (name: string, url?: string) => { const c = code(name, url); return { uri: c.uri, waiting: BunkerSigner.fromURI(c.key, c.uri, {}, 30_000) }; };
     const tickUntil = async (page: any, sel: string) => { for (let k = 0; k < 60; k++) { await agent.tick(); if (await page.locator(sel).count()) return; await new Promise((r) => setTimeout(r, 250)); } throw new Error('no answer: ' + sel); };
     const errors: string[] = [];
-    const watch = (p: any) => { p.on('pageerror', (e: any) => errors.push(String(e))); p.on('console', (m: any) => { if (m.type() === 'error') errors.push(m.text()); }); };
+    // Every call the page makes, to see that nothing goes to a device before a click.
+    const calls: any[] = [];
+    const watch = (p: any) => {
+      p.on('pageerror', (e: any) => errors.push(String(e))); p.on('console', (m: any) => { if (m.type() === 'error') errors.push(m.text()); });
+      p.on('request', (r: any) => { if (r.url().endsWith('/api') && r.method() === 'POST') { try { calls.push(JSON.parse(r.postData())); } catch {} } });
+    };
+    const puts = () => calls.filter((c) => c.call === 'note_put');
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const context = async () => { const ctx = await browser.newContext(); await ctx.route('https://pics.example/**', (r) => r.fulfill({ contentType: 'image/png', body: png })); return ctx; };
+    // Opens the login page the way a site does: from the site's own page, so the referrer is the site.
+    const fromSite = async (page: any, target: string) => { await page.goto(siteOrigin + '/'); await page.evaluate((t: string) => { location.href = t; }, target); await page.waitForURL((u: URL) => u.port === String(port)); };
 
     // A code that is not a nostrconnect:// code is left alone, and said so.
-    const odd = await (await browser.newContext()).newPage(); watch(odd);
+    const odd = await (await context()).newPage(); watch(odd);
     await odd.goto(base + '/#connect=' + encodeURIComponent('bunker://nope'));
     await odd.waitForSelector('#asking[role=alert]');
     assert.equal(new URL(odd.url()).hash, '');
 
-    // 1. Signed in by a device, no password yet: the code goes through, and the page offers a password first.
-    const ctx = await browser.newContext(); const page = await ctx.newPage(); watch(page);
+    // A raw code after `connect=` is taken as it is (its own & and = do not split it); an encoded one is decoded once.
+    const raw = code('Marble');
+    for (const tail of [raw.uri, encodeURIComponent(raw.uri)]) {
+      const p = await (await context()).newPage(); watch(p);
+      await fromSite(p, base + '/#x=1&connect=' + tail);
+      await p.waitForSelector('#askname');
+      assert.equal(await p.textContent('#askname'), 'Marble');
+      assert.match((await p.textContent('#askrelay'))!, new RegExp(relay.url));
+      assert.deepEqual(JSON.parse((await p.evaluate(() => sessionStorage.getItem('kk-connect')))!), { uri: raw.uri, from: siteOrigin });
+      assert.equal(new URL(p.url()).hash, '#x=1', 'other fragment parameters stay');
+      await p.context().close();
+    }
+
+    // 1. Signed in by a device, no password yet: the page offers a passkey, then asks before signing the site in.
+    const ctx = await context(); const page = await ctx.newPage(); watch(page);
     const c = (await (await fetch(base + '/api', { method: 'POST', headers: { 'content-type': 'application/json', 'x-keykin': '1', connection: 'close' }, body: JSON.stringify({ call: 'signin_start' }) })).json()) as any;
     const proof = JSON.parse((await cli(home, 'sign', JSON.stringify({ kind: 22242, created_at: now(), tags: [['relay', base], ['challenge', c.challenge]], content: '' }))).text);
     const signed = await fetch(base + '/api', { method: 'POST', headers: { 'content-type': 'application/json', 'x-keykin': '1', connection: 'close' }, body: JSON.stringify({ call: 'signin', event: proof }) });
@@ -407,70 +441,147 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await cdp.send('WebAuthn.enable');
     await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
     const first = await site('Marble');
-    await page.goto(page0 + '/#connect=' + encodeURIComponent(first.uri));
+    await fromSite(page, page0 + '/#connect=' + encodeURIComponent(first.uri));
     await page.waitForSelector('text=Save a passkey so next time it’s one tap');
     assert.equal(new URL(page.url()).hash, '', 'the code is gone from the address bar');
-    assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), first.uri);
+    assert.equal(JSON.parse((await page.evaluate(() => sessionStorage.getItem('kk-connect')))!).uri, first.uri);
     assert.equal(await page.textContent('#askname'), 'Marble');
-    assert.match((await page.textContent('#asking'))!, /marble\.example/);
+    assert.match((await page.textContent('#asking'))!, /127\.0\.0\.1/);
     assert.match((await page.textContent('#askrelay'))!, new RegExp(relay.url));
-    await page.reload();                                             // it lives through a reload
+    await page.reload();                                             // it lives through a reload, sender and all
     await page.waitForSelector('#savepk');
     await page.click('#savepk');
-    await page.waitForSelector('text=Waiting for one of your devices…');
+    // The card: the site (the sender, which matches the code), the account's name and picture, and the relay.
+    await page.waitForSelector('#connectcard');
+    const host = new URL(siteOrigin).host;
+    assert.equal(await page.textContent('#connecttitle'), `Sign in to ${host} as Aaron?`);
+    assert.equal(await page.getAttribute('#connectcard img.avatar', 'src'), 'https://pics.example/aaron.png');
+    assert.match((await page.textContent('#askfrom'))!, new RegExp(siteOrigin));
+    assert.equal(await page.locator('#connectwarn').count(), 0);
+    assert.equal(await page.textContent('#connectgo'), 'Sign in');
+    await new Promise((r) => setTimeout(r, 800));
+    assert.deepEqual(puts(), [], 'nothing goes to a device before the click');
     // No pointer yet, and no signer here to sign one: the page says so plainly.
     await page.waitForSelector('text=does not name a sign-in page yet');
     assert.equal(await page.locator('#publishpointer').count(), 0);
+    await page.click('#connectgo');
+    await page.waitForSelector('text=Waiting for one of your devices…');
     await tickUntil(page, '#backto');
+    assert.deepEqual(puts().map((x) => [x.text, x.from, x.as]), [[first.uri, siteOrigin, 'main']]);
     assert.equal(await page.textContent('#handoff'), 'Done. Go back to Marble');
-    assert.equal(await page.getAttribute('#backto', 'href'), 'https://marble.example/');
+    assert.equal(await page.getAttribute('#backto', 'href'), siteOrigin + '/');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), null);
     const s1 = await first.waiting; sites.push(s1);
     assert.equal(await s1.getPublicKey(), npub);
     const held = JSON.parse(readFileSync(join(boxDir, 'state.json'), 'utf8')).accounts[npub];
     assert.equal(held.passkeys.length, 1); assert.equal(held.passkeys[0].rpId, 'localhost');
 
-    // Signed out, the passkey is the first way in, and it signs in the next site too.
+    // Signed out, the passkey is the first way in, and after a click it signs in the next site too.
     await ctx.clearCookies();
     const again = await site('Marble');
     await page.goto('about:blank');
-    await page.goto(page0 + '/#connect=' + encodeURIComponent(again.uri));
+    await fromSite(page, page0 + '/#connect=' + encodeURIComponent(again.uri));
     await page.waitForSelector('#pkgo');
     assert.ok(await page.evaluate(() => { const pk = document.getElementById('pkcard')!, panel = document.querySelector('.panel')!; return !!(pk.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING); }), 'the passkey comes before the scan and the password');
     await page.click('#pkgo');
-    await page.waitForSelector('text=Waiting for one of your devices…');
+    await page.waitForSelector('#connectgo');
+    // A passkey's session lasts 90 days, so its cookie does too.
+    assert.ok((await ctx.cookies()).some((k) => k.name === 'ks' && k.expires > Date.now() / 1000 + 80 * 86400));
+    await page.click('#connectgo');
     await tickUntil(page, '#backto');
     sites.push(await again.waiting);
     await page.click('#toaccount');
     await page.waitForSelector('text=signed in with a passkey');
-    // A password is still a full way in: set one here.
+
+    // The regression: a browser already signed in here must not sign a site in without a click. Opening the
+    // page with a code shows the card at once, and nothing goes to a device until "Sign in".
+    calls.length = 0;
+    const third = await site('Marble');
+    await fromSite(page, page0 + '/#connect=' + encodeURIComponent(third.uri));
+    await page.waitForSelector('#connectcard');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(puts(), [], 'an already signed-in page leaves no note before the click');
+    assert.equal(await page.locator('#handoff').count(), 0);
+    // A separate account for this site: the same click, with `as: "site"`.
+    await page.click('#connectsite');
+    await tickUntil(page, '#backto');
+    assert.deepEqual(puts().map((x) => [x.from, x.as]), [[siteOrigin, 'site']]);
+    sites.push(await third.waiting);
+
+    // No referrer: the card says it could not tell, and signing in needs a second yes.
+    calls.length = 0;
+    const blind = await site('Marble');
+    await page.goto('about:blank');
+    await page.goto(page0 + '/#connect=' + encodeURIComponent(blind.uri));
+    await page.waitForSelector('#connectwarn');
+    assert.equal(await page.textContent('#connecttitle'), 'Sign in to a site as Aaron?');
+    assert.match((await page.textContent('#connectwarn'))!, /This page could not tell which site sent you here\. It calls itself Marble\./);
+    assert.equal(await page.textContent('#connectgo'), 'Sign in anyway');
+    page.once('dialog', (d) => d.dismiss());
+    await page.click('#connectgo');
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual(puts(), [], 'a No on the second question sends nothing');
+    page.once('dialog', (d) => d.accept());
+    await page.click('#connectgo');
+    await tickUntil(page, '#handoff');
+    assert.deepEqual(puts().map((x) => [x.from, x.as]), [[null, 'main']]);
+    await tickUntil(page, 'text=Done. Go back to the site.');
+    sites.push(await blind.waiting);
+
+    // A sender that is not the site the code names: said in plain words, and Not now sends nothing.
+    calls.length = 0;
+    const liar = code('Marble', 'https://marble.example/');
+    await fromSite(page, page0 + '/#connect=' + encodeURIComponent(liar.uri));
+    await page.waitForSelector('#connectwarn');
+    assert.equal(await page.textContent('#connecttitle'), `Sign in to ${host} as Aaron?`);
+    assert.match((await page.textContent('#connectwarn'))!, new RegExp(`This request came from ${host.replace(/\./g, '\\.')}, but says it is marble\\.example\\.`));
+    assert.equal(await page.textContent('#connectgo'), 'Sign in anyway');
+    await page.click('#connectno');
+    await page.waitForSelector('#notsigned');
+    assert.deepEqual(puts(), []);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), null);
+
+    // The Security section lists the signed-in browsers, with Sign out on each.
+    await page.click('#toaccount');
     await page.click('nav >> text=Security');
+    await page.waitForSelector('#browsers');
+    assert.match((await page.textContent('#browsers'))!, /This browser/);
+    assert.match((await page.textContent('#browsers'))!, /passkey · signed in .* · last used today/);
+    // A password is still a full way in: set one here.
     await page.fill('#newuser', 'aaron'); await page.fill('#newpass', 'correct horse battery');
     await page.click('#savepw');
     await page.waitForSelector('text=Password saved.');
 
     // The account names this page (as a device would publish it): the page no longer offers one.
-    const pointer = JSON.parse((await cli(home, 'sign', JSON.stringify({ kind: 30078, created_at: now(), tags: [['d', 'keykin/login'], ['url', base]], content: '' }))).text);
-    await new Promise<void>((ok, no) => { const ws = new WebSocket(relay.url); ws.onopen = () => ws.send(JSON.stringify(['EVENT', pointer])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; });
+    await publish({ kind: 30078, created_at: now(), tags: [['d', 'keykin/login'], ['url', base]], content: '' });
 
     // 2. Next time, from a fresh browser: the site shows above the sign-in card, and the password signs in.
     const second = await site('Marble');
-    const p2 = await (await browser.newContext()).newPage(); watch(p2);
-    await p2.goto(base + '/#connect=' + encodeURIComponent(second.uri));
+    const p2 = await (await context()).newPage(); watch(p2);
+    await fromSite(p2, base + '/#connect=' + encodeURIComponent(second.uri));
     await p2.waitForSelector('#username');
     assert.equal(await p2.textContent('#askname'), 'Marble');
     await p2.fill('#username', 'aaron'); await p2.fill('#password', 'correct horse battery');
     await p2.click('#pwgo');
-    await p2.waitForSelector('text=Waiting for one of your devices…');
+    await p2.waitForSelector('#connectgo');
     assert.equal(await p2.locator('#savepk').count(), 0, 'a password sign-in is not pushed to a passkey');
     assert.equal(await p2.locator('#pointerline').count(), 0, 'the account names its page: nothing to offer');
+    await p2.click('#connectgo');
     await tickUntil(p2, '#backto');
     const s2 = await second.waiting; sites.push(s2);
     assert.equal(await s2.getPublicKey(), npub);
     await p2.click('#toaccount');
     await p2.waitForSelector('text=Welcome, Aaron');
+    // The first browser sees the second in its list, and signs it out.
+    await page.click('nav >> text=Home'); await page.click('nav >> text=Security');
+    await page.waitForSelector('#browsers .row >> nth=1');
+    await page.locator('#browsers .row', { hasText: 'password ·' }).locator('button').click();
+    await page.waitForSelector('text=Chrome on macOS is signed out.');
+    assert.equal(await page.locator('#browsers .row', { hasText: 'password ·' }).count(), 0);
+    await p2.reload();
+    await p2.waitForSelector('#username');
     assert.deepEqual(errors, []);
-  } finally { for (const s of sites) await s.close().catch(() => {}); agent?.close(); await browser.close(); await login.close(); await box.close(); relay.kill(); }
+  } finally { for (const s of sites) await s.close().catch(() => {}); agent?.close(); await browser.close(); await login.close(); await box.close(); relay.kill(); siteServer.close(); }
 });
 
 test('sign-in strength: one session for every way in today, and tiers a box owner can switch on', async () => {

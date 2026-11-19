@@ -70,7 +70,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       const local = ' ' + relays.map((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '')).join(' ') + (relays.some((r) => r.startsWith('ws://')) ? ' ws:' : '');
       res.writeHead(200, {
         'content-type': type, 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
-        'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss:${local}; img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
+        'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss:${local}; img-src 'self' data: https:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
       });
       return void res.end(readFileSync(join(STATIC, file)));
     }

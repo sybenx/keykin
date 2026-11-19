@@ -47,8 +47,10 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
-  const toBox = async (path: '/keykin' | '/page', body: unknown) =>
-    (await fetch(o.box + path, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', connection: 'close' }, signal: AbortSignal.timeout(20_000) })).json() as Promise<any>;
+  // `from` tells the box which https origin this page was reached at. The box only shows it to its admin as a
+  // suggestion for its login page address; it trusts nothing by it.
+  const toBoxFrom = async (path: '/keykin' | '/page', body: unknown, from?: string) =>
+    (await fetch(o.box + path, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', connection: 'close', ...(from ? { 'x-keykin-origin': from } : {}) }, signal: AbortSignal.timeout(20_000) })).json() as Promise<any>;
   const cookieOf = (req: IncomingMessage, name: string, len: number) => new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{${len}})(?:;|$)`).exec(req.headers.cookie ?? '')?.[1];
   const json = (res: ServerResponse, status: number, body: unknown, cookies: string[] = []) => {
     res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(cookies.length ? { 'set-cookie': cookies } : {}) });
@@ -60,6 +62,9 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     // Cookies are marked Secure whenever the page was reached over https (through the reverse proxy).
     const https = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted;
     const cookie = (name: string, value: string, age: number) => `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${https ? '; Secure' : ''}`;
+    // A passkey's relying party is this page's own host, taken from the request, never from the page.
+    const origin = `${https ? 'https' : 'http'}://${req.headers.host ?? ''}`;
+    const toBox = (path: '/keykin' | '/page', body: unknown) => toBoxFrom(path, body, https ? origin : undefined);
 
     if (method === 'GET' && FILES[path]) {
       const [file, type] = FILES[path];
@@ -95,8 +100,6 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
         const r = await toBox('/page', { call });
         return json(res, 200, r.ok ? { ...r, relays } : r);
       }
-      // A passkey's relying party is this page's own host, taken from the request, never from the page.
-      const origin = `${https ? 'https' : 'http'}://${req.headers.host ?? ''}`;
       if (call === 'pk_login_start') return json(res, 200, await toBox('/page', { call, origin }));
       if (call === 'pk_login') {
         const r = await toBox('/page', { call, origin, response: body.response, session: cookieOf(req, 'ks', 64) });

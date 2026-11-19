@@ -408,11 +408,15 @@ thing `marble.syb.lol` reads to find where to send someone.
   wins. A reader checks the signature, shows the address to the person, and only then goes there.
 - To remove it, publish the same event with no `url` tag.
 - A device signs it like any other event (section 3).
-- **Where a device learns the origin.** A box with Keykin Login in front is started with
-  `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"loginPage": "https://…"` (not `login`, which is the account page's own sign-in code).
+- **Where a device learns the origin.** A box with Keykin Login in front knows its login page's
+  address from its admin page, where the admin sets it ("Your login page address": https, origin
+  only). `KEYKIN_LOGIN_URL`, when set, overrides that setting. The box's setup codes carry it:
+  `"loginPage": "https://…"` (not `login`, which is the account page's own sign-in code). The admin
+  page may suggest an address (the one it is visited at, if https, or the host Keykin Login says it
+  serves), but nothing is used until the admin saves it.
   A device's join text carries it too, when the device knows it. A device given a code without it
-  may use the box address, if posting to `<addr>/api` without the page's header gets Keykin Login's
-  `403 forbidden` (a bare box has no `/api`).
+  publishes nothing: it never guesses the page from the box's address, which a lookalike address
+  passing the box through could fake.
 - **Who publishes it, and keeps it there.** A device in the account checks right after it joins,
   and each time it signs a site in by a `nostrconnect://` code. A site that looked the person up by
   name and found no pointer marks its code `kk_login=missing` (next to `kk=account`); the check is
@@ -420,8 +424,20 @@ thing `marble.syb.lol` reads to find where to send someone.
   - If the newest pointer names this origin, and some write relay that answered lacks it, the
     device sends that same signed event there again. No new signature, no box.
   - If no relay has any pointer, it signs a new one (device and box, as usual) and publishes it.
-  - If the newest pointer has no `url` (removed on purpose) or names another origin, it does
-    nothing: the person chose that.
+  - **The pointer follows the box the device signs with.** A device keeps, per account, the
+    origins it got from codes of boxes it joined before (the current one is the last code's).
+    If the newest pointer names one of those, and the current origin is a different one, the
+    person has moved boxes: the device signs a new pointer naming the current origin, which
+    replaces the old one by `created_at`. Joining a box makes its code's origin the current one
+    and adds the one before to that history; a code without one leaves no current origin.
+    Removing the device from the account keeps that history, so joining again at a new box
+    still moves the pointer.
+  - If the newest pointer has no `url` (removed on purpose), or names an origin this device never
+    got from a box code (another device's, or set by hand), it does nothing: the person chose that.
+  - With no current origin, it does nothing, not even sending an existing pointer around.
+  - Right after a join, a pointer naming an origin the device never got from a box code is asked
+    about once on the device (switch to the current origin, or keep it and never ask about that
+    pair again). At other checks it is left.
   - If no relay answers, it does nothing this time.
   The account page's "Publish it" button stays as the fallback.
 
@@ -473,8 +489,9 @@ They live on the box, per account. The box never sees the password.
 **Passkeys (added 2026-11-18).** A passkey is another way into the page, worth the same as a
 password or a scan. They live on the box, per account, as WebAuthn credentials:
 
-- **Relying party:** the login page's own host (`rpId`), taken by Keykin Login from the request it
-  served, never from the page. `https://` only, except `localhost` and `127.0.0.1` for testing. A
+- **Relying party:** the login page's own host (`rpId`): the box's login page address (section 11.1)
+  when it is set, so the origin is that address too; otherwise taken by Keykin Login from the request it
+  served. Never from the page. `https://` only, except `localhost` and `127.0.0.1` for testing. A
   resident (discoverable) key, user verification required, no attestation.
 - **Stored on the box:** `{ id, key, counter, rpId, origin, added, last }` per passkey (the
   credential id, its COSE public key, base64url). A passkey signs in only on the host it was made on.

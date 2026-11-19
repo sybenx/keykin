@@ -117,8 +117,12 @@ export function codePage(o: { qrText: string; csrf: string; nonce: string; logou
   `setInterval(async()=>{try{const r=await fetch('/admin/state');if(r.ok&&(await r.json()).accounts>${o.count})location.href='/'}catch{}},2000)`);
 }
 
+/** The login page address: what codes carry now, whether KEYKIN_LOGIN_URL fixed it, and one to suggest
+ *  (the address this page was visited at, or the one Keykin Login says it serves). A suggestion is never saved by itself. */
+export interface LoginPageSetting { addr?: string; fixed: boolean; suggest?: { addr: string; from: 'here' | 'login' } }
+
 /** `door`: the public address if one is set, and when Keykin Login last reached the box (0 if never). */
-export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number }) {
+export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number; loginPage?: LoginPageSetting }) {
   const waiting = o.requests.filter((r) => r.state === 'waiting');
   const asks = `<div class="card"><h2>Waiting for your answer</h2>
   <p class="sub">${waiting.length ? 'Nothing is made until you approve.' : 'Nobody is asking for an account.'}</p>
@@ -133,6 +137,19 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
   <div class="kv"><span>Keykin Login</span><span class="${running ? 'ok' : ''}">${!o.door.side ? 'No side door is open for it' : running ? `Running${o.door.url ? ' at ' + esc(o.door.url.replace(/^https?:\/\//, '')) : ''}` : o.door.seen ? `Last seen ${ago(o.door.seen, o.now)}` : 'Not seen yet'}</span></div>
   <div class="kv"><span>What it can reach</span><span>Device requests and the account page only</span></div>
   <p class="sub small">Stopping Keykin Login closes the outside door. This page and devices on the private network keep working.</p></div>`;
+
+  const lp = o.loginPage ?? { fixed: false };
+  const why = '<p class="sub">Invites and setup codes include this address, so a phone that joins can tell sites where to send this account to sign in.</p>';
+  const from = lp.suggest ? (lp.suggest.from === 'here' ? 'the address you opened this page at' : 'where Keykin Login says it is') : '';
+  const loginCard = `<div class="card"><h2>Your login page address</h2>
+  ${why}
+  ${lp.fixed ? `<div class="kv"><span>Address</span><span class="mono">${esc(lp.addr!)}</span></div>
+  <p class="sub small">Set by KEYKIN_LOGIN_URL on this box. Change it there.</p>` : `<form method="post" action="/admin/loginpage">${hidden(o.csrf)}
+    <div class="kv"><span>Codes carry</span><span${lp.addr ? ' class="mono"' : ''}>${lp.addr ? esc(lp.addr) : 'No address yet'}</span></div>
+    <label class="small dim" for="lp" style="margin-top:6px">${lp.addr ? 'Change it' : 'Address'}</label>
+    <input id="lp" name="address" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://account.example.com" value="${esc(lp.suggest?.addr ?? lp.addr ?? '')}" style="margin-bottom:0">
+    ${lp.suggest ? `<p class="sub small">Suggested from ${from}. Nothing changes until you press Save.</p>` : '<p class="sub small">https:// and the host, nothing after.</p>'}
+    <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button>${lp.addr ? '<button type="submit" name="do" value="clear">Clear</button>' : ''}</div></form>`}</div>`;
 
   const accounts = o.accounts.map((a) => {
     const rows = [...a.members.filter((m) => m.kind === 'device'), ...a.members.filter((m) => m.kind === 'box')].map((m) => {
@@ -159,5 +176,6 @@ ${asks}
   <p class="sub">Makes a code for one new account. It works once, for 24 hours.</p>
   <form method="post" action="/admin/code">${hidden(o.csrf)}<button type="submit">Make a setup code</button></form></div>
 ${door}
+${loginCard}
 </div><div class="col">${accounts || '<div class="card"><h2>No accounts yet</h2></div>'}</div></div>`);
 }

@@ -451,6 +451,17 @@ it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 
   - If no relay answers, it does nothing this time.
   The account page's "Publish it" button stays as the fallback, and publishes both kinds during the move.
 
+**Built (2026-11-19), kind 10046:** on the account page, with the rules in `login/static/pointer.js`
+(tested on their own and in the browser). The page asks its relays for both kinds at once, reads 10046
+first and 30078 only when no relay gave a 10046, treats a newest 10046 with no `nostrconnect_url` as
+removed, and refuses a template as above (a refused one shows as a page that cannot be used, with
+Publish offered). When the pointer names this page, it sends the newest copy of each kind as it is to
+any of its relays that answered without it. "Publish it" signs both kinds (two signatures on the
+phone, no `relays` tag), and when the pointer names this page a "Remove it" button signs both
+removals. Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
+command-line device has none; Marble's lives in the Marble repo. Marble Web, Discover and Tube read
+the pointer in their own repos.
+
 ### 11.2 Accounts on a box, and how a request names its account
 
 A box holds many accounts. **An account's id is its npub in hex** (the x-only key of section 1).
@@ -861,9 +872,10 @@ passkey session's cookie 90 days and renews it on each `me`, and clears the cook
 box does not hold also gets `browsers` in `me` and may call `logout_browser`. The card shows the name
 and picture from the account's kind 0 on the page's relays (falling back to the username or the npub),
 so the page's CSP now allows `https:` images. `note_put` refuses a `from` that is not a bare
-`http(s)://host[:port]` origin, or an `as` other than `main` or `site`. Not built: devices acting on
-`as` and `from` (the command-line device and Marble still use the main account and name the grant as
-before), and the sites' side of name-first sign-in.
+`http(s)://host[:port]` origin, or an `as` other than `main` or `site`. Devices acting on `as` and
+`from`: Marble on Android does, on the Marble branch `note-site-choice`, not merged yet. Not built: the
+command-line device still uses the main account and names the grant as before, and the sites' side of
+name-first sign-in.
 
 **Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
 `invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every

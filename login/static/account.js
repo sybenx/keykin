@@ -477,7 +477,7 @@
             : el('button', { className: 'btn danger', ariaLabel: `Block ${d.name}`, on: { click: (e) => { if (confirm(`Block ${d.name}? It will not be able to sign until it is unblocked.`)) act(e.currentTarget, 'block', { key: d.key }, `${d.name} is blocked.`); } } }, 'Block')))),
         el('div', { className: 'grid2' },
           card(el('h2', {}, 'Add a device'), el('div', { className: 'sub' }, 'Paste the new device’s invite here. One of your devices adds it.'),
-            noteForm({ kind: 'invite', label: 'Invite from the new device', placeholder: 'Paste the invite', button: 'Send to phone', waiting: 'Waiting for one of your devices…',
+            noteForm({ kind: 'invite', keep: 600, label: 'Invite from the new device', placeholder: 'Paste the invite', button: 'Send to phone', waiting: 'Waiting for one of your devices…',
               done: (result) => el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, el('div', { className: 'sub' }, 'Added. Give the new device this join code:'), el('div', { className: 'dashed has', id: 'joincode' }, result)) })),
           card(el('h2', {}, 'Remove blocked devices for good'), el('div', { className: 'sub' }, 'A blocked device still holds its old piece. Removing makes that piece useless. Your npub does not change.'),
             blocked.length ? noteForm({ kind: 'cycle', button: `Remove ${blocked.length} ${blocked.length === 1 ? 'device' : 'devices'}`, plain: true, needs: 'Asks for a Yes on one of your devices', waiting: 'Waiting for a Yes on one of your devices…',
@@ -538,9 +538,15 @@
     return s;
   };
 
+  // What a device handed back that the person still has to copy (a bunker link, a join code), kept for a while.
+  // The page redraws every 15 seconds, and without this the answer was wiped soon after it came.
+  const kept = new Map();
+  const keptOf = (kind) => { const k = kept.get(me.npub + '/' + kind); if (k && k.until > Date.now()) return k.result; kept.delete(me.npub + '/' + kind); return null; };
   // Something this page starts and a device finishes: leave a note, then wait for a device to answer it.
   function noteForm(o) {
     const box = el('div', { style: 'display:flex;flex-direction:column;gap:10px' });
+    const had = o.keep ? keptOf(o.kind) : null;
+    if (had !== null) { box.append(o.done(had)); return box; }
     const input = o.label ? el('input', { className: 'field', type: 'text', ariaLabel: o.label, placeholder: o.placeholder ?? '' }) : null;
     const btn = el('button', { className: o.plain ? 'btn' : 'btn go' }, o.button);
     const line = el('span', { className: 'small dim', role: 'status' }, o.needs ?? '');
@@ -558,6 +564,7 @@
         if (g && g.error === 'login') { clearInterval(t); return showLogin('A device said No, so this browser was signed out.'); }
         if (!g || !g.ok || g.state === 'waiting') return;
         clearInterval(t); delete box.dataset.busy;
+        if (g.state === 'done' && o.keep) kept.set(me.npub + '/' + o.kind, { result: g.result, until: Date.now() + o.keep * 1000 });
         if (g.state === 'done') { const old = document.getElementById('status'); if (old) old.remove(); flash = null; box.replaceChildren(o.done(g.result)); }
         else { line.textContent = 'No device answered in time. Is one of them online?'; btn.disabled = false; }
       });
@@ -569,7 +576,7 @@
   function bunkerBox() {
     const slot = el('div', { className: 'dashed', id: 'bunkerlink' }, 'bunker://… appears here');
     const copy = el('button', { className: 'btn', hidden: true, on: { click: async () => { await navigator.clipboard.writeText(slot.textContent); copy.textContent = 'Copied'; } } }, 'Copy');
-    const form = noteForm({ kind: 'bunker', button: 'Ask my phone for a link', plain: true, waiting: 'Waiting for one of your devices…',
+    const form = noteForm({ kind: 'bunker', keep: 900, button: 'Ask my phone for a link', plain: true, waiting: 'Waiting for one of your devices…',
       done: (result) => { slot.textContent = result; slot.classList.add('has'); copy.hidden = false; return copy; } });
     return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, slot, form);
   }

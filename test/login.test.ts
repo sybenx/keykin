@@ -221,6 +221,12 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     assert.deepEqual(await answered(), ['gave a bunker link']);
     await page.waitForSelector('#bunkerlink.has');
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
+    // The page checks the account every 15 seconds and redraws. The link must still be there after that.
+    await new Promise((r) => setTimeout(r, 16_000));
+    assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
+    assert.equal(await page.locator('#bunkerlink.has').count(), 1);
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Sites and apps');
+    assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
 
     // Security: change the password from the page; the new one signs in, the old one does not.
     await page.click('nav >> text=Security');

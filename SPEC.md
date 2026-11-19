@@ -567,6 +567,24 @@ each device tells the box what it has let in.
   `name` is the site's origin or the app's name. `since` is unix seconds.
 - A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
   changes. The box keeps the list per device.
+- **Telling grants apart** (Aaron, 2026-11-19). A grant may also carry, all optional:
+  - `client`: the site's NIP-46 client key, hex.
+  - `device`: the site's own label for where it runs, like "Chrome on Windows", at most 60
+    characters. The site claims it, so it is a label only, never a check.
+  - `via`: how it came in: `login` (a nostrconnect note left by the login page), `scan` (a scanned
+    code), `paste` (a pasted code) or `bunker` (a bunker link).
+  - `browser`: set by the box, never by a device. When the account page leaves a `nostrconnect`
+    note, the box remembers the code's client key with that page session's browser label (from its
+    `agent`, as in "Chrome on Windows"), for 30 days, at most 20 per account. A later reported grant
+    whose `client` matches gets that label.
+
+  A nostrconnect code may carry `device=<label>`; sites we control send it, and the device keeps it
+  with the site and reports it. The box also keeps the last event kind signed for each grant (from a
+  `sign` naming it). The page's `me` gives each grant `client`, `device`, `via`, `browser` and
+  `lastKind`, with `deviceKey` and `deviceName` for the device that let it in. Sites and apps shows the
+  name and then a line like "Chrome on Windows · signed in 19 Nov 06:14 through your login page ·
+  approved by Pixel 9a · last used 2 h ago, last posted a reaction · key ab12…", leaving out what is
+  missing. The key is the first 4 hex of `client`; Marble Web shows the same 4 in its account menu.
 - When a device signs or makes a message key **for** a site or app, it names the grant:
   `"grant": "<id>"` in the `sign` or `ecdh` body. Requests for the person's own use carry none.
 - **Revoking** is done on the box, from the account page or by any device:
@@ -606,6 +624,11 @@ report and on the page's `me`; an ended grant is revoked as the person would rev
 `revoked` from then on) and the activity line is written. A grant used but never reported ends the
 same way, with no activity line, since the box has no name for it. `me` gives each grant's `last`
 from that map, and Sites and apps shows it ("last used …"). Devices change nothing.
+
+**Built (2026-11-19), telling grants apart:** on the box (`client`, `device`, `via` kept from reports,
+`browser` from the nostrconnect note, `lastKind`), the account page's detail line (`login/static/rows.js`),
+Marble (Android reports them, Marble Web sends `device=` and shows its key) and Tube (`device=` from the
+start request's User-Agent).
 
 ### 11.6 The account page's calls, and what needs a device
 

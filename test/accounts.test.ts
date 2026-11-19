@@ -610,3 +610,46 @@ test('a nostrconnect note carries where it came from and which key, and a device
   assert.deepEqual(got.map((n) => [n.id, n.kind, n.from, n.as]), [
     [a.note, 'nostrconnect', 'https://marble.example', 'site'], [b.note, 'nostrconnect', null, 'main'], [c.note, 'nostrconnect', null, 'main'], [d.note, 'bunker', undefined, undefined]]);
 });
+
+test('grants carry who they are: client key, device label, how, the browser that left the code, and the last kind', async () => {
+  const { box, send, call } = world();
+  const phone = device('Pixel 9a');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const win = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36';
+  const session = call({ call: 'pw_login', username: 'aaron', agent: win, verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const client = 'ab12'.padEnd(64, '0'), other = 'cd34'.padEnd(64, '0');
+  call({ call: 'note_put', session, kind: 'nostrconnect', text: `nostrconnect://${client}?relay=wss://r&device=Chrome%20on%20Windows`, from: 'https://marble.syb.lol' });
+  const a = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client, device: '  Chrome on Windows' + 'x'.repeat(80), via: 'login' as const, browser: 'forged' };
+  const b = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client: other, via: 'scan' as const };
+  const c = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client: 'nothex', via: 'evil' as any };
+  await D.reportGrants(phone, held, [a, b, c], send, NOW);
+  await D.signEvent(phone, held, { ...note(held.npub), kind: 7 }, send, NOW, a.id);
+  const rows = Object.fromEntries(call({ call: 'me', session }).grants.map((g: any) => [g.id, g]));
+  assert.equal(rows[a.id].client, client);
+  assert.equal(rows[a.id].device, 'Chrome on Windows' + 'x'.repeat(43));             // trimmed, 60 at most
+  assert.equal(rows[a.id].via, 'login');
+  assert.equal(rows[a.id].browser, 'Chrome on Windows');                            // the box's word, not the device's
+  assert.equal(rows[a.id].lastKind, 7);
+  assert.equal(rows[a.id].deviceName, 'Pixel 9a');
+  assert.equal(rows[b.id].browser, undefined); assert.equal(rows[b.id].via, 'scan'); assert.equal(rows[b.id].lastKind, null);
+  assert.equal(rows[c.id].client, undefined); assert.equal(rows[c.id].via, undefined);
+  // Revoking forgets the kind too.
+  call({ call: 'revoke', session, grant: a.id });
+  assert.equal(box.only()!.kinds?.[a.id], undefined);
+});
+
+test('the Sites and apps detail line', async () => {
+  process.env.TZ = 'UTC';
+  // @ts-ignore: a plain script for the page
+  await import('../login/static/rows.js');
+  const { siteDetail, kindWord } = (globalThis as any).KeykinRows;
+  const since = Date.UTC(2026, 10, 19, 6, 14) / 1000;
+  const g = { kind: 'site', since, via: 'login', device: 'Chrome on Windows', browser: 'Firefox on Linux', deviceName: 'Pixel 9a', last: since + 3600, lastKind: 7, client: 'ab12'.padEnd(64, '0') };
+  assert.equal(siteDetail(g, since + 3 * 3600), 'Chrome on Windows · signed in 19 Nov 06:14 through your login page · approved by Pixel 9a · last used 2 h ago, last posted a reaction · key ab12…');
+  assert.equal(siteDetail({ kind: 'site', since, deviceName: 'Pixel 9a', last: null }, since), 'signed in 19 Nov 06:14 · approved by Pixel 9a · not used yet');
+  assert.equal(siteDetail({ kind: 'site', since, browser: 'Safari on macOS', via: 'scan', deviceName: 'P', last: since, lastKind: 30023 }, since + 30), 'Safari on macOS · signed in 19 Nov 06:14 by a scanned code · approved by P · last used a minute ago, last posted an article');
+  assert.equal(siteDetail({ kind: 'app', since, deviceName: 'Pixel 9a', last: null }, since), 'App on Pixel 9a · added 19 Nov 06:14 · not used yet');
+  assert.deepEqual([0, 1, 4, 6, 7, 99999].map(kindWord), ['profile', 'note', 'DM', 'repost', 'reaction', 'kind 99999 event']);
+  for (const s of [siteDetail(g, since)]) assert.ok(!s.includes('—'));
+});

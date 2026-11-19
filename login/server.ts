@@ -18,6 +18,7 @@ const STATIC = join(import.meta.dirname, 'static');
 const FILES: Record<string, [string, string]> = {
   '/': ['account.html', 'text/html; charset=utf-8'],
   '/account.js': ['account.js', 'text/javascript; charset=utf-8'],
+  '/rows.js': ['rows.js', 'text/javascript; charset=utf-8'],              // the Sites and apps detail line (SPEC 11.5)
   '/account.css': ['account.css', 'text/css; charset=utf-8'],
   '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
 };

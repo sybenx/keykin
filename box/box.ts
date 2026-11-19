@@ -42,12 +42,33 @@ export interface Account {
   revoked?: string[];
   /** When each grant was last used (SPEC 11.5), by grant id. A grant unused for 90 days ends. */
   used?: Record<string, number>;
+  /** The last event kind signed for each grant (SPEC 11.5), by grant id. */
+  kinds?: Record<string, number>;
+  /** Account-page browsers that left a nostrconnect note, by the code's client key (SPEC 11.5): the browser label and when. */
+  connects?: Record<string, { browser: string; at: number }>;
   /** Grants the person limited (SPEC 11.5): `posts` lets that site or app post and nothing else. */
   limits?: Record<string, Limit>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
 }
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number }
+/** `client`, `device`, `via` come from the device; `browser` is set by the box from the page session that left the nostrconnect note (SPEC 11.5). */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number; client?: string; device?: string; via?: Via; browser?: string }
+export type Via = 'login' | 'scan' | 'paste' | 'bunker';
+const VIAS = new Set(['login', 'scan', 'paste', 'bunker']);
+/** A short label for a browser from its User-Agent, e.g. "Chrome on Windows" (the account page's browserOf). */
+export function browserLabel(agent: string | undefined): string {
+  const a = agent ?? '';
+  const b = /Edg(e|A|iOS)?\//.test(a) ? 'Edge' : /OPR\/|Opera/.test(a) ? 'Opera' : /SamsungBrowser/.test(a) ? 'Samsung Internet' : /Firefox\/|FxiOS/.test(a) ? 'Firefox'
+    : /Chrome\/|CriOS|Chromium/.test(a) ? 'Chrome' : /Safari\//.test(a) ? 'Safari' : null;
+  const os = /Windows/.test(a) ? 'Windows' : /Android/.test(a) ? 'Android' : /iPhone/.test(a) ? 'iPhone' : /iPad/.test(a) ? 'iPad' : /CrOS/.test(a) ? 'ChromeOS'
+    : /Macintosh|Mac OS X/.test(a) ? 'macOS' : /Linux/.test(a) ? 'Linux' : null;
+  return b && os ? `${b} on ${os}` : b ?? (os ? `A browser on ${os}` : 'A browser');
+}
+/** The client key of a nostrconnect:// code, hex, or null. */
+export function clientOf(code: string): string | null {
+  const m = /^nostrconnect:\/\/([0-9a-fA-F]{64})(?:[?/]|$)/.exec(code.trim());
+  return m ? m[1].toLowerCase() : null;
+}
 /** Something the account page started for a device to finish (SPEC 11.6). */
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
 /** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose. */
@@ -239,7 +260,15 @@ export class Box {
           if (!Array.isArray(list) || list.length > 200) refuse('bad_request');
           const clean: Grant[] = list.map((g: any) => {
             if (!/^[0-9a-f]{32}$/.test(g?.id ?? '') || (g.kind !== 'site' && g.kind !== 'app') || typeof g.name !== 'string' || !Number.isInteger(g.since)) refuse('bad_request');
-            return { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
+            const out: Grant = { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
+            if (typeof g.client === 'string' && /^[0-9a-f]{64}$/.test(g.client)) out.client = g.client;
+            const label = typeof g.device === 'string' ? g.device.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60) : '';
+            if (label) out.device = label;
+            if (VIAS.has(g.via)) out.via = g.via;
+            // The browser is the box's own word, from the page session whose note carried this client key.
+            const c = out.client && s.connects?.[out.client];
+            if (c) out.browser = c.browser;
+            return out;
           });
           const revoked = new Set(s.revoked ?? []);
           const known = new Set((s.grants?.[from.key] ?? []).map((g) => g.id));
@@ -318,6 +347,18 @@ export class Box {
     for (const k of Object.keys(s.grants ?? {})) s.grants![k] = s.grants![k].filter((g) => g.id !== grant);
     if (s.limits) delete s.limits[grant as string];
     if (s.used) delete s.used[grant as string];
+    if (s.kinds) delete s.kinds[grant as string];
+    this.#save();
+  }
+  /** Remembers which account-page browser left a nostrconnect note, so the grant it becomes can say so (SPEC 11.5). */
+  rememberConnect(s: Account, code: string, agent: string | undefined, now: number) {
+    const client = clientOf(code);
+    if (!client) return;
+    const all = (s.connects ??= {});
+    for (const [k, v] of Object.entries(all)) if (v.at < now - 30 * 86400) delete all[k];
+    all[client] = { browser: browserLabel(agent), at: now };
+    const keys = Object.keys(all);
+    if (keys.length > 20) for (const k of keys.sort((x, y) => all[x].at - all[y].at).slice(0, keys.length - 20)) delete all[k];
     this.#save();
   }
   /** A grant's last use: when a request last named it, else its `since` (SPEC 11.5). */
@@ -540,6 +581,7 @@ export class Box {
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
     const a = answer(piece, msg, c);
     this.#used(s, from, body.grant, now);
+    if (typeof body.grant === 'string' && /^[0-9a-f]{32}$/.test(body.grant) && Number.isInteger(ev.kind)) (s.kinds ??= {})[body.grant] = ev.kind;
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
   }

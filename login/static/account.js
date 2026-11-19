@@ -570,7 +570,7 @@
         head('Sites and apps', 'Everything that can sign as you. Revoking here stops it at the box, even if the device that let it in is off.'),
         el('div', { className: 'card rows' }, me.grants.length ? me.grants.map((g) => el('div', { className: 'row' },
           el('div', { className: 'grow' }, el('div', { className: 'name' }, g.name.replace(/^https?:\/\//, '')),
-            el('div', { className: 'detail' }, [g.kind === 'site' ? `Site · through ${g.deviceName}` : `App on ${g.deviceName}`, `since ${day(g.since)}`, g.last ? `last used ${ago(g.last)}` : 'not used yet'].join(' · '))),
+            el('div', { className: 'detail' }, globalThis.KeykinRows.siteDetail(g))),
           el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
             el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
               e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),

@@ -248,7 +248,8 @@ export async function passwordClear(me: Me, h: Held, send: Send, t = now()) { aw
 
 // --- What this device has let in, and revoking (SPEC 11.5) -----------------------------------------
 
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number }
+/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in. */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker' }
 export const newGrant = (kind: 'site' | 'app', name: string, t = now()): Grant => ({ id: bytesToHex(randomBytes(16)), kind, name, since: t });
 /** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
 export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<string[]> {

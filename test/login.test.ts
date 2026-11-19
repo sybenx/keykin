@@ -18,8 +18,8 @@ const note = (npub: string, content = 'hi') => ({ pubkey: npub, created_at: 1700
 // QRST's own test relay, for the page's sign-in by a scanned code. Without it the page is given a relay that is not there.
 const relayTool = process.env.QRST_REPO ? join(process.env.QRST_REPO, 'tools/test-relay.mjs') : join(homedir(), 'qr-secret-transfer/tools/test-relay.mjs');
 
-async function world(o: { open?: boolean } = {}) {
-  const testRelay = existsSync(relayTool) ? await (await import(relayTool)).startRelay({}) : null;
+async function world(o: { open?: boolean; noRelay?: boolean } = {}) {
+  const testRelay = !o.noRelay && existsSync(relayTool) ? await (await import(relayTool)).startRelay({}) : null;
   const relay: string = testRelay?.url ?? 'ws://127.0.0.1:9';
   const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, sidePort: 0, behindLogin: true, url: 'http://to-be-set', open: o.open, log: () => {} });
   const login = await startLogin({ box: `http://127.0.0.1:${box.sidePort}`, port: 0, relays: [relay], log: () => {} });
@@ -294,6 +294,85 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await shot('home-phone');
     assert.deepEqual(errors, []);
   } finally { await browser.close(); await w.close(); }
+});
+
+test('the account page says at the top when sites cannot find you by name, and nothing once they can', { skip: !exe && 'no Chromium found', timeout: 90_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = process.env.KEYKIN_SHOTS;
+  const signIn = async (w: Awaited<ReturnType<typeof world>>, dark = false) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: dark ? 'dark' : 'light' })).newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.goto(w.base + '/');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+    await page.click('#pwgo');
+    await page.waitForSelector('text=Welcome, Aaron');
+    return { page, errors };
+  };
+  const shot = async (page: any, name: string) => { if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: join(shots, name + '.png'), fullPage: true }); } };
+  try {
+    // The relays cannot be reached: a quiet note, not an alert.
+    const off = await world({ noRelay: true });
+    try {
+      const phone = device('Phone');
+      const held = await D.createWithBox(phone, D.readQr(off.box.qr()!), off.send);
+      await D.passwordSet(phone, held, 'aaron', 'correct horse battery', off.send);
+      for (const dark of [false, true]) {
+        const { page, errors } = await signIn(off, dark);
+        await page.waitForSelector('#pointernote');
+        assert.match((await page.textContent('#pointernote'))!, /could not check whether sites can find you by your name/);
+        assert.equal(await page.locator('#pointeralert').count(), 0);
+        await shot(page, `account-unknown${dark ? '-dark' : ''}`);
+        assert.deepEqual(errors, []);
+        await page.context().close();
+      }
+    } finally { await off.close(); }
+
+    const w = await world();
+    if (!w.hasRelay) { await w.close(); return; }
+    try {
+      const phone = device('Phone');
+      const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+      await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+      let at = Math.floor(Date.now() / 1000);
+      const publish = async (e: { kind: number; tags: string[][] }) => {
+        const signed = await D.signEvent(phone, held, { pubkey: held.npub, created_at: ++at, content: '', ...e }, w.send);
+        await new Promise<void>((ok, no) => { const ws = new WebSocket(w.relay); ws.onopen = () => ws.send(JSON.stringify(['EVENT', signed])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; });
+      };
+      // Nothing published: the alert, first on the page, and after a password it says how to publish it.
+      for (const dark of [false, true]) {
+        const { page, errors } = await signIn(w, dark);
+        await page.waitForSelector('#pointeralert');
+        assert.equal(await page.textContent('#pointertitle'), 'Sites can’t find you by name yet');
+        assert.ok(await page.evaluate(() => { const a = document.getElementById('pointeralert')!; return !!(a.compareDocumentPosition(document.querySelector('.hello')!) & Node.DOCUMENT_POSITION_FOLLOWING); }), 'the alert comes first');
+        assert.equal(await page.locator('#publishpointer').count(), 0, 'no signer after a password');
+        assert.match((await page.textContent('#pointerline'))!, /sign in here by scanning with your phone, or publish it from Marble/);
+        assert.equal(await page.locator('#pointerscan').count(), 1);
+        await shot(page, `account-missing${dark ? '-dark' : ''}`);
+        assert.deepEqual(errors, []);
+        await page.context().close();
+      }
+      // Another page named.
+      await publish({ kind: 10046, tags: [['nostrconnect_url', 'https://other.example/#connect=<nostrconnect>']] });
+      for (const dark of [false, true]) {
+        const { page, errors } = await signIn(w, dark);
+        await page.waitForSelector('#pointeralert');
+        assert.equal(await page.textContent('#pointertitle'), 'Sites send you to other.example, not here');
+        await shot(page, `account-other${dark ? '-dark' : ''}`);
+        assert.deepEqual(errors, []);
+        await page.context().close();
+      }
+      // This page named: no alert, and the card lower down.
+      await publish({ kind: 10046, tags: [['nostrconnect_url', w.base + '/#connect=<nostrconnect>']] });
+      const { page, errors } = await signIn(w);
+      await page.waitForSelector('#pointersub');
+      assert.match((await page.textContent('#pointersub'))!, new RegExp(`names ${w.base.replace(/[.]/g, '\\.')} as its sign-in page`));
+      assert.equal(await page.locator('#pointeralert').count(), 0); assert.equal(await page.locator('#pointernote').count(), 0);
+      await shot(page, 'account-here');
+      assert.deepEqual(errors, []);
+    } finally { await w.close(); }
+  } finally { await browser.close(); }
 });
 
 test('signing in to the account page the way any site does: a signed challenge, with or without the box holding the account', async () => {

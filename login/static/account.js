@@ -193,38 +193,99 @@
     });
   }
   const pageUrlOk = () => location.protocol === 'https:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
-  function pointerCard(found, signer, relays) {
+  // What the account says about its sign-in page, for the account page: `found` from findPointer, the signer a
+  // scan left behind (kept while there is something for it to sign), and the relays. Null when signed out.
+  let ptr = null;
+  const dropPointer = () => { ptr?.signer?.close().catch(() => {}); ptr = null; };
+  const mineHere = (found) => found.state === 'found' && found.url === location.origin;
+  // A scan's signer is kept until sign-out, so the page can publish (or remove) it from the account page too.
+  const holdPointer = (npub, found, signer, relays) => {
+    if (ptr?.signer && ptr.signer !== signer) ptr.signer.close().catch(() => {});
+    ptr = { npub, found, signer, relays };
+  };
+  const NO_SIGNER = 'To publish it, sign out and sign in here by scanning with your phone, or publish it from Marble.';
+  // The parts both the card and the alert use: the sub line, the Publish (or Remove) button, and a status line.
+  // `after(text)` runs when it is done; without it the line says so and the button goes.
+  function pointerParts(found, signer, relays, after) {
     const line = el('p', { className: 'small dim', role: 'status', id: 'pointerline' });
-    const there = found.state === 'found', mine = there && found.url === location.origin;
-    const sub = el('div', { className: 'sub', id: 'pointersub' }, there
-      ? `Your account names ${found.url} as its sign-in page. Marble sends you there when you type your name.`
-      : found.state === 'unknown' ? 'This page could not reach its relays to see whether your account names a sign-in page.'
-      : found.state === 'removed' ? 'Your account’s sign-in page was removed. Publishing one names this page.'
-      : found.state === 'bad' ? 'Your account names a sign-in page that cannot be used. Publishing one names this page instead.'
-      : 'Your account does not name a sign-in page yet, so Marble cannot find you by your name. Publishing one names this page.');
+    const there = found.state === 'found', mine = mineHere(found);
     // Signs both kinds (or both removals), each on the phone, and sends them to the page's relays.
-    const signAndSend = async (button, events, done) => {
+    const signAndSend = async (button, events, now, done) => {
+      const hold = button.closest('.card'); hold?.setAttribute('data-busy', '1');
       button.disabled = true; line.textContent = 'Asking your phone to sign it…';
       try {
         const ok = await Promise.race([P.publish(signer, relays, events, sendEvent), new Promise((_, no) => setTimeout(() => no(new Error('slow')), 90000))]);
-        if (ok) { line.textContent = done; button.remove(); return; }
+        if (ok) {
+          if (ptr) ptr.found = now;
+          hold?.removeAttribute('data-busy');
+          if (after) return after(done);
+          line.textContent = done; button.remove(); return;
+        }
         line.textContent = 'Your phone signed it, but no relay took it. Try again.';
       } catch { line.textContent = 'Your phone did not sign it. Is Marble still open there?'; }
+      hold?.removeAttribute('data-busy');
       button.disabled = false;
     };
     let go = null, off = null;
     if (signer && pageUrlOk()) {
       if (!mine) {
         go = el('button', { className: 'btn go', id: 'publishpointer', type: 'button' }, there ? `Name ${location.host} instead` : 'Publish it');
-        go.onclick = () => signAndSend(go, P.pointerEvents(location.origin, Math.floor(Date.now() / 1000)), `Published. Your account names ${location.origin} as its sign-in page.`);
+        go.onclick = () => signAndSend(go, P.pointerEvents(location.origin, Math.floor(Date.now() / 1000)), { state: 'found', url: location.origin, origin: location.origin },
+          `Published. Your account names ${location.origin} as its sign-in page.`);
       } else {
         off = el('button', { className: 'btn', id: 'removepointer', type: 'button' }, 'Remove it');
-        off.onclick = () => { if (confirm('Remove your sign-in page? Marble will no longer find you by your name.')) signAndSend(off, P.removalEvents(Math.floor(Date.now() / 1000)), 'Removed. Your account names no sign-in page now.'); };
+        off.onclick = () => { if (confirm('Remove your sign-in page? Marble will no longer find you by your name.')) signAndSend(off, P.removalEvents(Math.floor(Date.now() / 1000)), { state: 'removed' }, 'Removed. Your account names no sign-in page now.'); };
       }
-    } else if (!there) line.textContent = signer
-      ? 'This page is not on https, so it cannot be named.'
-      : 'Publishing it needs a signature from one of your devices. This page can ask for one only right after you sign in by scanning, so publish it from Marble, or sign in here by scanning.';
+    } else if (!mine) line.textContent = signer ? 'This page is not on https, so it cannot be named.' : NO_SIGNER;
+    return { line, go, off };
+  }
+  function pointerCard(found, signer, relays, after) {
+    const there = found.state === 'found';
+    const sub = el('div', { className: 'sub', id: 'pointersub' }, there
+      ? `Your account names ${found.url} as its sign-in page. Marble sends you there when you type your name.`
+      : found.state === 'unknown' ? 'This page could not reach its relays to see whether your account names a sign-in page.'
+      : found.state === 'removed' ? 'Your account’s sign-in page was removed. Publishing one names this page.'
+      : found.state === 'bad' ? 'Your account names a sign-in page that cannot be used. Publishing one names this page instead.'
+      : 'Your account does not name a sign-in page yet, so Marble cannot find you by your name. Publishing one names this page.');
+    const { line, go, off } = pointerParts(found, signer, relays, after);
     return card(el('h2', {}, 'Your sign-in page'), sub, go, off, line);
+  }
+  // The same thing, at the top of the account page, when sites cannot find this page by your name. Nothing
+  // when the account names this page, and a quiet note when the relays could not be asked.
+  function pointerAlert() {
+    if (!ptr || ptr.npub !== me.npub || ptr.found.state === 'checking' || mineHere(ptr.found)) return null;
+    const { found, signer, relays } = ptr;
+    if (found.state === 'unknown') {
+      const again = el('button', { className: 'go-link linkish', id: 'pointeragain', style: 'margin:0', on: { click: () => checkPointer(true) } }, 'Check again');
+      return el('div', { className: 'notice quiet', id: 'pointernote', role: 'status' },
+        'This page could not check whether sites can find you by your name. ', again);
+    }
+    const other = found.state === 'found';
+    const host = other ? found.url.replace(/^https?:\/\//, '') : '';
+    const { line, go } = pointerParts(found, signer, relays, (done) => { flash = done; draw(); });
+    if (go && other) go.textContent = 'Name this page instead';
+    const scan = !signer ? el('button', { className: 'btn', id: 'pointerscan', type: 'button', on: { click: async () => { await api('logout').catch(() => {}); showLogin(); } } }, 'Sign in again by scanning') : null;
+    return el('div', { className: 'card alert', id: 'pointeralert', role: 'alert' }, shield(false),
+      el('div', { className: 'grow', style: 'display:flex;flex-direction:column;gap:8px' },
+        el('h2', { id: 'pointertitle' }, other ? `Sites send you to ${host}, not here` : 'Sites can’t find you by name yet'),
+        el('div', { className: 'sub', id: 'pointersub' }, other
+          ? `When you type your name on a site like Marble, it sends you to ${host} to sign in. Name this page instead to be sent here.`
+          : found.state === 'bad' ? 'Your account names a sign-in page that cannot be used. Publish this page so a site like Marble can send you here when you type your name.'
+          : 'Publish this page as your sign-in page, so a site like Marble can send you here when you type your name.'),
+        // Without a signer the line says how to publish it, before the button; with one it says how it went, after.
+        signer ? null : line, go || scan ? el('div', { className: 'with-note' }, go, scan) : null, signer ? line : null));
+  }
+  // Asks the relays once per sign-in (or again on a click), and redraws when they answer.
+  function checkPointer(again) {
+    if (!me || (!again && ptr?.npub === me.npub)) return;
+    const npub = me.npub, relays = me.relays ?? [];
+    holdPointer(npub, { state: 'checking' }, again ? ptr?.signer ?? null : null, relays);
+    if (again) draw();
+    findPointer(npub, relays).then((found) => {
+      if (ptr?.npub !== npub) return;
+      holdPointer(npub, found, ptr.signer, relays);
+      if (!document.querySelector('[data-busy]') && !document.querySelector('input:focus') && document.querySelector('.shell')) draw();
+    });
   }
 
   // ---- After signing in -------------------------------------------------------------------------------
@@ -239,7 +300,9 @@
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
     const c = pending();
     const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c ? findProfile(r.npub, r.relays ?? []) : null]);
-    if (!c && (!signer || !['none', 'bad'].includes(found.state))) { close(); return showAccount(); }
+    // The account page says, at the top, what is left to do about the sign-in page, and keeps the signer for it.
+    holdPointer(r.npub, found, signer, r.relays ?? []);
+    if (!c) return showAccount();
     showFinish(c, found, signer, r.relays ?? [], profile);
   }
 
@@ -303,7 +366,7 @@
     const parts = [];
     if (c) parts.push(connectCard(c, profile));
     if (found.state !== 'found' || signer) parts.push(pointerCard(found, signer, relays));
-    parts.push(el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => { signer?.close().catch(() => {}); showAccount(); } } }, 'Go to your account'));
+    parts.push(el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => showAccount() } }, 'Go to your account'));
     app.replaceChildren(el('div', { className: 'signin' },
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'You are signed in'), el('div', { className: 'dim' }, location.host)), ...parts));
   }
@@ -387,7 +450,7 @@
   // ---- Signing in ------------------------------------------------------------------------------------
 
   async function showLogin(message) {
-    leave(); stopTimers(); section = 'home'; flash = null;
+    leave(); stopTimers(); section = 'home'; flash = null; dropPointer();
     const scan = el('div', { className: 'kk', id: 'scan' });
     const err = el('p', { className: 'err small', role: 'alert', hidden: !message }, message ?? '');
     const user = el('input', { className: 'field', type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, required: true });
@@ -511,7 +574,7 @@
     const r = await api('me').catch(() => ({ error: 'no_box' }));
     if (!r.ok) return showLogin(r.error === 'login' ? undefined : say(r.error));
     if (r.held === false) return showNew(r);
-    me = r; draw();
+    me = r; checkPointer(); draw();
     every(15000, async () => {
       const n = await api('me').catch(() => null);
       if (n && n.ok) { me = n; if (!document.querySelector('[data-busy]') && !document.querySelector('input:focus')) draw(); }
@@ -543,6 +606,7 @@
         const mine = devices.map((d) => d.name), names = [...mine, 'Box'];
         const sites = me.grants.map((g) => g.name.replace(/^https?:\/\//, ''));
         return [
+          pointerAlert(),
           el('div', { className: 'hello' }, el('div', { className: 'avatar', ariaHidden: 'true' }, (me.username ?? 'k').charAt(0).toUpperCase()),
             el('div', {}, el('h1', {}, me.username ? `Welcome, ${cap(me.username)}` : 'Welcome'), el('div', { className: 'mono dim', id: 'npub' }, me.npubText))),
           el('div', { className: 'card statusline' }, shield(fine),
@@ -555,6 +619,7 @@
               link('See what is signed in', 'sites')),
             card(el('h2', {}, 'Security'), el('div', { className: 'sub' }, me.username ? 'Password set. It signs you in here fully. Forming the whole key stays in the app.' : 'No password. You sign in here with a device.'), link('Password and sign-in', 'security')),
             card(el('h2', {}, 'Backup'), el('div', { className: 'sub' }, 'No backup yet. If every device is lost, your box alone cannot bring the account back.'), link('Set up a backup', 'backup'))),
+          ptr?.npub === me.npub && mineHere(ptr.found) ? pointerCard(ptr.found, ptr.signer, ptr.relays, (done) => { flash = done; draw(); }) : null,
         ];
       },
       devices: () => [

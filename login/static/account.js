@@ -33,6 +33,7 @@
   }[code] ?? `That did not work (${code}).`);
   const HOW = { password: 'a password', passkey: 'a passkey', scan: 'a device' };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const count = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
   let timers = [];
   const every = (ms, f) => { const t = setInterval(f, ms); timers.push(t); return t; };
   const stopTimers = () => { timers.forEach(clearInterval); timers = []; };
@@ -203,7 +204,58 @@
     if (ptr?.signer && ptr.signer !== signer) ptr.signer.close().catch(() => {});
     ptr = { npub, found, signer, relays };
   };
-  const NO_SIGNER = 'To publish it, sign out and sign in here by scanning with your phone, or publish it from Marble.';
+  const NO_SIGNER = 'Your account page can ask your phone to publish it, or you can publish it from Marble.';
+  // Asking a device to publish it (a `pointer` note, SPEC 11.1) when no scan left a signer here. The box puts
+  // in its own login page address. `phase` is waiting, checking, declined, failed, gone, or no_page.
+  let ptrAsk = null;
+  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
+  async function askPhone() {
+    const npub = me.npub;
+    ptrAsk = { phase: 'sending' }; draw();
+    const r = await api('note_put', { kind: 'pointer' }).catch(() => ({ error: 'no_box' }));
+    if (r.error === 'login') return showLogin(say('login'));
+    if (!r.ok) { ptrAsk = { phase: r.error === 'no_login_page' ? 'no_page' : 'error', error: r.error }; return draw(); }
+    const ask = ptrAsk = { phase: 'waiting', note: r.note, url: r.url };
+    draw();
+    const t = every(2000, async () => {
+      if (ptrAsk !== ask) return clearInterval(t);
+      const g = await api('note_get', { note: ask.note }).catch(() => null);
+      if (ptrAsk !== ask) return clearInterval(t);
+      if (g && g.error === 'login') { clearInterval(t); return showLogin(say('login')); }
+      if (!g || !g.ok || g.state === 'waiting') return;
+      clearInterval(t);
+      if (g.state !== 'done') { ptrAsk = { phase: 'gone' }; return draw(); }
+      if (g.result === 'declined') { ptrAsk = { phase: 'declined' }; return draw(); }
+      if (g.result !== 'ok') { ptrAsk = { phase: 'failed' }; return draw(); }
+      // The phone published it: ask the relays again, and say what they show now.
+      ptrAsk = { phase: 'checking', url: ask.url }; draw();
+      const found = await findPointer(npub, me.relays ?? []);
+      if (ptrAsk?.phase !== 'checking' || me?.npub !== npub) return;
+      holdPointer(npub, found, ptr?.npub === npub ? ptr.signer : null, me.relays ?? []);
+      ptrAsk = null;
+      flash = found.state === 'found' && found.url === ask.url ? `Published. Sites send you to ${hostOf(ask.url)}.`
+        : 'Your phone published it, but this page’s relays do not show it yet. Check again in a minute.';
+      draw();
+    });
+  }
+  function phoneParts() {
+    const line = el('p', { className: 'small dim', role: 'status', id: 'pointerline' });
+    const a = ptrAsk;
+    if (a && ['sending', 'waiting', 'checking'].includes(a.phase)) {
+      line.textContent = a.phase === 'checking' ? 'Your phone published it. Checking…' : 'Approve on your phone…';
+      const cancel = a.phase === 'waiting' ? el('button', { className: 'go-link linkish', id: 'pointercancel', type: 'button', style: 'margin:0', on: { click: () => { ptrAsk = null; draw(); } } }, 'Cancel') : null;
+      return [el('div', { className: 'with-note' }, line, cancel)];
+    }
+    const go = el('button', { className: 'btn go', id: 'pointerphone', type: 'button', on: { click: () => askPhone() } }, 'Publish it from my phone');
+    line.textContent = !a ? 'Your phone asks you first, then signs it.'
+      : a.phase === 'declined' ? 'Your phone said no.'
+      : a.phase === 'gone' ? 'No device answered in time. Is one of them online?'
+      : a.phase === 'failed' ? 'Your phone could not publish it. Try again.'
+      : a.phase === 'no_page' ? 'This box has no login page address set yet. Its owner sets it on the box’s admin page.'
+      : say(a.error);
+    if (a?.phase === 'declined' || a?.phase === 'gone' || a?.phase === 'failed' || a?.phase === 'no_page') line.className = 'small err';
+    return [el('div', { className: 'with-note' }, a?.phase === 'no_page' ? null : go, line)];
+  }
   // The parts both the card and the alert use: the sub line, the Publish (or Remove) button, and a status line.
   // `after(text)` runs when it is done; without it the line says so and the button goes.
   function pointerParts(found, signer, relays, after) {
@@ -262,18 +314,17 @@
     }
     const other = found.state === 'found';
     const host = other ? found.url.replace(/^https?:\/\//, '') : '';
-    const { line, go } = pointerParts(found, signer, relays, (done) => { flash = done; draw(); });
+    // A scan left a signer: this page signs it with that. Otherwise it asks a device to (a `pointer` note).
+    const { line, go } = signer ? pointerParts(found, signer, relays, (done) => { flash = done; draw(); }) : {};
     if (go && other) go.textContent = 'Name this page instead';
-    const scan = !signer ? el('button', { className: 'btn', id: 'pointerscan', type: 'button', on: { click: async () => { await api('logout').catch(() => {}); showLogin(); } } }, 'Sign in again by scanning') : null;
     return el('div', { className: 'card alert', id: 'pointeralert', role: 'alert' }, shield(false),
       el('div', { className: 'grow', style: 'display:flex;flex-direction:column;gap:8px' },
         el('h2', { id: 'pointertitle' }, other ? `Sites send you to ${host}, not here` : 'Sites can’t find you by name yet'),
         el('div', { className: 'sub', id: 'pointersub' }, other
-          ? `When you type your name on a site like Marble, it sends you to ${host} to sign in. Name this page instead to be sent here.`
+          ? `When you type your name on a site like Marble, it sends you to ${host} to sign in, not here.`
           : found.state === 'bad' ? 'Your account names a sign-in page that cannot be used. Publish this page so a site like Marble can send you here when you type your name.'
           : 'Publish this page as your sign-in page, so a site like Marble can send you here when you type your name.'),
-        // Without a signer the line says how to publish it, before the button; with one it says how it went, after.
-        signer ? null : line, go || scan ? el('div', { className: 'with-note' }, go, scan) : null, signer ? line : null));
+        signer ? [go ? el('div', { className: 'with-note' }, go) : null, line] : phoneParts()));
   }
   // Asks the relays once per sign-in (or again on a click), and redraws when they answer.
   function checkPointer(again) {
@@ -450,7 +501,7 @@
   // ---- Signing in ------------------------------------------------------------------------------------
 
   async function showLogin(message) {
-    leave(); stopTimers(); section = 'home'; flash = null; dropPointer();
+    leave(); stopTimers(); section = 'home'; flash = null; dropPointer(); ptrAsk = null;
     const scan = el('div', { className: 'kk', id: 'scan' });
     const err = el('p', { className: 'err small', role: 'alert', hidden: !message }, message ?? '');
     const user = el('input', { className: 'field', type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, required: true });
@@ -600,25 +651,37 @@
     const name = me.username ?? me.npubText.slice(0, 12) + '…';
     const sections = {
       home: () => {
-        const fine = !blocked.length && can.length >= 2;
+        // What can sign: any two pieces do. The account outlives losing one of them only with three or more,
+        // say a second device, or another box (a backup box) next to this one.
+        const boxes = me.devices.filter((d) => d.kind === 'box' && !d.blocked), others = boxes.filter((d) => d.key !== me.boxKey);
+        const signers = can.length + boxes.length, backedUp = signers >= 3;
+        const alert = pointerAlert(), alertUp = alert?.id === 'pointeralert';
+        const fine = !blocked.length && backedUp;
         const line = blocked.length ? `${blocked.length === 1 ? '1 device is' : `${blocked.length} devices are`} blocked.`
-          : can.length < 2 ? 'You have one device. If it is lost, the account goes with it.' : `${can.length} devices can sign, nothing is blocked.`;
-        const mine = devices.map((d) => d.name), names = [...mine, 'Box'];
+          : !backedUp ? (can.length === 1 ? `You have one device. If ${can[0].name} is lost, the account goes with it.` : 'Your box alone cannot sign. Add a device.')
+          : `${count(can.length, 'device')}${boxes.length ? ` and ${count(boxes.length, 'box', 'boxes')}` : ''} can sign, nothing is blocked.`;
+        const mine = devices.map((d) => d.name), names = [...mine, ...others.map((d) => d.name), 'Box'];
         const sites = me.grants.map((g) => g.name.replace(/^https?:\/\//, ''));
+        const backup = [can.length >= 2 ? (can.length === 2 ? 'a second device' : `${can.length - 1} more devices`) : null,
+          others.length ? (others.length === 1 ? `another box (${others[0].name})` : `${others.length} more boxes`) : null].filter(Boolean);
         return [
-          pointerAlert(),
+          alert,
+          signInCard(),
           el('div', { className: 'hello' }, el('div', { className: 'avatar', ariaHidden: 'true' }, (me.username ?? 'k').charAt(0).toUpperCase()),
             el('div', {}, el('h1', {}, me.username ? `Welcome, ${cap(me.username)}` : 'Welcome'), el('div', { className: 'mono dim', id: 'npub' }, me.npubText))),
-          el('div', { className: 'card statusline' }, shield(fine),
+          // With an alert up, the alert is the status: no line here that could say otherwise.
+          alertUp ? null : el('div', { className: 'card statusline', id: 'statusline' }, shield(fine),
             el('div', { className: 'grow' }, el('strong', {}, fine ? 'Everything looks fine. ' : 'One thing to look at. '), line)),
           el('div', { className: 'grid2' },
-            card(el('h2', {}, 'Devices'), el('div', { className: 'sub' }, `${mine.length ? mine.join(', ') + ' and your box' : 'Your box'}. Any two of them sign together.`),
+            card(el('h2', {}, 'Devices'), el('div', { className: 'sub' }, `${[...mine, ...others.map((d) => d.name)].length ? [...mine, ...others.map((d) => d.name)].join(', ') + ' and your box' : 'Your box'}. Any two of them sign together.`),
               el('div', { className: 'chips' }, names.map((n) => el('span', { className: 'chip' }, n))), link('Manage devices', 'devices')),
             card(el('h2', {}, 'Sites and apps'), el('div', { className: 'sub' }, me.grants.length ? `${me.grants.length} ${me.grants.length === 1 ? 'is' : 'are'} signed in with your account. Revoke any of them here, from anywhere.` : 'Nothing is signed in with your account.'),
               sites.length ? el('div', { className: 'chips' }, sites.slice(0, 2).map((n) => el('span', { className: 'chip' }, n)), sites.length > 2 ? el('span', { className: 'chip' }, `+${sites.length - 2}`) : null) : null,
               link('See what is signed in', 'sites')),
             card(el('h2', {}, 'Security'), el('div', { className: 'sub' }, me.username ? 'Password set. It signs you in here fully. Forming the whole key stays in the app.' : 'No password. You sign in here with a device.'), link('Password and sign-in', 'security')),
-            card(el('h2', {}, 'Backup'), el('div', { className: 'sub' }, 'No backup yet. If every device is lost, your box alone cannot bring the account back.'), link('Set up a backup', 'backup'))),
+            card(el('h2', {}, 'Backup'), el('div', { className: 'sub', id: 'backupsub' }, backedUp
+              ? `Backed up by ${backup.join(' and ')}. If one device is lost, the others still sign.`
+              : 'No backup yet. If your only device is lost, your box alone cannot bring the account back.'), link(backedUp ? 'See your devices' : 'Set up a backup', backedUp ? 'devices' : 'backup'))),
           ptr?.npub === me.npub && mineHere(ptr.found) ? pointerCard(ptr.found, ptr.signer, ptr.relays, (done) => { flash = done; draw(); }) : null,
         ];
       },
@@ -652,13 +715,7 @@
               e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),
           el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${g.name.replace(/^https?:\/\//, '')} is revoked.`) } }, 'Revoke')))
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
-        card(el('h2', {}, 'Sign in to a site'), el('div', { className: 'sub' }, 'No extension needed. The site gets access of its own, which you can revoke above. It works while one of your devices can answer.'),
-          el('div', { className: 'grid2', style: 'gap:16px' },
-            el('div', { className: 'subcard' }, el('h3', {}, 'The site shows a code'), el('div', { className: 'detail' }, 'Paste its nostrconnect:// code.'),
-              noteForm({ kind: 'nostrconnect', label: 'nostrconnect code', placeholder: 'nostrconnect://…', button: 'Send to phone', stacked: true, waiting: 'Waiting for one of your devices…',
-                check: (t) => t.trim().startsWith('nostrconnect://') ? null : 'That code should start with nostrconnect://', done: () => el('div', { className: 'sub' }, 'Done. Go back to the site: it is signed in.') })),
-            el('div', { className: 'subcard' }, el('h3', {}, 'The site wants a link'), el('div', { className: 'detail' }, 'One of your devices makes a bunker:// link for you to paste there.'),
-              bunkerBox())))],
+        link('Sign in to another app', 'home')],
       security: () => [
         head('Security', 'How you get in to this page, and what still asks a device.'),
         card(el('h2', {}, 'Password'), el('div', { className: 'sub' }, me.username ? ['Your username is ', el('strong', {}, me.username), '. Typing a new password here replaces the old one.'] : 'No password is set. Setting one lets you sign in here from any browser.'), passwordForm()),
@@ -729,10 +786,22 @@
     box.append(...(input ? (o.stacked ? [input, controls] : [el('div', { className: 'inline' }, input, btn), line]) : [controls]));
     return box;
   }
+  // Job one on the page: another app signs in as you, by a bunker:// link from a device or a pasted nostrconnect:// code.
+  function signInCard() {
+    const c = card(el('h2', {}, 'Sign in to an app'), el('div', { className: 'sub' }, 'No extension needed. The app gets access of its own, which you can revoke under Sites and apps. It works while one of your devices can answer.'),
+      el('div', { className: 'grid2', style: 'gap:16px' },
+        el('div', { className: 'subcard' }, el('h3', {}, 'App asks for a bunker:// link'), el('div', { className: 'detail' }, 'One of your devices makes a link for you to paste into the app’s bunker or remote signer box.'),
+          bunkerBox()),
+        el('div', { className: 'subcard' }, el('h3', {}, 'App shows a nostrconnect:// code'), el('div', { className: 'detail' }, 'Paste its code here.'),
+          noteForm({ kind: 'nostrconnect', label: 'nostrconnect code', placeholder: 'nostrconnect://…', button: 'Sign in', plain: true, stacked: true, waiting: 'Waiting for one of your devices…',
+            check: (t) => t.trim().startsWith('nostrconnect://') ? null : 'That code should start with nostrconnect://', done: () => el('div', { className: 'sub' }, 'Done. Go back to the app: it is signed in.') }))));
+    c.id = 'signinapp';
+    return c;
+  }
   function bunkerBox() {
     const slot = el('div', { className: 'dashed', id: 'bunkerlink' }, 'bunker://… appears here');
     const copy = el('button', { className: 'btn', hidden: true, on: { click: async () => { await navigator.clipboard.writeText(slot.textContent); copy.textContent = 'Copied'; } } }, 'Copy');
-    const form = noteForm({ kind: 'bunker', keep: 900, button: 'Ask my phone for a link', plain: true, waiting: 'Waiting for one of your devices…',
+    const form = noteForm({ kind: 'bunker', keep: 900, button: 'Get a bunker link', waiting: 'Waiting for one of your devices…',
       done: (result) => { slot.textContent = result; slot.classList.add('has'); copy.hidden = false; return copy; } });
     return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, slot, form);
   }

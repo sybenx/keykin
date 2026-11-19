@@ -466,6 +466,14 @@ it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 
   - All of this runs on kind 10046, and on kind 30078 too during the move (above).
   - If no relay answers, it does nothing this time.
   The account page's "Publish it" button stays as the fallback, and publishes both kinds during the move.
+- **Asked for from the account page (a `pointer` note).** A page signed in with a password or a passkey
+  has no signer of its own, so it leaves a note (section 11.6): `note_put { kind: "pointer" }`. The box
+  fills in the note's text with its own login page address (the admin setting, or `KEYKIN_LOGIN_URL`),
+  never anything the page sent, and returns it as `url` next to `note`. With no address set it refuses
+  with `no_login_page`. A device shows "Make <host> your sign-in page?" with Yes and No. On Yes it signs a
+  new pointer naming that origin (both kinds during the move), publishes it, and answers `note_done`
+  with `ok`; on No it answers `note_done` with `declined`. A No here is not `note_refuse`: it does not
+  end the page's session. The page then asks the relays again and says what they show.
 
 **Built (2026-11-19), kind 10046:** on the account page, with the rules in `login/static/pointer.js`
 (tested on their own and in the browser). The page asks its relays for both kinds at once, reads 10046
@@ -474,7 +482,10 @@ removed, and refuses a template as above (a refused one shows as a page that can
 Publish offered). When the pointer names this page, it sends the newest copy of each kind as it is to
 any of its relays that answered without it. "Publish it" signs both kinds (two signatures on the
 phone, no `relays` tag), and when the pointer names this page a "Remove it" button signs both
-removals. Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
+removals. After a password or a passkey, the alert's **Publish it from my phone** leaves a `pointer`
+note (built 2026-11-19 on the box and the page; `answerNotes` in `src/device.ts` answers it when given
+a `pointer` function, which the tests do but `keykin agent` does not yet; Marble on Android is being
+built against it in the Marble repo). Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
 command-line device has none; Marble's lives in the Marble repo. Marble Web, Discover and Tube read
 the pointer in their own repos.
 
@@ -810,7 +821,7 @@ happen differently:
 | The box does it at once | A device does it, with no prompt | A device asks Yes or No first |
 |---|---|---|
 | See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
-| Block and unblock a device | Become a site's signer (`nostrconnect` note) | |
+| Block and unblock a device | Become a site's signer (`nostrconnect` note) | Publish the sign-in-page pointer naming the box's login page (`pointer` note, section 11.1) |
 | Revoke a grant, or limit it to posting (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
 | Set, change or clear the password (`pw_set`, `pw_clear`) | | |
 | End its own session, or all page sessions | | |
@@ -837,10 +848,12 @@ Kotlin core are the test both sides use.
 - The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
   (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
   uses the main account, as before. `kind` is `invite` (the text is a new
-  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
-  `cycle` (no text).
+  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text),
+  `cycle` (no text) or `pointer` (no text: the box puts in its own login page address, section 11.1,
+  and refuses with `no_login_page` when it has none). A `pointer` note needs no more than a `bunker`
+  note does: any page session.
 - `{ op: "notes", account }` from a device returns the waiting ones, each
-  `{ id, kind, text, at, tap }`. `tap` is true only for `cycle`.
+  `{ id, kind, text, at, tap }`. `tap` is true for `cycle` and `pointer`.
 - `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
   the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
   such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the
@@ -853,11 +866,12 @@ Kotlin core are the test both sides use.
   the box (the page's calls get 20), so keep any proxy in front of it above that (60 seconds is
   usual). An older box answers `unknown_op`; a device then checks with `notes` on a timer.
 - The device does it and answers `{ op: "note_done", account, note, result }`. The result is
-  the join text for `invite`, the link for `bunker`, and `ok` for the others.
+  the join text for `invite`, the link for `bunker`, `ok` or `declined` for `pointer`, and `ok` for the others.
 - For `invite` and `cycle` the device sends the usual `add` or `cycle` with `"note": "<id>"`
   in place of the fingerprint. The box accepts that only while the note is waiting, and for
   `invite` only for the device the note names.
-- After a No, the device sends `{ op: "note_refuse", account, note }`.
+- After a No, the device sends `{ op: "note_refuse", account, note }`, which also ends the page session
+  that asked. For `pointer` a No is `note_done` with `declined` instead, and the session stays.
 - Notes last 10 minutes. If no device of the account is online, nothing happens: the public
   side has no piece and gets none.
 - A sign-in made this way is a grant (section 11.5) on the device that answered, and works

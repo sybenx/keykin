@@ -176,7 +176,15 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.waitForSelector('text=Welcome, Aaron');
     assert.match((await page.textContent('#npub'))!, /^npub1/);
     assert.match((await page.textContent('.top'))!, /aaron · signed in with a password/);
-    await page.waitForSelector('text=Everything looks fine.');
+    // Home: "Sign in to an app" first (under an alert, if there is one), and a status line only when no alert is up.
+    await page.waitForSelector('#signinapp');
+    assert.equal(await page.evaluate(() => { const m = document.querySelector('main')!; return Array.from(m.children).find((c) => !['pointeralert', 'pointernote', 'status'].includes(c.id))?.id; }), 'signinapp');
+    assert.equal(await page.textContent('#signinapp h2'), 'Sign in to an app');
+    await page.waitForFunction(() => !!document.querySelector('#pointeralert, #pointernote'));
+    if (await page.locator('#pointeralert').count()) assert.equal(await page.locator('#statusline').count(), 0, 'no status line under an alert');
+    else assert.match((await page.textContent('#statusline'))!, /^Everything looks fine\. 2 devices and 2 boxes can sign, nothing is blocked\.$/);
+    // Two devices and a backup box: backed up, by both.
+    assert.equal(await page.textContent('#backupsub'), 'Backed up by a second device and another box (Backup box). If one device is lost, the others still sign.');
     await shot('home');
 
     // Devices: block, see it refused, unblock from the page.
@@ -235,7 +243,10 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.click('button[aria-label="Revoke Amethyst"]');
     await page.waitForSelector('text=Amethyst is revoked.');
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);
-    await page.click('text=Ask my phone for a link');
+    // The card is on Home now, and the sites page links there.
+    assert.equal(await page.locator('#signinapp').count(), 0);
+    await page.click('text=Sign in to another app');
+    await page.click('text=Get a bunker link');
     assert.deepEqual(await answered(), ['gave a bunker link']);
     await page.waitForSelector('#bunkerlink.has');
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
@@ -243,7 +254,7 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await new Promise((r) => setTimeout(r, 16_000));
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
     assert.equal(await page.locator('#bunkerlink.has').count(), 1);
-    await page.click('nav >> text=Devices'); await page.click('nav >> text=Sites and apps');
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Home');
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
 
     // Security: change the password from the page; the new one signs in, the old one does not.
@@ -340,15 +351,20 @@ test('the account page says at the top when sites cannot find you by name, and n
         const signed = await D.signEvent(phone, held, { pubkey: held.npub, created_at: ++at, content: '', ...e }, w.send);
         await new Promise<void>((ok, no) => { const ws = new WebSocket(w.relay); ws.onopen = () => ws.send(JSON.stringify(['EVENT', signed])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; });
       };
-      // Nothing published: the alert, first on the page, and after a password it says how to publish it.
+      // Nothing published: the alert, first on the page, then "Sign in to an app", and no status line. After a
+      // password there is no signer here, so the alert asks the phone instead.
       for (const dark of [false, true]) {
         const { page, errors } = await signIn(w, dark);
         await page.waitForSelector('#pointeralert');
         assert.equal(await page.textContent('#pointertitle'), 'Sites can’t find you by name yet');
-        assert.ok(await page.evaluate(() => { const a = document.getElementById('pointeralert')!; return !!(a.compareDocumentPosition(document.querySelector('.hello')!) & Node.DOCUMENT_POSITION_FOLLOWING); }), 'the alert comes first');
+        assert.deepEqual(await page.evaluate(() => Array.from(document.querySelector('main')!.children).slice(0, 3).map((c) => c.id || c.className)), ['pointeralert', 'signinapp', 'hello']);
+        assert.equal(await page.locator('#statusline').count(), 0, 'no status line while an alert shows');
         assert.equal(await page.locator('#publishpointer').count(), 0, 'no signer after a password');
-        assert.match((await page.textContent('#pointerline'))!, /sign in here by scanning with your phone, or publish it from Marble/);
-        assert.equal(await page.locator('#pointerscan').count(), 1);
+        assert.equal(await page.textContent('#pointerphone'), 'Publish it from my phone');
+        assert.equal(await page.textContent('#pointerline'), 'Your phone asks you first, then signs it.');
+        assert.equal(await page.locator('#pointerscan').count(), 0);
+        // One device and the box: no backup, and the box alone cannot bring the account back.
+        assert.match((await page.textContent('#backupsub'))!, /^No backup yet/);
         await shot(page, `account-missing${dark ? '-dark' : ''}`);
         assert.deepEqual(errors, []);
         await page.context().close();
@@ -373,6 +389,147 @@ test('the account page says at the top when sites cannot find you by name, and n
       assert.deepEqual(errors, []);
     } finally { await w.close(); }
   } finally { await browser.close(); }
+});
+
+test('the account page asks the phone to publish the sign-in page after a password: no address, No, no answer, Cancel, Yes', { skip: !exe && 'no Chromium found', timeout: 120_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const w = await world();
+  if (!w.hasRelay) { await w.close(); return; }
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = process.env.KEYKIN_SHOTS;
+  const shot = async (page: any, name: string) => { if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: join(shots, name + '.png'), fullPage: true }); } };
+  const P: any = (() => { const g: any = {}; new Function('globalThis', readFileSync(join(import.meta.dirname, '../login/static/pointer.js'), 'utf8'))(g); return g.KeykinPointer; })();
+  try {
+    const phone = device('Pixel 9a');
+    const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    let at = Math.floor(Date.now() / 1000);
+    const toRelay = (signed: any) => new Promise<void>((ok, no) => { const ws = new WebSocket(w.relay); ws.onopen = () => ws.send(JSON.stringify(['EVENT', signed])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; });
+    // The phone, somewhere else: asks Yes or No, then signs both kinds and sends them to the relay.
+    const taps: string[] = [], named: string[] = [];
+    const can = (yes: boolean) => ({ addr: w.base, tap: async (t: string) => { taps.push(t); return yes; }, pointer: async (origin: string) => {
+      named.push(origin);
+      for (const e of P.pointerEvents(origin, ++at)) await toRelay(await D.signEvent(phone, held, { pubkey: held.npub, ...e }, w.send));
+      return true;
+    } });
+    const answered = async (yes: boolean) => { for (let k = 0; k < 40; k++) { const did = await D.answerNotes({ ...phone, fp: undefined }, held, w.send, can(yes)); if (did.length) return did; await new Promise((r) => setTimeout(r, 150)); } return []; };
+
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 860 } })).newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    const signIn = async () => {
+      await page.goto(w.base + '/');
+      await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+      await page.click('#pwgo');
+      await page.waitForSelector('#pointerphone');
+    };
+    // The box has no login page address yet: it refuses, and the page says why.
+    await signIn();
+    await page.click('#pointerphone');
+    await page.waitForSelector('text=This box has no login page address set yet');
+    assert.equal(await page.locator('#pointerphone').count(), 0);
+    await shot(page, 'phone-no-address');
+
+    // Now it has one. (A test page is on http, which the admin page would not take, so it is set here directly.)
+    w.box.box.fixedLogin = w.base;
+    await page.reload(); await page.waitForSelector('#pointerphone');
+    await page.click('#pointerphone');
+    await page.waitForSelector('#pointercancel');
+    assert.equal(await page.textContent('#pointerline'), 'Approve on your phone…');
+    await shot(page, 'phone-waiting');
+    // At a phone's width, dark: nothing scrolls sideways.
+    await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme: 'dark' });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'no sideways scroll on a phone');
+    await shot(page, 'phone-waiting-narrow-dark');
+    await page.emulateMedia({ colorScheme: 'light' }); await shot(page, 'phone-waiting-narrow');
+    await page.setViewportSize({ width: 1280, height: 860 }); await page.emulateMedia({ colorScheme: 'dark' }); await shot(page, 'phone-waiting-dark');
+    await page.emulateMedia({ colorScheme: 'light' });
+    // The page redraws every 15 seconds; the waiting state stays.
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Home');
+    await page.waitForSelector('text=Approve on your phone…');
+    // The phone said No.
+    assert.deepEqual(await answered(false), ['said No to the sign-in page']);
+    assert.deepEqual(taps, [`Make ${new URL(w.base).host} your sign-in page?`]);
+    await page.waitForSelector('text=Your phone said no.');
+    assert.equal(await page.locator('#pointerphone').count(), 1, 'it can be asked again');
+    await shot(page, 'phone-declined');
+
+    // No answer in the note's time: the box says the note is gone.
+    await page.route('**/api', async (r) => {
+      if (JSON.parse(r.request().postData() ?? '{}').call === 'note_get') return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, state: 'gone' }) });
+      return r.fallback();
+    });
+    await page.click('#pointerphone');
+    await page.waitForSelector('text=No device answered in time. Is one of them online?');
+    await page.unroute('**/api');
+    await shot(page, 'phone-gone');
+
+    // Cancel: the page stops waiting and offers the button again.
+    await page.click('#pointerphone');
+    await page.waitForSelector('#pointercancel');
+    await page.click('#pointercancel');
+    await page.waitForSelector('#pointerphone');
+    assert.equal(await page.textContent('#pointerline'), 'Your phone asks you first, then signs it.');
+
+    // Yes: the phone publishes it naming the box's address, and the page checks again and says so.
+    await page.click('#pointerphone');
+    await page.waitForSelector('#pointercancel');
+    const did = await answered(true);
+    assert.ok(did.includes(`published ${w.base} as the sign-in page`), String(did));
+    assert.ok(named.every((o) => o === w.base));
+    await page.waitForSelector('#status');
+    assert.equal(await page.textContent('#status'), `Published. Sites send you to ${new URL(w.base).host}.`);
+    assert.equal(await page.locator('#pointeralert').count(), 0);
+    // No alert now, so the status line is back, and it says what is left: one device.
+    assert.equal(await page.textContent('#statusline'), 'One thing to look at. You have one device. If Pixel 9a is lost, the account goes with it.');
+    await shot(page, 'phone-published');
+    await page.emulateMedia({ colorScheme: 'dark' }); await shot(page, 'phone-published-dark'); await page.emulateMedia({ colorScheme: 'light' });
+
+    // A backup box: two boxes and the phone. Losing the phone no longer loses the account.
+    const backup = newMemberKey();
+    await D.addMember(phone, held, { key: backup.key, name: 'Backup box', kind: 'box' }, w.send);
+    const { seal } = await import('../src/member.ts');
+    assert.equal((await w.send(await seal({ op: 'welcome', account: held.npub }, backup.sk, Math.floor(Date.now() / 1000)))).ok, true);
+    await page.reload(); await page.waitForSelector('#statusline');
+    assert.equal(await page.textContent('#statusline'), 'Everything looks fine. 1 device and 2 boxes can sign, nothing is blocked.');
+    assert.equal(await page.textContent('#backupsub'), 'Backed up by another box (Backup box). If one device is lost, the others still sign.');
+    assert.equal(await page.locator('text=goes with it').count(), 0);
+    await shot(page, 'home-backup-box');
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); await w.close(); }
+});
+
+test('a pointer note: the box puts in its own login page address, ignores any from the page, and refuses without one', async () => {
+  const now = () => Math.floor(Date.now() / 1000);
+  const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, url: 'http://box', log: () => {} });
+  try {
+    const send: D.Send = async (r) => box.box.handle(r as any, now());
+    const phone = device('Phone');
+    const held = await D.createWithBox(phone, D.readQr(box.qr()!), send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', send);
+    const { salt } = box.page.call({ call: 'pw_salt', username: 'aaron' }, now());
+    const session = box.page.call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('correct horse battery', salt) }, now()).session;
+    // No address set: refused, and nothing waits for a device.
+    assert.deepEqual(box.page.call({ call: 'note_put', session, kind: 'pointer' }, now()), { error: 'no_login_page' });
+    assert.deepEqual(box.page.call({ call: 'note_put', session, kind: 'pointer', text: 'https://evil.example' }, now()), { error: 'no_login_page' });
+    assert.deepEqual(await D.notes(phone, held, send), []);
+    // The admin's setting, and a password session is enough (the same tier as `bunker`).
+    box.box.setLoginPage('https://account.example');
+    const put = box.page.call({ call: 'note_put', session, kind: 'pointer', text: 'https://evil.example' }, now());
+    assert.equal(put.ok, true); assert.equal(put.url, 'https://account.example');
+    const [n] = await D.notes(phone, held, send);
+    assert.deepEqual([n.kind, n.text, n.tap], ['pointer', 'https://account.example', true]);
+    // KEYKIN_LOGIN_URL wins over the setting.
+    box.box.fixedLogin = 'https://fixed.example';
+    assert.equal(box.page.call({ call: 'note_put', session, kind: 'pointer' }, now()).url, 'https://fixed.example');
+    // The device asks, and answers `ok` or `declined`; the page reads that with note_get. A No leaves the session alone.
+    let yes = false;
+    const did = await D.answerNotes({ ...phone, fp: undefined }, held, send, { addr: 'http://box', tap: async () => (yes = !yes), pointer: async () => true });
+    assert.deepEqual(did, ['published https://account.example as the sign-in page', 'said No to the sign-in page']);
+    assert.deepEqual(box.page.call({ call: 'note_get', session, note: put.note }, now()), { ok: true, state: 'done', result: 'ok' });
+    assert.equal(box.page.call({ call: 'me', session }, now()).ok, true);
+    assert.match(box.page.call({ call: 'me', session }, now()).log.map((l: any) => l.text).join('\n'), /Publishing the sign-in page was asked for from the account page/);
+  } finally { await box.close(); }
 });
 
 test('signing in to the account page the way any site does: a signed challenge, with or without the box holding the account', async () => {

@@ -154,20 +154,24 @@ export class PageApi {
         case 'logout_all': for (const [h, s] of Object.entries(this.#all())) if (s.account === a.npub) this.#end(h); return { ok: true };
         case 'logout_browser': return this.#logoutBrowser(a.npub, hash, body.id, now);
         case 'note_put': {
-          if (!['nostrconnect', 'invite', 'bunker', 'cycle'].includes(body.kind) || typeof body.text !== 'string' || body.text.length > 4000) refuse('bad_request');
+          if (!['nostrconnect', 'invite', 'bunker', 'cycle', 'pointer'].includes(body.kind) || (body.kind !== 'pointer' && typeof body.text !== 'string') || String(body.text ?? '').length > 4000) refuse('bad_request');
+          // `pointer` (SPEC 11.1): a device publishes the sign-in-page pointer naming the box's own login page
+          // address. The text is that address, never anything from the request, so a page (or whoever got a
+          // session) cannot point the account somewhere else.
+          const text = body.kind === 'pointer' ? this.box.login ?? refuse('no_login_page') : body.text as string;
           // Where the request came from, as the login page saw it, and which key the person chose (SPEC 11.6).
           const from = body.from ?? null, as = body.as ?? 'main';
           if (body.kind === 'nostrconnect' && ((from !== null && (typeof from !== 'string' || from.length > 200 || !/^https?:\/\/[^\s/?#]+$/.test(from))) || (as !== 'main' && as !== 'site'))) refuse('bad_request');
           const list = this.#notes.get(a.npub) ?? [];
           if (list.length >= 10) refuse('too_many');
-          // Only the hard-to-undo one asks the person on a device. The rest a device just does.
-          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}),
+          // The hard-to-undo one, and the one that changes where sites send the person, ask on a device. The rest a device just does.
+          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text, at: now, tap: body.kind === 'cycle' || body.kind === 'pointer', ...(body.kind === 'nostrconnect' ? { from, as } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
           this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now
           if (body.kind === 'nostrconnect') this.box.rememberConnect(a, body.text, this.#all()[hash]?.agent, now);
-          this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page' }[body.kind as Note['kind']], now);
-          return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}) };
+          this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page', pointer: 'Publishing the sign-in page was asked for from the account page' }[body.kind as Note['kind']], now);
+          return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}), ...(note.kind === 'pointer' ? { url: text } : {}) };
         }
         case 'note_get': {
           const n = (this.#notes.get(a.npub) ?? []).find((x) => x.id === body.note);

@@ -435,6 +435,9 @@ thing `marble.syb.lol` reads to find where to send someone.
   - If the newest pointer has no `url` (removed on purpose), or names an origin this device never
     got from a box code (another device's, or set by hand), it does nothing: the person chose that.
   - With no current origin, it does nothing, not even sending an existing pointer around.
+  - Right after a join, a pointer naming an origin the device never got from a box code is asked
+    about once on the device (switch to the current origin, or keep it and never ask about that
+    pair again). At other checks it is left.
   - If no relay answers, it does nothing this time.
   The account page's "Publish it" button stays as the fallback.
 

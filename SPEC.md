@@ -841,6 +841,17 @@ Kotlin core are the test both sides use.
   `cycle` (no text).
 - `{ op: "notes", account }` from a device returns the waiting ones, each
   `{ id, kind, text, at, tap }`. `tap` is true only for `cycle`.
+- `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
+  the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
+  such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the
+  box answers at once, exactly as `notes` would. Otherwise it holds the reply until the account page
+  leaves a note for the account or the wait runs out, then answers as `notes` would at that moment
+  (`{ ok: true, notes: [] }` when nothing came). The request is checked once, when it arrives. A
+  device blocked or removed while it waited gets `blocked` or `unknown_member` and no notes. At most
+  4 are held for one account at a time: one more ends the oldest early, with the usual answer. A
+  device that hangs up is let go. Keykin Login gives a device's request 35 seconds to come back from
+  the box (the page's calls get 20), so keep any proxy in front of it above that (60 seconds is
+  usual). An older box answers `unknown_op`; a device then checks with `notes` on a timer.
 - The device does it and answers `{ op: "note_done", account, note, result }`. The result is
   the join text for `invite`, the link for `bunker`, and `ok` for the others.
 - For `invite` and `cycle` the device sends the usual `add` or `cycle` with `"note": "<id>"`
@@ -895,8 +906,11 @@ command-line device still uses the main account and names the grant as before, a
 name-first sign-in.
 
 **Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
-`invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every
-30 seconds from its background service (verified 2026-11-18, with the app closed).
+`invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, from its background
+service (verified 2026-11-18, with the app closed). On its branch `notes-wait` it keeps one `notes_wait` open
+at a time, so a note reaches it within about a second (a bunker note was answered in 0.1 to 0.8
+seconds on an emulator, 2026-11-19, with the screen off and in forced Doze), and still checks every 30 seconds as before (that
+check also keeps the device list and grants fresh, and is all it does with an older box).
 
 ## 9. Not built yet
 

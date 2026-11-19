@@ -103,6 +103,11 @@ const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
+/** `notes_wait` (SPEC 11.6): the longest a device's request is held, in seconds, and how many may be held at once for one account. */
+export const WAIT_MOST = 25, WAITS_PER_ACCOUNT = 4;
+/** On a `notes_wait` answer with nothing new yet: the server holds the reply and asks [Box.heldNotes] again later. JSON leaves it out. */
+export const HOLD = Symbol('hold');
+export interface Hold { account: string; member: string; seconds: number }
 /** A grant nobody has used for this long ends (SPEC 11.5). */
 export const GRANT_UNUSED = 90 * 86400;
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
@@ -303,7 +308,18 @@ export class Box {
         }
         case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
         case 'limit': this.limitGrant(s.npub, body.grant, body.to); return { ok: true };
-        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}) })) };
+        case 'notes': return { ok: true, notes: this.#waitingNotes(s.npub) };
+        case 'notes_wait': {
+          // The same answer as `notes`, but with nothing new waiting, the reply is held until a note comes or
+          // `wait` seconds pass. `seen` lists notes this device already has (one waiting for the person's
+          // Yes or No, say), so those alone do not answer at once.
+          const wait = body.wait, seen = body.seen ?? [];
+          if (!Number.isInteger(wait) || wait < 0 || !Array.isArray(seen) || seen.length > 50) refuse('bad_request');
+          const notes = this.#waitingNotes(s.npub), known = new Set(seen);
+          const out: any = { ok: true, notes };
+          if (wait > 0 && !notes.some((n) => !known.has(n.id))) out[HOLD] = { account: s.npub, member: from.key, seconds: Math.min(wait, WAIT_MOST) } satisfies Hold;
+          return out;
+        }
         case 'note_refuse': if (from.kind !== 'device' || !this.onNoteRefused(s.npub, body.note)) refuse('gone'); this.happened(s.npub, `${from.name} said No to a request from the account page`, now); return { ok: true };
         case 'note_done': {
           if (from.kind !== 'device') refuse('devices_only');
@@ -322,6 +338,45 @@ export class Box {
       if (e instanceof KeykinError) return { error: e.code };
       throw e;
     }
+  }
+
+  #waitingNotes(npub: string) {
+    return this.onNotes(npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}) }));
+  }
+
+  // --- Holding a `notes_wait` (SPEC 11.6). The request was checked once, in `handle`; this only waits. ---
+
+  #waits = new Map<string, Set<() => void>>();     // by account npub, oldest first
+  /**
+   * Resolves when a note is put for the account ([noteCame]), after `ms`, or when `signal` aborts (the
+   * device went away). At most WAITS_PER_ACCOUNT are held for one account: one more ends the oldest early.
+   */
+  waitForNote(account: string, ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((done) => {
+      const set = this.#waits.get(account) ?? new Set<() => void>();
+      this.#waits.set(account, set);
+      const end = () => {
+        clearTimeout(timer); signal?.removeEventListener('abort', end);
+        set.delete(end); if (!set.size && this.#waits.get(account) === set) this.#waits.delete(account);
+        done();
+      };
+      const timer = setTimeout(end, ms);
+      signal?.addEventListener('abort', end);
+      if (signal?.aborted) return end();
+      set.add(end);
+      while (set.size > WAITS_PER_ACCOUNT) set.values().next().value!();
+    });
+  }
+  /** How many requests are held for an account now, for tests. */
+  waitsFor(account: string) { return this.#waits.get(account)?.size ?? 0; }
+  /** A note was put for the account: every held `notes_wait` of it answers now. */
+  noteCame(account: string) { for (const end of [...(this.#waits.get(account) ?? [])]) end(); }
+  /** The answer to a held `notes_wait`, read again from the state. A device blocked or removed meanwhile gets no notes. */
+  heldNotes(h: Hold) {
+    const m = this.state.accounts[h.account]?.members.find((x) => x.key === h.member);
+    if (!m) return { error: 'unknown_member' };
+    if (m.blocked) return { error: 'blocked' };
+    return { ok: true, notes: this.#waitingNotes(h.account) };
   }
 
   // Which account a request is about (SPEC 11.2). A box with one account takes a request that names none.

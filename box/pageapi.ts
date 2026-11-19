@@ -164,6 +164,7 @@ export class PageApi {
           const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
+          this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now
           if (body.kind === 'nostrconnect') this.box.rememberConnect(a, body.text, this.#all()[hash]?.agent, now);
           this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page' }[body.kind as Note['kind']], now);
           return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}) };

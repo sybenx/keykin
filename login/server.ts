@@ -32,6 +32,9 @@ const RELAYS = ['wss://syb.lol', 'wss://nos.lol', 'wss://relay.primal.net'];
 // A passkey's session lasts 90 days from its last use, so its cookie is renewed whenever the page loads; a password's or a scan's lasts 12 hours (SPEC 11.6).
 const SESSION_SECONDS = 12 * 3600, PASSKEY_SECONDS = 90 * 86400, LOGIN_SECONDS = 180;
 const PER_MINUTE = 240;          // requests from one address, both paths together
+// How long the box may take: a device's notes_wait is held up to 25 seconds, so devices get 35. Keep this
+// under the reverse proxy's read timeout (often 60 seconds).
+const DEVICE_MS = 35_000, PAGE_MS = 20_000;
 
 export function startLogin(o: { box: string; addr?: string; port?: number; relays?: string[]; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
@@ -51,9 +54,13 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     req.on('error', reject);
   });
   // `from` tells the box which https origin this page was reached at. The box only shows it to its admin as a
-  // suggestion for its login page address; it trusts nothing by it.
-  const toBoxFrom = async (path: '/keykin' | '/page', body: unknown, from?: string) =>
-    (await fetch(o.box + path, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', connection: 'close', ...(from ? { 'x-keykin-origin': from } : {}) }, signal: AbortSignal.timeout(20_000) })).json() as Promise<any>;
+  // suggestion for its login page address; it trusts nothing by it. A device's request may be a notes_wait, which
+  // the box holds for up to 25 seconds (SPEC 11.6), so devices get longer than the page. `gone` ends the request
+  // at the box when the device goes away first.
+  const toBoxFrom = async (path: '/keykin' | '/page', body: unknown, from?: string, gone?: AbortSignal) => {
+    const late = AbortSignal.timeout(path === '/keykin' ? DEVICE_MS : PAGE_MS);
+    return (await fetch(o.box + path, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', connection: 'close', ...(from ? { 'x-keykin-origin': from } : {}) }, signal: gone ? AbortSignal.any([late, gone]) : late })).json() as Promise<any>;
+  };
   const cookieOf = (req: IncomingMessage, name: string, len: number) => new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{${len}})(?:;|$)`).exec(req.headers.cookie ?? '')?.[1];
   const json = (res: ServerResponse, status: number, body: unknown, cookies: string[] = []) => {
     res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(cookies.length ? { 'set-cookie': cookies } : {}) });
@@ -67,7 +74,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     const cookie = (name: string, value: string, age: number) => `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${https ? '; Secure' : ''}`;
     // A passkey's relying party is this page's own host, taken from the request, never from the page.
     const origin = `${https ? 'https' : 'http'}://${req.headers.host ?? ''}`;
-    const toBox = (path: '/keykin' | '/page', body: unknown) => toBoxFrom(path, body, https ? origin : undefined);
+    const toBox = (path: '/keykin' | '/page', body: unknown, gone?: AbortSignal) => toBoxFrom(path, body, https ? origin : undefined, gone);
     // The browser as this door saw it, for the signed-in browsers list. Whatever the page sends is ignored.
     const agent = String(req.headers['user-agent'] ?? '').slice(0, 200);
 
@@ -88,7 +95,12 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
 
     // Devices: passed through untouched. The box checks every signature.
     if (path === '/keykin') {
-      try { return json(res, 200, await toBox('/keykin', body)); } catch { return json(res, 502, { error: 'no_box' }); }
+      const gone = new AbortController(), away = () => gone.abort();
+      res.on('close', away);
+      try { return json(res, 200, await toBox('/keykin', body, gone.signal)); }
+      catch { if (!res.destroyed) return json(res, 502, { error: 'no_box' }); }
+      finally { res.off('close', away); }
+      return;
     }
 
     // The account page. Only a page from this origin can send this header, so another site cannot make these calls for someone.

@@ -28,7 +28,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { Box, loginOrigin, type BoxState } from './box.ts';
+import { Box, loginOrigin, HOLD, type BoxState, type Hold } from './box.ts';
 import { PageApi } from './pageapi.ts';
 import { loginPage, codePage, adminPage } from './page.ts';
 import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/bytes.ts';
@@ -97,7 +97,21 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
     if (req.method !== 'POST' || (path !== '/keykin' && path !== '/page')) return false;
     let parsed: any;
     try { parsed = JSON.parse(await readBody(req)); } catch { json(res, 400, { error: 'bad_json' }); return true; }
-    json(res, 200, path === '/keykin' ? box.handle(parsed, nowS()) : await page.request(parsed, nowS()));
+    if (path === '/page') { json(res, 200, await page.request(parsed, nowS())); return true; }
+    const r = box.handle(parsed, nowS());
+    const hold: Hold | undefined = r?.[HOLD];
+    if (hold) {
+      // A notes_wait with nothing new: checked and signed for once, above. Hold the reply until a note comes,
+      // the wait runs out or the device goes away, then read the notes again.
+      const gone = new AbortController(), away = () => gone.abort();
+      res.on('close', away);
+      await box.waitForNote(hold.account, hold.seconds * 1000, gone.signal);
+      res.off('close', away);
+      if (gone.signal.aborted || res.destroyed) return true;
+      json(res, 200, box.heldNotes(hold));
+      return true;
+    }
+    json(res, 200, r);
     return true;
   }
 

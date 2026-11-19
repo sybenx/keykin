@@ -16,6 +16,7 @@
 //                        {"calls":{"note_put:invite":"any"},"weakSiteLimit":"posts"}
 //   KEYKIN_LOGIN_URL     the login page's origin (https://, nothing after), when Keykin Login is in front. The box's
 //                        codes carry it, so the device that scans one publishes the account's login-page pointer.
+//                        Usually set on the admin page instead ("Your login page address"); this overrides that.
 //   KEYKIN_OPEN          set to 1 to let anyone who signs in on the account page bring their account onto this
 //                        box. Without it, a new account needs a code from the admin page or the admin's approval.
 //   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the admin page already asks who you are (the
@@ -27,7 +28,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { Box, type BoxState } from './box.ts';
+import { Box, loginOrigin, type BoxState } from './box.ts';
 import { PageApi } from './pageapi.ts';
 import { loginPage, codePage, adminPage } from './page.ts';
 import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/bytes.ts';
@@ -40,7 +41,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   const file = join(o.dir, 'state.json');
   const state: BoxState | null = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
   const box = new Box(state);
-  if (o.login !== undefined) { if (!/^https:\/\/[a-z0-9.-]+(:[0-9]+)?$/.test(o.login)) throw new Error(`KEYKIN_LOGIN_URL must be https:// and a host, nothing after: ${o.login}`); box.login = o.login; }
+  if (o.login !== undefined) { box.fixedLogin = loginOrigin(o.login) ?? undefined; if (!box.fixedLogin) throw new Error(`KEYKIN_LOGIN_URL must be https:// and a host, nothing after: ${o.login}`); }
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
   const nowS = () => Math.floor(Date.now() / 1000);
@@ -91,6 +92,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
 
   // What both doors answer: devices' signed requests, and the account page's calls.
   let sideSeen = 0;      // when something last came in by the side door: Keykin Login is alive
+  let sideOrigin: string | undefined;   // the https origin Keykin Login says it served, only ever a suggestion for the admin
   async function shared(req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
     if (req.method !== 'POST' || (path !== '/keykin' && path !== '/page')) return false;
     let parsed: any;
@@ -108,12 +110,16 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
     const s = session(req);
     const whereIs = { host: (req.headers.host ?? 'This box').replace(/:\d+$/, ''), behindLogin: !!o.behindLogin };
     const addr = (): string => o.url || (req.headers.host ? `http://${req.headers.host}` : where());
+    // An address to suggest for the login page, never used until the admin saves it.
+    const visited = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted ? loginOrigin(`https://${(req.headers.host ?? '').toLowerCase()}`) : null;
+    const suggest = visited ? { addr: visited, from: 'here' as const } : sideOrigin ? { addr: sideOrigin, from: 'login' as const } : undefined;
     if (method === 'GET' && path === '/') {
       if (!s) return html(res, 200, loginPage({ error: url.searchParams.has('e') ? (url.searchParams.get('e') === 'wait' ? 'Too many tries. Wait a minute.' : 'That is not the owner secret.') : undefined }));
       const first = box.qr(addr());
       if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0, where: whereIs }), nonce); }
       return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), boxKey: box.state.key, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, where: whereIs,
-        door: { url: o.url, seen: sideSeen, side: o.sidePort !== undefined }, now: nowS() }));
+        door: { url: o.url, seen: sideSeen, side: o.sidePort !== undefined }, now: nowS(),
+        loginPage: { addr: box.login, fixed: !!box.fixedLogin, suggest: suggest?.addr === box.login ? undefined : suggest } }));
     }
     if (method === 'GET' && path === '/admin/state') return s ? json(res, 200, { accounts: box.accounts().length }) : json(res, 401, { error: 'login' });
 
@@ -146,6 +152,13 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
             if (form.get('sure') !== '1') return told(res, 'Tick the box to remove an account.');
             box.removeAccount(account ?? ''); log('keykin box: admin removed an account'); return told(res, 'The account is removed.');
           }
+          case '/admin/loginpage': {
+            if (box.fixedLogin) return told(res, 'The login page address is set by KEYKIN_LOGIN_URL on this box. Change it there.');
+            if (form.get('do') === 'clear') { box.setLoginPage(null); log('keykin box: admin cleared the login page address'); return told(res, 'The login page address is cleared. New codes leave it out.'); }
+            const a = loginOrigin(form.get('address'));
+            if (!a) return told(res, 'That is not a login page address. It starts with https:// and has nothing after the host.');
+            box.setLoginPage(a); log(`keykin box: admin set the login page address to ${a}`); return told(res, `New codes carry ${a}.`);
+          }
           case '/admin/code': { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: box.newSetupCode(addr(), nowS()), csrf: s.csrf, nonce, logout: !o.behindLogin, first: false, count: box.accounts().length, where: whereIs }), nonce); }
         }
       } catch (e) { if (e instanceof KeykinError) return told(res, 'That did not work: ' + e.code); throw e; }
@@ -160,6 +173,8 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   // The side door: nothing but the two shared paths.
   const side = o.sidePort === undefined ? null : createServer(guard(async (req, res) => {
     sideSeen = nowS();
+    const said = loginOrigin(req.headers['x-keykin-origin']);
+    if (said) sideOrigin = said;
     if (!(await shared(req, res, new URL(req.url ?? '/', 'http://box').pathname))) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('Not found\n'); }
   }));
   const listen = (srv: ReturnType<typeof createServer>, port: number) => new Promise<number>((ok) => srv.listen(port, o.addr ?? '127.0.0.1', () => ok((srv.address() as any).port)));

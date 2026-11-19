@@ -172,7 +172,8 @@ export class PageApi {
 
   // ---- Passkeys (SPEC 11.3) --------------------------------------------------------------------------
   // WebAuthn with the page's host as the relying party, a resident key, and user verification required.
-  // `origin` is put in by Keykin Login from the request it served, never taken from the page.
+  // The origin is the box's login page address when it is set; otherwise `origin`, put in by Keykin Login
+  // from the request it served, never taken from the page.
   async request(body: any, now: number): Promise<any> {
     if (typeof body?.call !== 'string' || !body.call.startsWith('pk_')) return this.call(body, now);
     try { this.#tidy(now); this.lastCall = now; return await this.#passkey(body, now); }
@@ -183,6 +184,10 @@ export class PageApi {
     return this.policy[row] ?? this.policy[body.call] ?? 'any';
   }
   #place(body: any) {
+    // A box that knows its login page uses that, not whatever host the request came in by: a lookalike
+    // proxy in front of the box cannot get passkeys made or used for its own name.
+    const set = this.box.login;
+    if (set) return { rpId: new URL(set).hostname, origin: set };
     let u: URL; try { u = new URL(String(body.origin ?? '')); } catch { return refuse('bad_request'); }
     if (u.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(u.hostname)) refuse('bad_request');
     return { rpId: u.hostname, origin: u.origin };

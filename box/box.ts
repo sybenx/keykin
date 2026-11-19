@@ -60,7 +60,16 @@ export interface Ask {
   asked: number; state: 'waiting' | 'approved' | 'refused'; decided?: number;
 }
 /** `owner` is the hash of the owner secret that logs in to the admin page. Accounts are keyed by npub, hex. */
-export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: string; accounts: Record<string, Account>; requests: Record<string, Ask> }
+export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: string; accounts: Record<string, Account>; requests: Record<string, Ask>;
+  /** The box's public login page (Keykin Login in front of it), set on the admin page. KEYKIN_LOGIN_URL overrides it. */
+  loginPage?: string }
+
+/** A login page address as a box takes it: https, a host and maybe a port, nothing after. Trailing slashes
+ *  are dropped. Null if it is anything else. The same rule for the admin setting and KEYKIN_LOGIN_URL. */
+export function loginOrigin(s: unknown): string | null {
+  const v = String(s ?? '').trim().replace(/\/+$/, '');
+  return /^https:\/\/[a-z0-9.-]+(:[0-9]+)?$/.test(v) ? v : null;
+}
 
 const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
@@ -111,8 +120,16 @@ export class Box {
   only(): Account | null { return this.accounts()[0] ?? null; }
 
   /** What the QR on an empty box says. `addr` is where devices reach it. Null once it holds an account. */
+  /** The login page's origin set by KEYKIN_LOGIN_URL. When set it wins over the admin setting. */
+  fixedLogin: string | undefined;
   /** The login page's origin (Keykin Login in front of this box), if set. Codes carry it so the device can publish the pointer (SPEC 11.1). */
-  login: string | undefined;
+  get login(): string | undefined { return this.fixedLogin ?? this.state.loginPage; }
+  /** The admin sets or clears (null) the login page address. A bad address is refused and nothing changes. */
+  setLoginPage(addr: string | null) {
+    if (addr === null) delete this.state.loginPage;
+    else this.state.loginPage = loginOrigin(addr) ?? refuse('bad_login_page');
+    this.#save();
+  }
   #login() { return this.login ? { loginPage: this.login } : {}; }
   qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode, ...this.#login() }); }
 

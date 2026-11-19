@@ -392,21 +392,46 @@ app should code against; the box will meet it.
 
 ### 11.1 The login-page pointer
 
-A small replaceable event, signed by the account, that names its login page. It is the only
-thing `marble.syb.lol` reads to find where to send someone.
+A small replaceable event, signed by the account, that says where its login page is. Sites read
+it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 30078).
 
 ```json
-{ "kind": 30078, "pubkey": "<account npub, hex>", "created_at": 1790000000,
-  "tags": [["d", "keykin/login"], ["url", "https://account.syb.lol"]],
+{ "kind": 10046, "pubkey": "<account npub, hex>", "created_at": 1790000000,
+  "tags": [["nostrconnect_url", "https://account.syb.lol/#connect=<nostrconnect>"],
+           ["relays", "wss://relay1", "wss://relay2"]],
   "content": "" }
 ```
 
-- Kind 30078 is NIP-78 application data, so no new kind is claimed. The `d` tag is exactly
-  `keykin/login`.
-- `url` is the page's origin, `https://` only, no path, query or fragment.
-- To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
-  wins. A reader checks the signature, shows the address to the person, and only then goes there.
-- To remove it, publish the same event with no `url` tag.
+- **Why 10046.** NIP-78 changed in nips#2458 (2026-09-03): kind 30078 is not for public data, and
+  relays should serve it only to its authenticated owner, so other sites may lose the right to read
+  it. Kind 10046 is from the open draft nips#1578 (signer discovery from a public key). The draft is
+  not merged, so its shape may still change. The `.well-known/nostr.json` file is not used: the
+  person cannot always change it.
+- **`nostrconnect_url`** is an `https://` template with exactly one `<nostrconnect>`, at its very
+  end. A site replaces it with `encodeURIComponent` of its `nostrconnect://` code and opens the
+  result. Keykin's template is always `<login page origin>/#connect=<nostrconnect>`, which keeps
+  `connect=` last (section 11.6). A reader refuses a template that is not `https://` (except
+  `http://localhost` or `127.0.0.1` when the reader itself runs there), has a user or password, or
+  has no or more than one placeholder. It shows the template's origin to the person, and only then
+  goes there.
+- **`relays`** (optional) lists relays where the account's signers listen. Readers may ignore it.
+- The draft's `pubkey` tag (a bunker's key) is left out: Keykin's bunker keys are per device
+  (section 8c).
+- **To find it:** `{ "kinds": [10046], "authors": ["<npub hex>"] }`, newest wins, signature
+  checked. Ask the site's own relays and indexers, then the account's write relays (kind 10002) if
+  those had none. A site's relay guards still apply.
+- **To remove it:** publish 10046 with no `nostrconnect_url`. A newest 10046 with none means
+  removed, and the reader does not fall back to the old kind.
+- **The old kind, during the move.** Before this the pointer was kind 30078 with
+  `["d", "keykin/login"]` and `["url", "<https origin>"]`. A reader that finds no 10046 at all
+  reads that one (filter `{ "kinds": [30078], "authors": [..], "#d": ["keykin/login"] }`, `url`
+  an https origin only) and treats it as the template `<url>/#connect=<nostrconnect>`. Devices
+  keep both in place: a new pointer is signed as both kinds, a missing copy of either is sent
+  again, and removing it removes both. The old kind goes once Marble Web, Discover and Tube in use
+  all read 10046.
+- **A caveat.** 10046 is one event per account. If another signer app starts publishing its own
+  10046 for the same account under nips#1578, each would replace the other. Not a problem today:
+  no other app is known to publish it.
 - A device signs it like any other event (section 3).
 - **Where a device learns the origin.** A box with Keykin Login in front is started with
   `KEYKIN_LOGIN_URL` (https, origin only), and its setup codes carry it: `"loginPage": "https://…"` (not `login`, which is the account page's own sign-in code).
@@ -420,10 +445,11 @@ thing `marble.syb.lol` reads to find where to send someone.
   - If the newest pointer names this origin, and some write relay that answered lacks it, the
     device sends that same signed event there again. No new signature, no box.
   - If no relay has any pointer, it signs a new one (device and box, as usual) and publishes it.
-  - If the newest pointer has no `url` (removed on purpose) or names another origin, it does
-    nothing: the person chose that.
+  - If the newest pointer has no `nostrconnect_url` (removed on purpose) or names another origin,
+    it does nothing: the person chose that.
+  - All of this runs on kind 10046, and on kind 30078 too during the move (above).
   - If no relay answers, it does nothing this time.
-  The account page's "Publish it" button stays as the fallback.
+  The account page's "Publish it" button stays as the fallback, and publishes both kinds during the move.
 
 ### 11.2 Accounts on a box, and how a request names its account
 

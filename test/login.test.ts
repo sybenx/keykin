@@ -552,7 +552,7 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await page.click('#savepw');
     await page.waitForSelector('text=Password saved.');
 
-    // The account names this page (as a device would publish it): the page no longer offers one.
+    // The account names this page in the old kind only (from before the move): read as a fallback, so the page offers nothing.
     await publish({ kind: 30078, created_at: now(), tags: [['d', 'keykin/login'], ['url', base]], content: '' });
 
     // 2. Next time, from a fresh browser: the site shows above the sign-in card, and the password signs in.
@@ -572,6 +572,25 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     assert.equal(await s2.getPublicKey(), npub);
     await p2.click('#toaccount');
     await p2.waitForSelector('text=Welcome, Aaron');
+
+    // A newer 10046 with no template is a removal, and the old kind is not read then: the page says so.
+    await publish({ kind: 10046, created_at: now() + 1, tags: [], content: '' });
+    const fourth = await site('Marble');
+    await fromSite(p2, base + '/#connect=' + encodeURIComponent(fourth.uri));
+    await p2.waitForSelector('#connectgo');
+    assert.match((await p2.textContent('#pointersub'))!, /sign-in page was removed/);
+    await p2.click('#connectgo');
+    await tickUntil(p2, '#backto');
+    sites.push(await fourth.waiting);
+    // The 10046 path: the newest names this page, so there is nothing to offer.
+    await publish({ kind: 10046, created_at: now() + 2, tags: [['nostrconnect_url', base + '/#connect=<nostrconnect>']], content: '' });
+    const fifth = await site('Marble');
+    await fromSite(p2, base + '/#connect=' + encodeURIComponent(fifth.uri));
+    await p2.waitForSelector('#connectgo');
+    assert.equal(await p2.locator('#pointerline').count(), 0);
+    await p2.click('#connectgo');
+    await tickUntil(p2, '#backto');
+    sites.push(await fifth.waiting);
     // The first browser sees the second in its list, and signs it out.
     await page.click('nav >> text=Home'); await page.click('nav >> text=Security');
     await page.waitForSelector('#browsers .row >> nth=1');

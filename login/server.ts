@@ -20,7 +20,8 @@ const FILES: Record<string, [string, string]> = {
   '/account.js': ['account.js', 'text/javascript; charset=utf-8'],
   '/rows.js': ['rows.js', 'text/javascript; charset=utf-8'],              // the Sites and apps detail line (SPEC 11.5)
   '/account.css': ['account.css', 'text/css; charset=utf-8'],
-  '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
+  '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],
+  '/pointer.js': ['pointer.js', 'text/javascript; charset=utf-8'],         // the login-page pointer's rules (SPEC 11.1)          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.

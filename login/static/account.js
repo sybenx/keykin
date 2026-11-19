@@ -119,30 +119,35 @@
   }
 
   // ---- The login-page pointer (section 11.1): does the account name a login page yet? ----------------
-  // The page asks its own relays. It does not check the signature: the answer only decides whether to
-  // offer publishing one, and a reader such as Marble checks it before it trusts it.
+  // The page asks its own relays for both kinds (10046, and 30078 during the move); KeykinPointer holds the
+  // rules. It does not check the signature: the answer only decides what to offer, and a reader such as
+  // Marble checks it before it trusts it. A copy some relay lacks is sent there again as it is.
+  const P = globalThis.KeykinPointer;
   function findPointer(author, relays) {
     return new Promise((resolve) => {
-      let left = relays.length, newest = null, heard = false, over = false;
-      const socks = [];
+      let left = relays.length, over = false;
+      const socks = [], byRelay = {};
       const finish = () => {
         if (over) return; over = true; clearTimeout(timer);
         socks.forEach((w) => { try { w.close(); } catch {} });
-        const url = newest?.tags.find((t) => t[0] === 'url')?.[1] ?? null;
-        resolve(!heard ? { state: 'unknown' } : url ? { state: 'found', url } : { state: 'none' });
+        if (!Object.keys(byRelay).length) return resolve({ state: 'unknown' });
+        const r = P.read(Object.values(byRelay).flat(), location.hostname);
+        for (const { relay, event } of P.missingCopies(byRelay, location.origin, location.hostname)) sendEvent(relay, event);
+        resolve({ ...r, url: r.origin });
       };
       const timer = setTimeout(finish, 4000);
       if (!left) return finish();
       for (const relay of relays) {
         let ws, ended = false;
+        const got = [];
         const end = () => { if (!ended) { ended = true; if (--left === 0) finish(); } };
         try { ws = new WebSocket(relay); } catch { end(); continue; }
         socks.push(ws);
-        ws.onopen = () => ws.send(JSON.stringify(['REQ', 'kkp', { kinds: [30078], authors: [author], '#d': ['keykin/login'] }]));
+        ws.onopen = () => ws.send(JSON.stringify(['REQ', 'kkp', ...P.filters(author)]));
         ws.onmessage = (m) => {
           let d; try { d = JSON.parse(m.data); } catch { return; }
-          if (d[0] === 'EVENT' && d[2]?.pubkey === author && d[2]?.kind === 30078 && (!newest || d[2].created_at > newest.created_at)) newest = d[2];
-          if (d[0] === 'EOSE') { heard = true; end(); }
+          if (d[0] === 'EVENT' && d[2]?.pubkey === author) got.push(d[2]);
+          if (d[0] === 'EOSE') { byRelay[relay] = got; end(); }
         };
         ws.onerror = end; ws.onclose = end;
       }
@@ -190,30 +195,36 @@
   const pageUrlOk = () => location.protocol === 'https:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
   function pointerCard(found, signer, relays) {
     const line = el('p', { className: 'small dim', role: 'status', id: 'pointerline' });
-    const there = found.state === 'found';
-    const sub = el('div', { className: 'sub' }, there
+    const there = found.state === 'found', mine = there && found.url === location.origin;
+    const sub = el('div', { className: 'sub', id: 'pointersub' }, there
       ? `Your account names ${found.url} as its sign-in page. Marble sends you there when you type your name.`
       : found.state === 'unknown' ? 'This page could not reach its relays to see whether your account names a sign-in page.'
+      : found.state === 'removed' ? 'Your account’s sign-in page was removed. Publishing one names this page.'
+      : found.state === 'bad' ? 'Your account names a sign-in page that cannot be used. Publishing one names this page instead.'
       : 'Your account does not name a sign-in page yet, so Marble cannot find you by your name. Publishing one names this page.');
-    let go = null;
+    // Signs both kinds (or both removals), each on the phone, and sends them to the page's relays.
+    const signAndSend = async (button, events, done) => {
+      button.disabled = true; line.textContent = 'Asking your phone to sign it…';
+      try {
+        const ok = await Promise.race([P.publish(signer, relays, events, sendEvent), new Promise((_, no) => setTimeout(() => no(new Error('slow')), 90000))]);
+        if (ok) { line.textContent = done; button.remove(); return; }
+        line.textContent = 'Your phone signed it, but no relay took it. Try again.';
+      } catch { line.textContent = 'Your phone did not sign it. Is Marble still open there?'; }
+      button.disabled = false;
+    };
+    let go = null, off = null;
     if (signer && pageUrlOk()) {
-      go = el('button', { className: 'btn go', id: 'publishpointer', type: 'button' }, there ? `Name ${location.host} instead` : 'Publish it');
-      go.onclick = async () => {
-        go.disabled = true; line.textContent = 'Asking your phone to sign it…';
-        try {
-          const event = await Promise.race([
-            signer.signEvent({ kind: 30078, created_at: Math.floor(Date.now() / 1000), tags: [['d', 'keykin/login'], ['url', location.origin]], content: '' }),
-            new Promise((_, no) => setTimeout(() => no(new Error('slow')), 60000))]);
-          const oks = await Promise.all(relays.map((r) => sendEvent(r, event)));
-          if (oks.some(Boolean)) { line.textContent = `Published. Your account names ${location.origin} as its sign-in page.`; go.remove(); return; }
-          line.textContent = 'Your phone signed it, but no relay took it. Try again.';
-        } catch { line.textContent = 'Your phone did not sign it. Is Marble still open there?'; }
-        go.disabled = false;
-      };
+      if (!mine) {
+        go = el('button', { className: 'btn go', id: 'publishpointer', type: 'button' }, there ? `Name ${location.host} instead` : 'Publish it');
+        go.onclick = () => signAndSend(go, P.pointerEvents(location.origin, Math.floor(Date.now() / 1000)), `Published. Your account names ${location.origin} as its sign-in page.`);
+      } else {
+        off = el('button', { className: 'btn', id: 'removepointer', type: 'button' }, 'Remove it');
+        off.onclick = () => { if (confirm('Remove your sign-in page? Marble will no longer find you by your name.')) signAndSend(off, P.removalEvents(Math.floor(Date.now() / 1000)), 'Removed. Your account names no sign-in page now.'); };
+      }
     } else if (!there) line.textContent = signer
       ? 'This page is not on https, so it cannot be named.'
       : 'Publishing it needs a signature from one of your devices. This page can ask for one only right after you sign in by scanning, so publish it from Marble, or sign in here by scanning.';
-    return card(el('h2', {}, 'Your sign-in page'), sub, go, line);
+    return card(el('h2', {}, 'Your sign-in page'), sub, go, off, line);
   }
 
   // ---- After signing in -------------------------------------------------------------------------------
@@ -228,7 +239,7 @@
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
     const c = pending();
     const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c ? findProfile(r.npub, r.relays ?? []) : null]);
-    if (!c && (!signer || found.state !== 'none')) { close(); return showAccount(); }
+    if (!c && (!signer || !['none', 'bad'].includes(found.state))) { close(); return showAccount(); }
     showFinish(c, found, signer, r.relays ?? [], profile);
   }
 

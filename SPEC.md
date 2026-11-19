@@ -599,6 +599,14 @@ signer and the browser extension report each site they let in and name it on eve
 Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. The Android app (Marble)
 reports its grants every 30 seconds.
 
+**Built (2026-11-19), 90 days unused:** on the box. It keeps each grant's last use in the account's
+`used` map (by grant id, set by every `sign` or `ecdh` naming it), so a device's next `grants`
+report does not wipe it. Expiry is checked on each `sign` or `ecdh` naming a grant, on each `grants`
+report and on the page's `me`; an ended grant is revoked as the person would revoke it (so it is in
+`revoked` from then on) and the activity line is written. A grant used but never reported ends the
+same way, with no activity line, since the box has no name for it. `me` gives each grant's `last`
+from that map, and Sites and apps shows it ("last used …"). Devices change nothing.
+
 ### 11.6 The account page's calls, and what needs a device
 
 Keykin Login is a public page with no piece and no list. It passes two kinds of thing to the
@@ -792,6 +800,21 @@ today) and `WEAK_SITE_LIMIT` is null. A weak session asking for a strong call wo
 with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kinds (4, 13, 14, 15,
 1059) and computes message keys with other people's keys only. **Not built:** the page's
 "Confirm with a passkey or your phone" prompt, since nothing asks for it today.
+
+**Built (2026-11-19), sessions and the click before a site:** on the box, in Keykin Login and on the
+account page. Sessions live in the state file under `sessions`, keyed by the SHA-256 of the token's hex
+text; the token itself is only in the browser's cookie. A passkey session's `last` is saved at most
+once a minute, so a crash can cost a sliding session up to a minute. An account keeps at most 100
+sessions, the least recently used going first. Keykin Login sends `agent` only on the calls that make a
+session (`pw_login`, `pk_login`, `signin`, `login_wait`), drops any `agent` the page sends, gives a
+passkey session's cookie 90 days and renews it on each `me`, and clears the cookie when
+`logout_browser` ends the browser asking (the box answers `{ ok, this }`). A session for an account the
+box does not hold also gets `browsers` in `me` and may call `logout_browser`. The card shows the name
+and picture from the account's kind 0 on the page's relays (falling back to the username or the npub),
+so the page's CSP now allows `https:` images. `note_put` refuses a `from` that is not a bare
+`http(s)://host[:port]` origin, or an `as` other than `main` or `site`. Not built: devices acting on
+`as` and `from` (the command-line device and Marble still use the main account and name the grant as
+before), and the sites' side of name-first sign-in.
 
 **Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
 `invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every

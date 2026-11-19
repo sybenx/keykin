@@ -138,3 +138,27 @@ test('the side door answers devices and the account page, and has no admin page'
       assert.equal((await fetch(side + path, { method, headers: H, body: method === 'POST' ? 'csrf=x' : undefined })).status, 404);
   } finally { await b.close(); }
 });
+
+test('account page sessions live through a restart of the box: the state keeps only their hashes', async () => {
+  const d = dir();
+  let b = await startBox({ dir: d, port: 0, behindLogin: true, log: () => {} });
+  const page = (base: string, body: object) => fetch(`${base}/page`, { method: 'POST', body: JSON.stringify(body), headers: H }).then((r) => r.json() as Promise<any>);
+  let base = `http://127.0.0.1:${b.port}`;
+  try {
+    const phone = device('Phone');
+    const held = await D.createWithBox(phone, D.readQr(b.qr()!), client(base).send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', client(base).send);
+    const { salt } = await page(base, { call: 'pw_salt', username: 'aaron' });
+    const { session } = await page(base, { call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('correct horse battery', salt), agent: 'Test browser' });
+    assert.equal((await page(base, { call: 'me', session })).how, 'password');
+    await b.close();
+    const { readFileSync } = await import('node:fs');
+    const saved = readFileSync(join(d, 'state.json'), 'utf8');
+    assert.ok(!saved.includes(session)); assert.equal(Object.keys(JSON.parse(saved).sessions).length, 1);
+    b = await startBox({ dir: d, port: 0, behindLogin: true, log: () => {} });
+    base = `http://127.0.0.1:${b.port}`;
+    const me = await page(base, { call: 'me', session });
+    assert.equal(me.npub, held.npub);
+    assert.deepEqual(me.browsers.map((x: any) => [x.how, x.agent, x.this]), [['password', 'Test browser', true]]);
+  } finally { await b.close(); }
+});

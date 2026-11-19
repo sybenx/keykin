@@ -69,6 +69,24 @@ test('Keykin Login passes devices and the page\'s calls to the box, and nothing 
     const me = (await w.api({ call: 'me' }, cookie)).body;
     assert.equal(me.npub, held.npub); assert.match(me.npubText, /^npub1/); assert.equal(me.username, 'aaron');
 
+    // The browser in the signed-in list is the one Keykin Login saw, cut to 200 characters; what the page says is ignored.
+    const ua = 'Mozilla/5.0 (Windows NT 10.0) Chrome/131.0 ' + 'y'.repeat(300);
+    const other = await w.api({ call: 'pw_login', username: 'aaron', verifier: good, agent: 'I am a liar' }, '', { 'x-keykin': '1', 'user-agent': ua });
+    const otherCookie = other.cookies[0].split(';')[0];
+    assert.match(other.cookies[0], /Max-Age=43200/);
+    const browsers = (await w.api({ call: 'me', agent: 'also ignored' }, cookie)).body.browsers;
+    assert.deepEqual(browsers.map((b: any) => [b.how, b.this]).sort(), [['password', false], ['password', true]]);
+    assert.equal(browsers.find((b: any) => !b.this).agent, ua.slice(0, 200));
+    // Signing out another browser leaves this one's cookie; signing out this one clears it.
+    const theirs = browsers.find((b: any) => !b.this).id;
+    const out1 = await w.api({ call: 'logout_browser', id: theirs }, cookie);
+    assert.deepEqual(out1.body, { ok: true, this: false }); assert.deepEqual(out1.cookies, []);
+    assert.deepEqual((await w.api({ call: 'me' }, otherCookie)).body, { error: 'login' });
+    const again = await w.api({ call: 'pw_login', username: 'aaron', verifier: good });
+    const againCookie = again.cookies[0].split(';')[0];
+    const out2 = await w.api({ call: 'logout_browser', id: (await w.api({ call: 'me' }, againCookie)).body.browsers.find((b: any) => b.this).id }, againCookie);
+    assert.deepEqual(out2.body, { ok: true, this: true }); assert.match(out2.cookies[0], /^ks=; .*Max-Age=0/);
+
     // Block from the page; the device is refused through the same door.
     assert.deepEqual((await w.api({ call: 'block', key: laptop.key }, cookie)).body, { ok: true });
     await assert.rejects(D.signEvent(laptop, lh, note(held.npub), w.send), /blocked/);

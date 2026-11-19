@@ -266,6 +266,10 @@ export async function limit(me: Me, h: Held, grant: string, to: 'posts' | null, 
  *  and `as` the key they chose, `main` or `site` (SPEC 11.6). A device that does not know `as` uses the main account. */
 export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site' }
 export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
+/** Like `notes`, but the box holds the answer up to `wait` seconds (at most 25) until a note comes. Notes in `seen` alone do not answer at once. */
+export async function notesWait(me: Me, h: Held, send: Send, wait: number, seen: string[] = [], t = now()): Promise<Note[]> {
+  return (await call(send, await seal({ op: 'notes_wait', account: h.npub, wait, seen }, me.sk, t))).notes;
+}
 export async function noteDone(me: Me, h: Held, note: string, result: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_done', account: h.npub, note, result }, me.sk, t)); }
 /** The person tapped No. The note goes, and the browser that asked is signed out of the account page. */
 export async function noteRefuse(me: Me, h: Held, note: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_refuse', account: h.npub, note }, me.sk, t)); }

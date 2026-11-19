@@ -133,7 +133,7 @@
         socks.forEach((w) => { try { w.close(); } catch {} });
         if (!Object.keys(byRelay).length) return resolve({ state: 'unknown' });
         const r = P.read(Object.values(byRelay).flat(), location.hostname);
-        for (const { relay, event } of P.missingCopies(byRelay, location.origin, location.hostname)) sendEvent(relay, event);
+        for (const { relay, event } of P.missingCopies(byRelay, here(), location.hostname)) sendEvent(relay, event);
         resolve({ ...r, url: r.origin });
       };
       const timer = setTimeout(finish, 4000);
@@ -198,7 +198,11 @@
   // scan left behind (kept while there is something for it to sign), and the relays. Null when signed out.
   let ptr = null;
   const dropPointer = () => { ptr?.signer?.close().catch(() => {}); ptr = null; };
-  const mineHere = (found) => found.state === 'found' && found.url === location.origin;
+  // This page's address as the account should name it: the box's login page address when it has one (from
+  // `me`), so a pointer a phone published for it counts as here; the page's own origin only when it has none.
+  let boxLogin = null;
+  const here = () => me?.loginPage ?? boxLogin ?? location.origin;
+  const mineHere = (found) => found.state === 'found' && found.url === here();
   // A scan's signer is kept until sign-out, so the page can publish (or remove) it from the account page too.
   const holdPointer = (npub, found, signer, relays) => {
     if (ptr?.signer && ptr.signer !== signer) ptr.signer.close().catch(() => {});
@@ -281,9 +285,9 @@
     let go = null, off = null;
     if (signer && pageUrlOk()) {
       if (!mine) {
-        go = el('button', { className: 'btn go', id: 'publishpointer', type: 'button' }, there ? `Name ${location.host} instead` : 'Publish it');
-        go.onclick = () => signAndSend(go, P.pointerEvents(location.origin, Math.floor(Date.now() / 1000)), { state: 'found', url: location.origin, origin: location.origin },
-          `Published. Your account names ${location.origin} as its sign-in page.`);
+        go = el('button', { className: 'btn go', id: 'publishpointer', type: 'button' }, there ? `Name ${new URL(here()).host} instead` : 'Publish it');
+        go.onclick = () => { const o = here(); signAndSend(go, P.pointerEvents(o, Math.floor(Date.now() / 1000)), { state: 'found', url: o, origin: o },
+          `Published. Your account names ${o} as its sign-in page.`); };
       } else {
         off = el('button', { className: 'btn', id: 'removepointer', type: 'button' }, 'Remove it');
         off.onclick = () => { if (confirm('Remove your sign-in page? Marble will no longer find you by your name.')) signAndSend(off, P.removalEvents(Math.floor(Date.now() / 1000)), { state: 'removed' }, 'Removed. Your account names no sign-in page now.'); };
@@ -347,6 +351,7 @@
     const close = () => { signer?.close().catch(() => {}); };
     const r = await api('me').catch(() => ({ error: 'no_box' }));
     if (!r.ok || r.held === false) { close(); return showAccount(); }
+    boxLogin = r.loginPage ?? null;
     me = r;
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
     const c = pending();
@@ -501,7 +506,7 @@
   // ---- Signing in ------------------------------------------------------------------------------------
 
   async function showLogin(message) {
-    leave(); stopTimers(); section = 'home'; flash = null; dropPointer(); ptrAsk = null;
+    leave(); stopTimers(); section = 'home'; flash = null; dropPointer(); ptrAsk = null; boxLogin = null;
     const scan = el('div', { className: 'kk', id: 'scan' });
     const err = el('p', { className: 'err small', role: 'alert', hidden: !message }, message ?? '');
     const user = el('input', { className: 'field', type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, required: true });

@@ -430,8 +430,9 @@ test('the account page asks the phone to publish the sign-in page after a passwo
     assert.equal(await page.locator('#pointerphone').count(), 0);
     await shot(page, 'phone-no-address');
 
-    // Now it has one. (A test page is on http, which the admin page would not take, so it is set here directly.)
-    w.box.box.fixedLogin = w.base;
+    // Now it has one, and not the address this test page is at (http://127.0.0.1): the page counts a pointer
+    // naming the box's address as here, so no alert comes back after the phone publishes it.
+    w.box.box.setLoginPage('https://account.example');
     await page.reload(); await page.waitForSelector('#pointerphone');
     await page.click('#pointerphone');
     await page.waitForSelector('#pointercancel');
@@ -449,7 +450,7 @@ test('the account page asks the phone to publish the sign-in page after a passwo
     await page.waitForSelector('text=Approve on your phone…');
     // The phone said No.
     assert.deepEqual(await answered(false), ['said No to the sign-in page']);
-    assert.deepEqual(taps, [`Make ${new URL(w.base).host} your sign-in page?`]);
+    assert.deepEqual(taps, ['Make account.example your sign-in page?']);
     await page.waitForSelector('text=Your phone said no.');
     assert.equal(await page.locator('#pointerphone').count(), 1, 'it can be asked again');
     await shot(page, 'phone-declined');
@@ -475,10 +476,14 @@ test('the account page asks the phone to publish the sign-in page after a passwo
     await page.click('#pointerphone');
     await page.waitForSelector('#pointercancel');
     const did = await answered(true);
-    assert.ok(did.includes(`published ${w.base} as the sign-in page`), String(did));
-    assert.ok(named.every((o) => o === w.base));
+    assert.ok(did.includes('published https://account.example as the sign-in page'), String(did));
+    assert.ok(named.every((o) => o === 'https://account.example'));
     await page.waitForSelector('#status');
-    assert.equal(await page.textContent('#status'), `Published. Sites send you to ${new URL(w.base).host}.`);
+    assert.equal(await page.textContent('#status'), 'Published. Sites send you to account.example.');
+    assert.equal(await page.locator('#pointeralert').count(), 0, 'the box\'s address counts as here');
+    assert.match((await page.textContent('#pointersub'))!, /names https:\/\/account\.example as its sign-in page/);
+    // It stays that way after a reload, when the page asks the relays afresh.
+    await page.reload(); await page.waitForSelector('#pointersub');
     assert.equal(await page.locator('#pointeralert').count(), 0);
     // No alert now, so the status line is back, and it says what is left: one device.
     assert.equal(await page.textContent('#statusline'), 'One thing to look at. You have one device. If Pixel 9a is lost, the account goes with it.');
@@ -509,12 +514,14 @@ test('a pointer note: the box puts in its own login page address, ignores any fr
     await D.passwordSet(phone, held, 'aaron', 'correct horse battery', send);
     const { salt } = box.page.call({ call: 'pw_salt', username: 'aaron' }, now());
     const session = box.page.call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('correct horse battery', salt) }, now()).session;
-    // No address set: refused, and nothing waits for a device.
+    // No address set: refused, and nothing waits for a device. `me` says there is none.
+    assert.equal(box.page.call({ call: 'me', session }, now()).loginPage, null);
     assert.deepEqual(box.page.call({ call: 'note_put', session, kind: 'pointer' }, now()), { error: 'no_login_page' });
     assert.deepEqual(box.page.call({ call: 'note_put', session, kind: 'pointer', text: 'https://evil.example' }, now()), { error: 'no_login_page' });
     assert.deepEqual(await D.notes(phone, held, send), []);
     // The admin's setting, and a password session is enough (the same tier as `bunker`).
     box.box.setLoginPage('https://account.example');
+    assert.equal(box.page.call({ call: 'me', session }, now()).loginPage, 'https://account.example');
     const put = box.page.call({ call: 'note_put', session, kind: 'pointer', text: 'https://evil.example' }, now());
     assert.equal(put.ok, true); assert.equal(put.url, 'https://account.example');
     const [n] = await D.notes(phone, held, send);

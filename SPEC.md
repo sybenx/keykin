@@ -473,7 +473,10 @@ it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 
   with `no_login_page`. A device shows "Make <host> your sign-in page?" with Yes and No. On Yes it signs a
   new pointer naming that origin (both kinds during the move), publishes it, and answers `note_done`
   with `ok`; on No it answers `note_done` with `declined`. A No here is not `note_refuse`: it does not
-  end the page's session. The page then asks the relays again and says what they show.
+  end the page's session. The page then asks the relays again and says what they show. `me` returns
+  the same address as `loginPage` (null when none is set), and the page treats a pointer naming it as
+  naming this page; only a box with no address set falls back to the page's own origin. Its own
+  "Publish it" and the copies it sends again use that address too.
 
 **Built (2026-11-19), kind 10046:** on the account page, with the rules in `login/static/pointer.js`
 (tested on their own and in the browser). The page asks its relays for both kinds at once, reads 10046

@@ -359,7 +359,7 @@ export class PageApi {
     this.box.expireGrants(a, now);
     const name = (key: string) => a.members.find((m) => m.key === key)?.name ?? 'A device that was removed';
     return {
-      npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key,
+      npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key, loginPage: this.box.login ?? null,
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),

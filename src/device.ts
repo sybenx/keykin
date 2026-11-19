@@ -248,7 +248,8 @@ export async function passwordClear(me: Me, h: Held, send: Send, t = now()) { aw
 
 // --- What this device has let in, and revoking (SPEC 11.5) -----------------------------------------
 
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number }
+/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in. */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker' }
 export const newGrant = (kind: 'site' | 'app', name: string, t = now()): Grant => ({ id: bytesToHex(randomBytes(16)), kind, name, since: t });
 /** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
 export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<string[]> {
@@ -261,7 +262,9 @@ export async function limit(me: Me, h: Held, grant: string, to: 'posts' | null, 
 // --- Things the account page started for a device to finish (SPEC 11.6) ----------------------------
 
 /** `tap` is true when the device must ask the person Yes or No before doing it. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean }
+/** For `nostrconnect`: `from` is the origin that sent the person to the login page (null if it could not tell),
+ *  and `as` the key they chose, `main` or `site` (SPEC 11.6). A device that does not know `as` uses the main account. */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site' }
 export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
 export async function noteDone(me: Me, h: Held, note: string, result: string, send: Send, t = now()) { await call(send, await seal({ op: 'note_done', account: h.npub, note, result }, me.sk, t)); }
 /** The person tapped No. The note goes, and the browser that asked is signed out of the account page. */

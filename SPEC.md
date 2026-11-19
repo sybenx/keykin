@@ -392,21 +392,46 @@ app should code against; the box will meet it.
 
 ### 11.1 The login-page pointer
 
-A small replaceable event, signed by the account, that names its login page. It is the only
-thing `marble.syb.lol` reads to find where to send someone.
+A small replaceable event, signed by the account, that says where its login page is. Sites read
+it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 30078).
 
 ```json
-{ "kind": 30078, "pubkey": "<account npub, hex>", "created_at": 1790000000,
-  "tags": [["d", "keykin/login"], ["url", "https://account.syb.lol"]],
+{ "kind": 10046, "pubkey": "<account npub, hex>", "created_at": 1790000000,
+  "tags": [["nostrconnect_url", "https://account.syb.lol/#connect=<nostrconnect>"],
+           ["relays", "wss://relay1", "wss://relay2"]],
   "content": "" }
 ```
 
-- Kind 30078 is NIP-78 application data, so no new kind is claimed. The `d` tag is exactly
-  `keykin/login`.
-- `url` is the page's origin, `https://` only, no path, query or fragment.
-- To find it: `{ "kinds": [30078], "authors": ["<npub hex>"], "#d": ["keykin/login"] }`, newest
-  wins. A reader checks the signature, shows the address to the person, and only then goes there.
-- To remove it, publish the same event with no `url` tag.
+- **Why 10046.** NIP-78 changed in nips#2458 (2026-09-03): kind 30078 is not for public data, and
+  relays should serve it only to its authenticated owner, so other sites may lose the right to read
+  it. Kind 10046 is from the open draft nips#1578 (signer discovery from a public key). The draft is
+  not merged, so its shape may still change. The `.well-known/nostr.json` file is not used: the
+  person cannot always change it.
+- **`nostrconnect_url`** is an `https://` template with exactly one `<nostrconnect>`, at its very
+  end. A site replaces it with `encodeURIComponent` of its `nostrconnect://` code and opens the
+  result. Keykin's template is always `<login page origin>/#connect=<nostrconnect>`, which keeps
+  `connect=` last (section 11.6). A reader refuses a template that is not `https://` (except
+  `http://localhost` or `127.0.0.1` when the reader itself runs there), has a user or password, or
+  has no or more than one placeholder. It shows the template's origin to the person, and only then
+  goes there.
+- **`relays`** (optional) lists relays where the account's signers listen. Readers may ignore it.
+- The draft's `pubkey` tag (a bunker's key) is left out: Keykin's bunker keys are per device
+  (section 8c).
+- **To find it:** `{ "kinds": [10046], "authors": ["<npub hex>"] }`, newest wins, signature
+  checked. Ask the site's own relays and indexers, then the account's write relays (kind 10002) if
+  those had none. A site's relay guards still apply.
+- **To remove it:** publish 10046 with no `nostrconnect_url`. A newest 10046 with none means
+  removed, and the reader does not fall back to the old kind.
+- **The old kind, during the move.** Before this the pointer was kind 30078 with
+  `["d", "keykin/login"]` and `["url", "<https origin>"]`. A reader that finds no 10046 at all
+  reads that one (filter `{ "kinds": [30078], "authors": [..], "#d": ["keykin/login"] }`, `url`
+  an https origin only) and treats it as the template `<url>/#connect=<nostrconnect>`. Devices
+  keep both in place: a new pointer is signed as both kinds, a missing copy of either is sent
+  again, and removing it removes both. The old kind goes once Marble Web, Discover and Tube in use
+  all read 10046.
+- **A caveat.** 10046 is one event per account. If another signer app starts publishing its own
+  10046 for the same account under nips#1578, each would replace the other. Not a problem today:
+  no other app is known to publish it.
 - A device signs it like any other event (section 3).
 - **Where a device learns the origin.** A box with Keykin Login in front knows its login page's
   address from its admin page, where the admin sets it ("Your login page address": https, origin
@@ -432,14 +457,26 @@ thing `marble.syb.lol` reads to find where to send someone.
     and adds the one before to that history; a code without one leaves no current origin.
     Removing the device from the account keeps that history, so joining again at a new box
     still moves the pointer.
-  - If the newest pointer has no `url` (removed on purpose), or names an origin this device never
+  - If the newest pointer has no `nostrconnect_url` (or `url` on the old kind: removed on purpose), or names an origin this device never
     got from a box code (another device's, or set by hand), it does nothing: the person chose that.
   - With no current origin, it does nothing, not even sending an existing pointer around.
   - Right after a join, a pointer naming an origin the device never got from a box code is asked
     about once on the device (switch to the current origin, or keep it and never ask about that
     pair again). At other checks it is left.
+  - All of this runs on kind 10046, and on kind 30078 too during the move (above).
   - If no relay answers, it does nothing this time.
-  The account page's "Publish it" button stays as the fallback.
+  The account page's "Publish it" button stays as the fallback, and publishes both kinds during the move.
+
+**Built (2026-11-19), kind 10046:** on the account page, with the rules in `login/static/pointer.js`
+(tested on their own and in the browser). The page asks its relays for both kinds at once, reads 10046
+first and 30078 only when no relay gave a 10046, treats a newest 10046 with no `nostrconnect_url` as
+removed, and refuses a template as above (a refused one shows as a page that cannot be used, with
+Publish offered). When the pointer names this page, it sends the newest copy of each kind as it is to
+any of its relays that answered without it. "Publish it" signs both kinds (two signatures on the
+phone, no `relays` tag), and when the pointer names this page a "Remove it" button signs both
+removals. Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
+command-line device has none; Marble's lives in the Marble repo. Marble Web, Discover and Tube read
+the pointer in their own repos.
 
 ### 11.2 Accounts on a box, and how a request names its account
 
@@ -584,6 +621,24 @@ each device tells the box what it has let in.
   `name` is the site's origin or the app's name. `since` is unix seconds.
 - A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
   changes. The box keeps the list per device.
+- **Telling grants apart** (Aaron, 2026-11-19). A grant may also carry, all optional:
+  - `client`: the site's NIP-46 client key, hex.
+  - `device`: the site's own label for where it runs, like "Chrome on Windows", at most 60
+    characters. The site claims it, so it is a label only, never a check.
+  - `via`: how it came in: `login` (a nostrconnect note left by the login page), `scan` (a scanned
+    code), `paste` (a pasted code) or `bunker` (a bunker link).
+  - `browser`: set by the box, never by a device. When the account page leaves a `nostrconnect`
+    note, the box remembers the code's client key with that page session's browser label (from its
+    `agent`, as in "Chrome on Windows"), for 30 days, at most 20 per account. A later reported grant
+    whose `client` matches gets that label.
+
+  A nostrconnect code may carry `device=<label>`; sites we control send it, and the device keeps it
+  with the site and reports it. The box also keeps the last event kind signed for each grant (from a
+  `sign` naming it). The page's `me` gives each grant `client`, `device`, `via`, `browser` and
+  `lastKind`, with `deviceKey` and `deviceName` for the device that let it in. Sites and apps shows the
+  name and then a line like "Chrome on Windows · signed in 19 Nov 06:14 through your login page ·
+  approved by Pixel 9a · last used 2 h ago, last posted a reaction · key ab12…", leaving out what is
+  missing. The key is the first 4 hex of `client`; Marble Web shows the same 4 in its account menu.
 - When a device signs or makes a message key **for** a site or app, it names the grant:
   `"grant": "<id>"` in the `sign` or `ecdh` body. Requests for the person's own use carry none.
 - **Revoking** is done on the box, from the account page or by any device:
@@ -591,6 +646,10 @@ each device tells the box what it has let in.
   naming that grant, from any device. This is what makes a revoke stick even if the device that
   let the site in is offline.
 - The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
+- **A grant ends after 90 days unused** (2026-11-19). Use is any request naming it. The box keeps
+  each grant's last use (its `since` until the first one), and once that is more than 90 days old it
+  treats the grant as revoked: it answers `revoked` and lists it in `revoked`. The account page shows
+  each grant's last use, and the activity list records "<site> signed out after 90 days unused".
 
 **Limiting a grant to posting.** The person can let a site or app post and do nothing else.
 
@@ -612,13 +671,41 @@ signer and the browser extension report each site they let in and name it on eve
 Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. The Android app (Marble)
 reports its grants every 30 seconds.
 
+**Built (2026-11-19), 90 days unused:** on the box. It keeps each grant's last use in the account's
+`used` map (by grant id, set by every `sign` or `ecdh` naming it), so a device's next `grants`
+report does not wipe it. Expiry is checked on each `sign` or `ecdh` naming a grant, on each `grants`
+report and on the page's `me`; an ended grant is revoked as the person would revoke it (so it is in
+`revoked` from then on) and the activity line is written. A grant used but never reported ends the
+same way, with no activity line, since the box has no name for it. `me` gives each grant's `last`
+from that map, and Sites and apps shows it ("last used …"). Devices change nothing.
+
+**Built (2026-11-19), telling grants apart:** on the box (`client`, `device`, `via` kept from reports,
+`browser` from the nostrconnect note, `lastKind`), the account page's detail line (`login/static/rows.js`),
+Marble (Android reports them, Marble Web sends `device=` and shows its key) and Tube (`device=` from the
+start request's User-Agent).
+
 ### 11.6 The account page's calls, and what needs a device
 
 Keykin Login is a public page with no piece and no list. It passes two kinds of thing to the
 box and nothing else: device requests (`POST /keykin`, unchanged), and the page's own calls
 (`POST /page`). The box is the one that knows who is logged in.
 
-**Logging in to the page** gives a page session, a random token the box issues for 12 hours:
+**Logging in to the page** gives a page session, a random token the box issues. How long it lasts
+depends on how it was made (Aaron, 2026-11-19):
+
+- **Passkey:** 90 days, and each call the session makes starts the 90 days again.
+- **Password or scan:** 12 hours from sign-in, not extended by use.
+
+There is no "keep me signed in" choice. The box keeps sessions in its state so they live through a
+restart, storing `SHA-256(token)`, never the token itself. Each session records `how`, `made` and
+`last` (unix seconds) and `agent`, the browser's `User-Agent` as Keykin Login saw it, cut to 200
+characters. Keykin Login passes it in the `/page` body as `agent`. The page never sets it.
+
+**Signed-in browsers.** `me` returns `browsers: [{ id, how, made, last, agent, until, this }]`
+for the account's live page sessions. `id` is the first 16 hex of `SHA-256(token)`, and `this` marks
+the session asking. `logout_browser { id }` ends one. The Security section lists them ("Chrome on
+Windows · passkey · signed in 3 Nov · last used today") with Sign out on each, and the existing
+"Sign out everywhere" (`logout_all`) stays.
 
 - by password (section 11.3), or
 - by passkey (section 11.3), or
@@ -658,22 +745,62 @@ code in the fragment: `https://<login page>/#connect=<encodeURIComponent(nostrco
 Marble's name-first sign-in reads the account's pointer (section 11.1) and sends the person there
 this way. The page:
 
-- reads `connect=` once, checks it starts with `nostrconnect://`, has a 64-hex client key, at least
-  one `relay` and a `secret`, and takes the site's name and url from `name`/`url` (or the older
-  `metadata` JSON) to show "A site is asking you to sign in" above the sign-in card, with the relay;
+- reads `connect=` once. `connect=` must be the last fragment parameter. Everything after it is the
+  code, taken as it is if it starts with `nostrconnect://` (a raw code, whose own `&` and `=` would
+  otherwise split it), else URL-decoded once. It checks the code starts with `nostrconnect://`, has a
+  64-hex client key, at least one `relay` and a `secret`, and takes the site's name and url from
+  `name`/`url` (or the older `metadata` JSON);
+- reads where the request really came from: the origin of `document.referrer` when the page loads
+  with `connect=`, kept with the code. A site sending people here must not use `noreferrer`
+  (`rel="noopener"` and the default referrer policy send the origin, which is all this needs);
 - takes the parameter out of the address bar and history at once (`history.replaceState`), keeping
-  any other fragment parameters, and keeps the code in the tab's `sessionStorage` (`kk-connect`) so
-  it lives through the scan, the passkey or the password;
-- once signed in, leaves it as a `nostrconnect` note at once, shows "Waiting for one of your
-  devices…", then "Done. Go back to <site>" linking to the site's `url`. After 60 seconds with no
-  answer it says a device needs to be online with an up-to-date Marble, and keeps waiting while the
-  note lives. The code leaves `sessionStorage` as soon as the note is left, so a reload does not send
-  it twice;
+  any other fragment parameters, and keeps the code and the sender's origin in the tab's
+  `sessionStorage` (`kk-connect`) so they live through the scan, the passkey or the password;
+- **never leaves the note without a click** (2026-11-19). Before this, a browser already signed in
+  here left the note at once, so any site that knew the login page could open it in a tab and be
+  signed in with no click. Now it always shows a card first, after signing in or straight away if
+  the browser is signed in already: **"Sign in to <host> as <name>?"** with the account's name and
+  picture, the sender's origin, and the relay. The buttons are **Sign in** and **Not now**, and a
+  small **Use a separate account for this site** that sends `as: "site"` (below). An already-signed-in
+  browser needs no password, passkey or scan again: the click is the whole step;
+- **checks the sender.** The host on the card is the sender's origin. If there is no referrer, or
+  its host is not the code's `url` host, the card says so in plain words ("This request came from
+  <sender>, but says it is <url host>" or "This page could not tell which site sent you here"), shows
+  the code's name only as what it claims, and the button becomes **Sign in anyway** behind a second
+  confirm. A match is the one-click case;
+- on Sign in, leaves a `nostrconnect` note: `note_put { kind: "nostrconnect", text, from, as }`,
+  where `from` is the sender's origin or null, and `as` is `"main"` or `"site"`. It shows "Waiting
+  for one of your devices…", then "Done. Go back to <site>" linking to the sender's origin (or the
+  code's `url` when they matched). After 60 seconds with no answer it says a device needs to be
+  online with an up-to-date Marble, and keeps waiting while the note lives. The code leaves
+  `sessionStorage` as soon as the note is left, so a reload does not send it twice;
 - shows a code that is not a `nostrconnect://` code as wrong and leaves it alone.
 
-`connect` is about the site, and `kk=account` about the page's own code (above): they do not mix. A
-code passed in `connect` is answered like any pasted one, with the site's own child key or the main
-key as the signer decides (section 8k).
+**Which key a site gets** (Aaron, 2026-11-19). A site never chooses. `kk=account` on a site's own
+code means nothing, and Marble Web no longer adds it: the mark is only for an account page's own code
+(above). The person chooses once per site and the device remembers it in that site's record:
+
+- through the login page, on the card above: the main account unless they pick a separate one;
+- through a scan or a pasted code, on the device's own card (section 8k, Marble's `SiteChoice`);
+- a site signed in before uses its remembered choice either way, with no question. The device
+  matches it by origin, and for a note it uses `from` when the card showed a match, else the code's
+  `url`.
+
+The device answering a `nostrconnect` note names the grant by `from` when it is set and the card
+matched, and by the code's `url` host otherwise.
+
+**What a site does for name-first sign-in** (Discover, Tube and Marble Web follow this):
+
+1. One field: a name (`name@domain`, or a bare `domain` meaning `_@domain`), an npub or nprofile,
+   or 64 hex. A name is looked up by NIP-05 to get the account's key.
+2. Look up where the account's login page is (section 11.1). Sites keep this in one small function,
+   because where the address is published may still change.
+3. Found: show the address ("Sign in at account.syb.lol"), and on a click open
+   `<login page>/#connect=<encodeURIComponent(nostrconnect://…)>` in a new tab, with no
+   `noreferrer`, then keep listening for the signer's answer as for any `nostrconnect://` code. The
+   code carries `name` and `url` (the site's own origin), and no `kk=account`.
+4. Not found: the site's usual scan code, marked `kk_login=missing` (section 11.1), and a way to
+   paste a `bunker://` link. Those stay as fallbacks even when a login page is found.
 
 **A page session has the person's authority, however it was made** (Aaron, 2026-11-17: "the
 password *is* the auth"). The box records how it was made (`me` returns `how`: `password`,
@@ -707,7 +834,9 @@ Kotlin core are the test both sides use.
 
 **Notes: things the page starts and a device finishes.**
 
-- The page leaves a note: `note_put { kind, text }`. `kind` is `invite` (the text is a new
+- The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
+  (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
+  uses the main account, as before. `kind` is `invite` (the text is a new
   device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
   `cycle` (no text).
 - `{ op: "notes", account }` from a device returns the waiting ones, each
@@ -748,6 +877,22 @@ today) and `WEAK_SITE_LIMIT` is null. A weak session asking for a strong call wo
 with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kinds (4, 13, 14, 15,
 1059) and computes message keys with other people's keys only. **Not built:** the page's
 "Confirm with a passkey or your phone" prompt, since nothing asks for it today.
+
+**Built (2026-11-19), sessions and the click before a site:** on the box, in Keykin Login and on the
+account page. Sessions live in the state file under `sessions`, keyed by the SHA-256 of the token's hex
+text; the token itself is only in the browser's cookie. A passkey session's `last` is saved at most
+once a minute, so a crash can cost a sliding session up to a minute. An account keeps at most 100
+sessions, the least recently used going first. Keykin Login sends `agent` only on the calls that make a
+session (`pw_login`, `pk_login`, `signin`, `login_wait`), drops any `agent` the page sends, gives a
+passkey session's cookie 90 days and renews it on each `me`, and clears the cookie when
+`logout_browser` ends the browser asking (the box answers `{ ok, this }`). A session for an account the
+box does not hold also gets `browsers` in `me` and may call `logout_browser`. The card shows the name
+and picture from the account's kind 0 on the page's relays (falling back to the username or the npub),
+so the page's CSP now allows `https:` images. `note_put` refuses a `from` that is not a bare
+`http(s)://host[:port]` origin, or an `as` other than `main` or `site`. Devices acting on `as` and
+`from`: Marble on Android does, on the Marble branch `note-site-choice`, not merged yet. Not built: the
+command-line device still uses the main account and names the grant as before, and the sites' side of
+name-first sign-in.
 
 **Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
 `invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, checking every

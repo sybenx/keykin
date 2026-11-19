@@ -40,15 +40,41 @@ export interface Account {
   grants?: Record<string, Grant[]>;
   /** Grants that were revoked. The box refuses any request naming one. */
   revoked?: string[];
+  /** When each grant was last used (SPEC 11.5), by grant id. A grant unused for 90 days ends. */
+  used?: Record<string, number>;
+  /** The last event kind signed for each grant (SPEC 11.5), by grant id. */
+  kinds?: Record<string, number>;
+  /** Account-page browsers that left a nostrconnect note, by the code's client key (SPEC 11.5): the browser label and when. */
+  connects?: Record<string, { browser: string; at: number }>;
   /** Grants the person limited (SPEC 11.5): `posts` lets that site or app post and nothing else. */
   limits?: Record<string, Limit>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
 }
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number }
+/** `client`, `device`, `via` come from the device; `browser` is set by the box from the page session that left the nostrconnect note (SPEC 11.5). */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number; client?: string; device?: string; via?: Via; browser?: string }
+export type Via = 'login' | 'scan' | 'paste' | 'bunker';
+const VIAS = new Set(['login', 'scan', 'paste', 'bunker']);
+/** A short label for a browser from its User-Agent, e.g. "Chrome on Windows" (the account page's browserOf). */
+export function browserLabel(agent: string | undefined): string {
+  const a = agent ?? '';
+  const b = /Edg(e|A|iOS)?\//.test(a) ? 'Edge' : /OPR\/|Opera/.test(a) ? 'Opera' : /SamsungBrowser/.test(a) ? 'Samsung Internet' : /Firefox\/|FxiOS/.test(a) ? 'Firefox'
+    : /Chrome\/|CriOS|Chromium/.test(a) ? 'Chrome' : /Safari\//.test(a) ? 'Safari' : null;
+  const os = /Windows/.test(a) ? 'Windows' : /Android/.test(a) ? 'Android' : /iPhone/.test(a) ? 'iPhone' : /iPad/.test(a) ? 'iPad' : /CrOS/.test(a) ? 'ChromeOS'
+    : /Macintosh|Mac OS X/.test(a) ? 'macOS' : /Linux/.test(a) ? 'Linux' : null;
+  return b && os ? `${b} on ${os}` : b ?? (os ? `A browser on ${os}` : 'A browser');
+}
+/** The client key of a nostrconnect:// code, hex, or null. */
+export function clientOf(code: string): string | null {
+  const m = /^nostrconnect:\/\/([0-9a-fA-F]{64})(?:[?/]|$)/.exec(code.trim());
+  return m ? m[1].toLowerCase() : null;
+}
 /** Something the account page started for a device to finish (SPEC 11.6). */
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean }
+/** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose. */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site' }
+/** A signed-in account page (SPEC 11.6), kept by SHA-256 of its token, never the token. Unix seconds. */
+export interface PageSession { account: string; how: 'password' | 'passkey' | 'scan'; made: number; last: number; agent: string }
 /** One line of an account's recent activity. */
 export interface Happened { at: number; text: string }
 /** Someone asking to make an account here or move one here (SPEC 11.4). The admin decides. */
@@ -62,7 +88,9 @@ export interface Ask {
 /** `owner` is the hash of the owner secret that logs in to the admin page. Accounts are keyed by npub, hex. */
 export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: string; accounts: Record<string, Account>; requests: Record<string, Ask>;
   /** The box's public login page (Keykin Login in front of it), set on the admin page. KEYKIN_LOGIN_URL overrides it. */
-  loginPage?: string }
+  loginPage?: string
+  /** The account page's sessions, by SHA-256(token) in hex. */
+  sessions?: Record<string, PageSession> }
 
 /** A login page address as a box takes it: https, a host and maybe a port, nothing after. Trailing slashes
  *  are dropped. Null if it is anything else. The same rule for the admin setting and KEYKIN_LOGIN_URL. */
@@ -75,6 +103,8 @@ const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
+/** A grant nobody has used for this long ends (SPEC 11.5). */
+export const GRANT_UNUSED = 90 * 86400;
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
 /** What a grant limited to `posts` may still sign: notes, reposts, reactions, comments, zap requests, media posts, and site logins (NIP-42). */
 export const POST_KINDS = new Set([1, 6, 7, 16, 1111, 9734, 20, 21, 22, 22242]);
@@ -204,6 +234,7 @@ export class Box {
         return { error: 'stale', epoch: s.epoch, commitment: s.commitment, catchups: s.catchups[from.key] ?? [] };
       }
       if ((body.op === 'sign' || body.op === 'ecdh') && body.grant !== undefined) {
+        this.expireGrants(s, now);
         if ((s.revoked ?? []).includes(body.grant)) refuse('revoked');
         // A site let in from a password-only page session is limited to posting from its first request on.
         if (typeof body.grant === 'string' && /^[0-9a-f]{32}$/.test(body.grant) && !s.limits?.[body.grant] && this.#limitNext(s.npub, from.key, now)
@@ -214,8 +245,8 @@ export class Box {
       switch (body.op) {
         case 'cycle': return this.#cycle(s, from, req, body);
         case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
-        case 'sign': return this.#sign(s, from, body);
-        case 'ecdh': return this.#ecdh(s, from, body);
+        case 'sign': return this.#sign(s, from, body, now);
+        case 'ecdh': return this.#ecdh(s, from, body, now);
         case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, next: s.next, boxKey: this.state.key, members: s.members };
         case 'block': return this.#block(s, body.key);
         case 'unblock': return this.#unblock(s, from, req, body.key);
@@ -246,7 +277,15 @@ export class Box {
           if (!Array.isArray(list) || list.length > 200) refuse('bad_request');
           const clean: Grant[] = list.map((g: any) => {
             if (!/^[0-9a-f]{32}$/.test(g?.id ?? '') || (g.kind !== 'site' && g.kind !== 'app') || typeof g.name !== 'string' || !Number.isInteger(g.since)) refuse('bad_request');
-            return { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
+            const out: Grant = { id: g.id, kind: g.kind, name: g.name.slice(0, 200), since: g.since };
+            if (typeof g.client === 'string' && /^[0-9a-f]{64}$/.test(g.client)) out.client = g.client;
+            const label = typeof g.device === 'string' ? g.device.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60) : '';
+            if (label) out.device = label;
+            if (VIAS.has(g.via)) out.via = g.via;
+            // The browser is the box's own word, from the page session whose note carried this client key.
+            const c = out.client && s.connects?.[out.client];
+            if (c) out.browser = c.browser;
+            return out;
           });
           const revoked = new Set(s.revoked ?? []);
           const known = new Set((s.grants?.[from.key] ?? []).map((g) => g.id));
@@ -257,12 +296,14 @@ export class Box {
             if (fresh.length) this.#limited.delete(`${s.npub}/${from.key}`);
           }
           (s.grants ??= {})[from.key] = clean.filter((g) => !revoked.has(g.id));
+          this.expireGrants(s, now);
           this.#save();
-          return { ok: true, revoked: clean.filter((g) => revoked.has(g.id)).map((g) => g.id) };
+          const gone = new Set(s.revoked ?? []);
+          return { ok: true, revoked: clean.filter((g) => gone.has(g.id)).map((g) => g.id) };
         }
         case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
         case 'limit': this.limitGrant(s.npub, body.grant, body.to); return { ok: true };
-        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap }) => ({ id, kind, text, at, tap })) };
+        case 'notes': return { ok: true, notes: this.onNotes(s.npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}) })) };
         case 'note_refuse': if (from.kind !== 'device' || !this.onNoteRefused(s.npub, body.note)) refuse('gone'); this.happened(s.npub, `${from.name} said No to a request from the account page`, now); return { ok: true };
         case 'note_done': {
           if (from.kind !== 'device') refuse('devices_only');
@@ -322,7 +363,34 @@ export class Box {
     if (r.length > 2000) r.splice(0, r.length - 2000);
     for (const k of Object.keys(s.grants ?? {})) s.grants![k] = s.grants![k].filter((g) => g.id !== grant);
     if (s.limits) delete s.limits[grant as string];
+    if (s.used) delete s.used[grant as string];
+    if (s.kinds) delete s.kinds[grant as string];
     this.#save();
+  }
+  /** Remembers which account-page browser left a nostrconnect note, so the grant it becomes can say so (SPEC 11.5). */
+  rememberConnect(s: Account, code: string, agent: string | undefined, now: number) {
+    const client = clientOf(code);
+    if (!client) return;
+    const all = (s.connects ??= {});
+    for (const [k, v] of Object.entries(all)) if (v.at < now - 30 * 86400) delete all[k];
+    all[client] = { browser: browserLabel(agent), at: now };
+    const keys = Object.keys(all);
+    if (keys.length > 20) for (const k of keys.sort((x, y) => all[x].at - all[y].at).slice(0, keys.length - 20)) delete all[k];
+    this.#save();
+  }
+  /** A grant's last use: when a request last named it, else its `since` (SPEC 11.5). */
+  lastUse(s: Account, g: Grant) { return Math.max(s.used?.[g.id] ?? 0, g.last ?? 0, g.since); }
+  /** Ends every grant of the account unused for 90 days, as if revoked, and says so in the activity list. */
+  expireGrants(s: Account, now: number) {
+    const cut = now - GRANT_UNUSED, ended = new Map<string, string>();
+    for (const list of Object.values(s.grants ?? {})) for (const g of list) if (this.lastUse(s, g) < cut) ended.set(g.id, g.name);
+    // A grant used but never reported by its device still ends; it has no name to show.
+    for (const [id, t] of Object.entries(s.used ?? {})) if (t < cut && !ended.has(id)) ended.set(id, '');
+    for (const [id, name] of ended) {
+      this.revokeGrant(s.npub, id);
+      if (name) this.happened(s.npub, `${name} signed out after 90 days unused`, now);
+    }
+    return ended.size > 0;
   }
   // Sites a device lets in for a password-only page session (SPEC 11.6): the next new site grant that
   // device reports, or first uses, within ten minutes is limited to posting.
@@ -354,10 +422,12 @@ export class Box {
   }
   // Notes when a device and a grant were last used. Saved at most once a minute, so signing stays cheap.
   #lastSave = 0;
-  #used(s: Account, from: Member, grant: unknown) {
-    const t = Math.floor(Date.now() / 1000);
+  #used(s: Account, from: Member, grant: unknown, t: number) {
     from.last = t;
-    if (typeof grant === 'string') for (const list of Object.values(s.grants ?? {})) for (const g of list) if (g.id === grant) g.last = t;
+    if (typeof grant === 'string' && /^[0-9a-f]{32}$/.test(grant)) {
+      const u = (s.used ??= {}); u[grant] = t;
+      const ids = Object.keys(u); if (ids.length > 2000) delete u[ids[0]];
+    }
     if (t - this.#lastSave >= 60) { this.#lastSave = t; this.#save(); }
   }
   /** The account page's Unblock (a page session may do it) and the admin's. */
@@ -515,7 +585,7 @@ export class Box {
     return body.child === undefined ? mine : childPiece(mine, tweakOf(body.child));
   }
 
-  #sign(s: Account, from: Member, body: any) {
+  #sign(s: Account, from: Member, body: any, now: number) {
     if (from.kind !== 'device') refuse('devices_only');
     const ev = body.event as UnsignedEvent;
     const msg = eventId(ev);
@@ -527,18 +597,19 @@ export class Box {
     const c = body.commit;
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
     const a = answer(piece, msg, c);
-    this.#used(s, from, body.grant);
+    this.#used(s, from, body.grant, now);
+    if (typeof body.grant === 'string' && /^[0-9a-f]{32}$/.test(body.grant) && Number.isInteger(ev.kind)) (s.kinds ??= {})[body.grant] = ev.kind;
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
   }
 
   // The box's part of a shared secret with another person's key, for encrypting and decrypting
   // messages. It is useless without the asking device's own part.
-  #ecdh(s: Account, from: Member, body: any) {
+  #ecdh(s: Account, from: Member, body: any, now: number) {
     if (from.kind !== 'device') refuse('devices_only');
     const piece = this.#piece(s, body);
     const part = ecdhPart(piece.i, piece.share, from.i, body.peer);
-    this.#used(s, from, body.grant);
+    this.#used(s, from, body.grant, now);
     return { ok: true, i: s.i, part };
   }
 

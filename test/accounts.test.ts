@@ -470,3 +470,186 @@ test('per-site limits: a grant limited to posting signs posts only and gets no m
   call({ call: 'revoke', session, grant: app.id });
   assert.equal(box.only()!.limits![app.id], undefined);
 });
+
+// A passkey made in the test, signing the way an authenticator does (ES256), so a real pk_login runs.
+async function testPasskey(rpId: string) {
+  const { generateKeyPairSync, createHash, sign } = await import('node:crypto');
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' }) as any;
+  const b = (s: string) => Buffer.from(s, 'base64url');
+  const cose = Buffer.concat([Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]), b(jwk.x), Buffer.from([0x22, 0x58, 0x20]), b(jwk.y)]);
+  const id = bytesToHex(randomBytes(16));
+  const credId = Buffer.from(id, 'hex').toString('base64url');
+  let counter = 0;
+  return {
+    record: { id: credId, key: cose.toString('base64url'), counter: 0, rpId, origin: `https://${rpId}`, added: NOW },
+    answer(challenge: string) {
+      const client = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin: `https://${rpId}`, crossOrigin: false }));
+      const c = Buffer.alloc(4); c.writeUInt32BE(++counter);
+      const auth = Buffer.concat([createHash('sha256').update(rpId).digest(), Buffer.from([0x05]), c]);
+      const sig = sign('sha256', Buffer.concat([auth, createHash('sha256').update(client).digest()]), privateKey);
+      return { id: credId, rawId: credId, type: 'public-key', clientExtensionResults: {},
+        response: { clientDataJSON: client.toString('base64url'), authenticatorData: auth.toString('base64url'), signature: sig.toString('base64url') } };
+    },
+  };
+}
+
+test('page sessions: a passkey lasts 90 days from its last use, a password or a scan 12 hours; kept hashed in the state; signed-in browsers', async () => {
+  const { box, page, send, call, tick, now } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const pk = await testPasskey('account.example');
+  box.only()!.passkeys = [pk.record];
+  const origin = 'https://account.example';
+  const withPasskey = async (agent: string) => {
+    const s = await page.request({ call: 'pk_login_start', origin }, now());
+    return (await page.request({ call: 'pk_login', origin, response: pk.answer(s.options.challenge), agent }, now())).session as string;
+  };
+  const withPassword = async (agent?: string) => call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt), agent }).session as string;
+
+  // A passkey: 90 days, and each call starts them again.
+  const p = await withPasskey('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' + 'x'.repeat(300));
+  assert.match(p, /^[0-9a-f]{64}$/);
+  assert.equal(call({ call: 'me', session: p }).how, 'passkey');
+  tick(89 * 86400); assert.equal(call({ call: 'me', session: p }).ok, true);
+  tick(89 * 86400); assert.equal(call({ call: 'me', session: p }).ok, true);
+  tick(90 * 86400 - 10); assert.equal(call({ call: 'me', session: p }).ok, true);
+  tick(90 * 86400 + 1); assert.deepEqual(call({ call: 'me', session: p }), { error: 'login' });
+
+  // A password: 12 hours from sign-in, however much it is used.
+  const w = await withPassword();
+  for (let k = 0; k < 11; k++) { tick(3600); assert.equal(call({ call: 'me', session: w }).ok, true); }
+  tick(3601); assert.deepEqual(call({ call: 'me', session: w }), { error: 'login' });
+  // A scan: the same 12 hours.
+  const browser = bytesToHex(randomBytes(16));
+  const { code, text } = call({ call: 'login_start', browser });
+  await D.approveLogin(phone, held, text, send, now());
+  const scan = call({ call: 'login_wait', code, browser, agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' }).session;
+  tick(6 * 3600); assert.equal(call({ call: 'me', session: scan }).how, 'scan');
+  tick(6 * 3600 + 1); assert.deepEqual(call({ call: 'me', session: scan }), { error: 'login' });
+
+  // The state keeps SHA-256(token), never the token, and lives through a restart of the box.
+  const p2 = await withPasskey('Firefox on Linux'), w2 = await withPassword('Chrome on Android');
+  const { createHash } = await import('node:crypto');
+  const saved = JSON.stringify(box.state);
+  for (const t of [p2, w2]) { assert.ok(!saved.includes(t)); assert.ok(saved.includes(createHash('sha256').update(t).digest('hex'))); }
+  const again = new Box(JSON.parse(saved)), page2 = new PageApi(again, () => 'https://account.example');
+  const call2 = (body: object) => page2.call(JSON.parse(JSON.stringify(body)), now());
+  assert.equal(call2({ call: 'me', session: p2 }).how, 'passkey');
+  assert.equal(call2({ call: 'me', session: w2 }).how, 'password');
+
+  // The signed-in browsers: newest use first, each with how, when, the browser, and which one is asking.
+  tick(60);
+  call2({ call: 'me', session: w2 });
+  const list = call2({ call: 'me', session: p2 }).browsers;
+  assert.deepEqual(list.map((x: any) => [x.how, x.agent, x.this]), [['passkey', 'Firefox on Linux', true], ['password', 'Chrome on Android', false]]);
+  const mine = list[0], other = list[1];
+  assert.match(mine.id, /^[0-9a-f]{16}$/); assert.equal(mine.id, createHash('sha256').update(p2).digest('hex').slice(0, 16));
+  assert.equal(mine.until, mine.last + 90 * 86400); assert.equal(other.until, other.made + 12 * 3600);
+  assert.ok(other.made < other.last);
+  // Agents are cut to 200 characters.
+  assert.ok(Object.values(again.state.sessions!).every((s) => s.agent.length <= 200));
+  // Sign one out: it is gone, the one asking is not. Another account's browser cannot be named.
+  assert.deepEqual(call2({ call: 'logout_browser', session: p2, id: other.id }), { ok: true, this: false });
+  assert.deepEqual(call2({ call: 'me', session: w2 }), { error: 'login' });
+  assert.deepEqual(call2({ call: 'logout_browser', session: p2, id: other.id }), { error: 'gone' });
+  assert.deepEqual(call2({ call: 'logout_browser', session: p2, id: 'nope' }), { error: 'bad_request' });
+  assert.ok(call2({ call: 'me', session: p2 }).log.some((l: any) => l.text === 'A browser was signed out from the account page'));
+  assert.deepEqual(call2({ call: 'logout_browser', session: p2, id: mine.id }), { ok: true, this: true });
+  assert.deepEqual(call2({ call: 'me', session: p2 }), { error: 'login' });
+  assert.deepEqual(again.state.sessions, {});
+});
+
+test('a grant ends after 90 days unused: the box answers revoked and says so', async () => {
+  const { box, send, call, tick, now } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const login = async () => call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const used = D.newGrant('site', 'https://used.example', NOW), idle = D.newGrant('site', 'https://idle.example', NOW), app = D.newGrant('app', 'Amethyst', NOW);
+  await D.reportGrants(phone, held, [used, idle, app], send, NOW);
+  // Use is any request naming it: signing or a message key.
+  tick(60 * 86400);
+  assert.ok(valid(await D.signEvent(phone, held, note(held.npub), send, now(), used.id)));
+  await D.nip44Encrypt(phone, held, held.npub, 'x', send, now(), app.id);
+  const session = await login();
+  const last = () => Object.fromEntries(call({ call: 'me', session }).grants.map((g: any) => [g.name, g.last]));
+  assert.deepEqual(last(), { 'https://used.example': now(), 'https://idle.example': null, Amethyst: now() });
+  // 90 days after its `since`, the one never used ends; the others carry on from their last use.
+  tick(30 * 86400 + 1);
+  await assert.rejects(D.signEvent(phone, held, note(held.npub), send, now(), idle.id), /revoked/);
+  assert.ok(valid(await D.signEvent(phone, held, note(held.npub), send, now(), used.id)));
+  const s2 = await login();
+  assert.deepEqual(call({ call: 'me', session: s2 }).grants.map((g: any) => g.name).sort(), ['Amethyst', 'https://used.example']);
+  assert.ok(call({ call: 'me', session: s2 }).log.some((l: any) => l.text === 'https://idle.example signed out after 90 days unused'));
+  // The device learns of it from its next report.
+  assert.deepEqual(await D.reportGrants(phone, held, [used, idle, app], send, now()), [idle.id]);
+  // The app was last used 30 days ago; 60 more days and a day, and it ends at the next report even with no request.
+  tick(60 * 86400 + 1);
+  assert.deepEqual(await D.reportGrants(phone, held, [used, app], send, now()), [app.id]);
+  await assert.rejects(D.nip44Encrypt(phone, held, held.npub, 'x', send, now(), app.id), /revoked/);
+  assert.ok(valid(await D.signEvent(phone, held, note(held.npub), send, now(), used.id)));        // used 61 days ago: still fine
+  assert.equal(box.only()!.used![idle.id], undefined);
+});
+
+test('a nostrconnect note carries where it came from and which key, and a device reads them back', async () => {
+  const { box, send, call } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const code = 'nostrconnect://' + 'a'.repeat(64) + '?relay=wss://r&secret=s&url=https://marble.example';
+  const a = call({ call: 'note_put', session, kind: 'nostrconnect', text: code, from: 'https://marble.example', as: 'site' });
+  const b = call({ call: 'note_put', session, kind: 'nostrconnect', text: code, from: null, as: 'main' });
+  const c = call({ call: 'note_put', session, kind: 'nostrconnect', text: code });                   // an older page sends neither
+  const d = call({ call: 'note_put', session, kind: 'bunker', text: '', from: 'https://x.example', as: 'site' });
+  for (const bad of [{ from: 'javascript:alert(1)' }, { from: 'https://a.example/path' }, { from: 7 }, { as: 'other' }, { from: 'https://' + 'a'.repeat(200) }])
+    assert.deepEqual(call({ call: 'note_put', session, kind: 'nostrconnect', text: code, ...bad }), { error: 'bad_request' }, JSON.stringify(bad));
+  const got = await D.notes(phone, held, send, NOW);
+  assert.deepEqual(got.map((n) => [n.id, n.kind, n.from, n.as]), [
+    [a.note, 'nostrconnect', 'https://marble.example', 'site'], [b.note, 'nostrconnect', null, 'main'], [c.note, 'nostrconnect', null, 'main'], [d.note, 'bunker', undefined, undefined]]);
+});
+
+test('grants carry who they are: client key, device label, how, the browser that left the code, and the last kind', async () => {
+  const { box, send, call } = world();
+  const phone = device('Pixel 9a');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const win = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36';
+  const session = call({ call: 'pw_login', username: 'aaron', agent: win, verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const client = 'ab12'.padEnd(64, '0'), other = 'cd34'.padEnd(64, '0');
+  call({ call: 'note_put', session, kind: 'nostrconnect', text: `nostrconnect://${client}?relay=wss://r&device=Chrome%20on%20Windows`, from: 'https://marble.syb.lol' });
+  const a = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client, device: '  Chrome on Windows' + 'x'.repeat(80), via: 'login' as const, browser: 'forged' };
+  const b = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client: other, via: 'scan' as const };
+  const c = { ...D.newGrant('site', 'https://marble.syb.lol', NOW), client: 'nothex', via: 'evil' as any };
+  await D.reportGrants(phone, held, [a, b, c], send, NOW);
+  await D.signEvent(phone, held, { ...note(held.npub), kind: 7 }, send, NOW, a.id);
+  const rows = Object.fromEntries(call({ call: 'me', session }).grants.map((g: any) => [g.id, g]));
+  assert.equal(rows[a.id].client, client);
+  assert.equal(rows[a.id].device, 'Chrome on Windows' + 'x'.repeat(43));             // trimmed, 60 at most
+  assert.equal(rows[a.id].via, 'login');
+  assert.equal(rows[a.id].browser, 'Chrome on Windows');                            // the box's word, not the device's
+  assert.equal(rows[a.id].lastKind, 7);
+  assert.equal(rows[a.id].deviceName, 'Pixel 9a');
+  assert.equal(rows[b.id].browser, undefined); assert.equal(rows[b.id].via, 'scan'); assert.equal(rows[b.id].lastKind, null);
+  assert.equal(rows[c.id].client, undefined); assert.equal(rows[c.id].via, undefined);
+  // Revoking forgets the kind too.
+  call({ call: 'revoke', session, grant: a.id });
+  assert.equal(box.only()!.kinds?.[a.id], undefined);
+});
+
+test('the Sites and apps detail line', async () => {
+  process.env.TZ = 'UTC';
+  // @ts-ignore: a plain script for the page
+  await import('../login/static/rows.js');
+  const { siteDetail, kindWord } = (globalThis as any).KeykinRows;
+  const since = Date.UTC(2026, 10, 19, 6, 14) / 1000;
+  const g = { kind: 'site', since, via: 'login', device: 'Chrome on Windows', browser: 'Firefox on Linux', deviceName: 'Pixel 9a', last: since + 3600, lastKind: 7, client: 'ab12'.padEnd(64, '0') };
+  assert.equal(siteDetail(g, since + 3 * 3600), 'Chrome on Windows · signed in 19 Nov 06:14 through your login page · approved by Pixel 9a · last used 2 h ago, last posted a reaction · key ab12…');
+  assert.equal(siteDetail({ kind: 'site', since, deviceName: 'Pixel 9a', last: null }, since), 'signed in 19 Nov 06:14 · approved by Pixel 9a · not used yet');
+  assert.equal(siteDetail({ kind: 'site', since, browser: 'Safari on macOS', via: 'scan', deviceName: 'P', last: since, lastKind: 30023 }, since + 30), 'Safari on macOS · signed in 19 Nov 06:14 by a scanned code · approved by P · last used a minute ago, last posted an article');
+  assert.equal(siteDetail({ kind: 'app', since, deviceName: 'Pixel 9a', last: null }, since), 'App on Pixel 9a · added 19 Nov 06:14 · not used yet');
+  assert.deepEqual([0, 1, 4, 6, 7, 99999].map(kindWord), ['profile', 'note', 'DM', 'repost', 'reaction', 'kind 99999 event']);
+  for (const s of [siteDetail(g, since)]) assert.ok(!s.includes('—'));
+});

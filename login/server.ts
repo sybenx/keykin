@@ -18,16 +18,19 @@ const STATIC = join(import.meta.dirname, 'static');
 const FILES: Record<string, [string, string]> = {
   '/': ['account.html', 'text/html; charset=utf-8'],
   '/account.js': ['account.js', 'text/javascript; charset=utf-8'],
+  '/rows.js': ['rows.js', 'text/javascript; charset=utf-8'],              // the Sites and apps detail line (SPEC 11.5)
   '/account.css': ['account.css', 'text/css; charset=utf-8'],
-  '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
+  '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],
+  '/pointer.js': ['pointer.js', 'text/javascript; charset=utf-8'],         // the login-page pointer's rules (SPEC 11.1)          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.
-const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'note_put', 'note_get', 'protect', 'pk_add_start', 'pk_add', 'pk_remove']);
+const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'logout_browser', 'note_put', 'note_get', 'protect', 'pk_add_start', 'pk_add', 'pk_remove']);
 const OPEN = new Set(['pw_salt', 'pw_login', 'login_start', 'login_wait', 'signin_start', 'signin', 'pk_login_start', 'pk_login']);
 /** Where the page and a phone meet for sign-in by a scanned code, unless KEYKIN_RELAYS says otherwise. */
 const RELAYS = ['wss://syb.lol', 'wss://nos.lol', 'wss://relay.primal.net'];
-const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180;
+// A passkey's session lasts 90 days from its last use, so its cookie is renewed whenever the page loads; a password's or a scan's lasts 12 hours (SPEC 11.6).
+const SESSION_SECONDS = 12 * 3600, PASSKEY_SECONDS = 90 * 86400, LOGIN_SECONDS = 180;
 const PER_MINUTE = 240;          // requests from one address, both paths together
 
 export function startLogin(o: { box: string; addr?: string; port?: number; relays?: string[]; log?: (s: string) => void }) {
@@ -65,6 +68,8 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     // A passkey's relying party is this page's own host, taken from the request, never from the page.
     const origin = `${https ? 'https' : 'http'}://${req.headers.host ?? ''}`;
     const toBox = (path: '/keykin' | '/page', body: unknown) => toBoxFrom(path, body, https ? origin : undefined);
+    // The browser as this door saw it, for the signed-in browsers list. Whatever the page sends is ignored.
+    const agent = String(req.headers['user-agent'] ?? '').slice(0, 200);
 
     if (method === 'GET' && FILES[path]) {
       const [file, type] = FILES[path];
@@ -72,7 +77,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       const local = ' ' + relays.map((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '')).join(' ') + (relays.some((r) => r.startsWith('ws://')) ? ' ws:' : '');
       res.writeHead(200, {
         'content-type': type, 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
-        'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss:${local}; img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
+        'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss:${local}; img-src 'self' data: https:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
       });
       return void res.end(readFileSync(join(STATIC, file)));
     }
@@ -93,7 +98,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     try {
       if (call === 'pw_salt') return json(res, 200, await toBox('/page', { call, username: body.username }));
       if (call === 'pw_login') {
-        const r = await toBox('/page', { call, username: body.username, verifier: body.verifier });
+        const r = await toBox('/page', { call, username: body.username, verifier: body.verifier, agent });
         return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS)]) : json(res, 200, r);
       }
       if (call === 'signin_start') {
@@ -102,12 +107,12 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       }
       if (call === 'pk_login_start') return json(res, 200, await toBox('/page', { call, origin }));
       if (call === 'pk_login') {
-        const r = await toBox('/page', { call, origin, response: body.response, session: cookieOf(req, 'ks', 64) });
-        return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS)]) : json(res, 200, r);
+        const r = await toBox('/page', { call, origin, response: body.response, session: cookieOf(req, 'ks', 64), agent });
+        return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, PASSKEY_SECONDS)]) : json(res, 200, r);
       }
       if (call === 'signin') {
         // A scan made while signed in with a password confirms that session: the box swaps it for a strong one.
-        const r = await toBox('/page', { call, event: body.event, session: cookieOf(req, 'ks', 64) });
+        const r = await toBox('/page', { call, event: body.event, session: cookieOf(req, 'ks', 64), agent });
         return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS)]) : json(res, 200, r);
       }
       if (call === 'login_start') {
@@ -118,17 +123,18 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
         return json(res, 200, { ok: true, code: r.code, text: r.text, svg: qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true }) }, [cookie('kl', browser, LOGIN_SECONDS)]);
       }
       if (call === 'login_wait') {
-        const r = await toBox('/page', { call, code: body.code, browser: cookieOf(req, 'kl', 32) });
+        const r = await toBox('/page', { call, code: body.code, browser: cookieOf(req, 'kl', 32), agent });
         return r.session ? json(res, 200, { ok: true }, [cookie('ks', r.session, SESSION_SECONDS), cookie('kl', '', 0)]) : json(res, 200, r);
       }
       const session = cookieOf(req, 'ks', 64);
       if (!session) return json(res, 200, { error: 'login' });
-      const { call: _c, session: _s, browser: _b, ...rest } = body;
+      const { call: _c, session: _s, browser: _b, agent: _a, ...rest } = body;
       const r = await toBox('/page', { ...rest, call, session, ...(call.startsWith('pk_') ? { origin } : {}) });
       if (call === 'me' && r.ok) { r.npubText = npubEncode(r.npub); r.relays = relays; }
       if (call === 'protect' && r.ok) { const qr = qrcode(0, 'M'); qr.addData(r.text); qr.make(); r.svg = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
-      const gone = call === 'logout' || call === 'logout_all' || r.error === 'login';
-      return json(res, 200, r, gone ? [cookie('ks', '', 0)] : []);
+      const gone = call === 'logout' || call === 'logout_all' || (call === 'logout_browser' && r.this === true) || r.error === 'login';
+      const renew = call === 'me' && r.ok && r.how === 'passkey';
+      return json(res, 200, r, gone ? [cookie('ks', '', 0)] : renew ? [cookie('ks', session, PASSKEY_SECONDS)] : []);
     } catch { return json(res, 502, { error: 'no_box' }); }
   }
 

@@ -51,6 +51,9 @@ h3 { font-weight:600; font-size:15px; margin:0; }
 
 .hello { display:flex; align-items:center; gap:18px; }
 .avatar { width:72px; height:72px; flex:none; border-radius:36px; background:var(--card); border:2px solid var(--accent); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:28px; }
+.avatar.small { width:44px; height:44px; border-radius:22px; font-size:18px; border-width:1px; object-fit:cover; }
+.hello.small-hello { gap:12px; }
+.notice.warn { background:var(--off); color:var(--danger); border:1px solid var(--danger); }
 .statusline { flex-direction:row; align-items:center; gap:14px; padding:18px 22px; }
 .statusline svg { flex:none; }
 

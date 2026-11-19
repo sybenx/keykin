@@ -2,14 +2,18 @@
 // and no list: it passes these calls through, and the box decides. Nothing here can sign, add a device,
 // unblock one or form the key. Those need a device's fingerprint and go through /keykin.
 
-import { Box, type Limit, type Account, type Note, type Passkey, USERNAME } from './box.ts';
+import { Box, type Limit, type Account, type Note, type Passkey, type PageSession, USERNAME } from './box.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha } from '../src/bytes.ts';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHash } from 'node:crypto';
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { eventId } from '../src/event.ts';
 
-const SESSION_SECONDS = 12 * 3600, LOGIN_SECONDS = 180, NOTE_SECONDS = 600, CHALLENGE_SECONDS = 900, PROOF_SKEW = 600;
+// How long a page session lasts (SPEC 11.6): a passkey's 90 days start again with each call; a password's
+// or a scan's 12 hours run from sign-in.
+export const PASSKEY_SECONDS = 90 * 86400, SESSION_SECONDS = 12 * 3600;
+const MAX_SESSIONS = 100;          // per account; the least recently used goes first
+const LOGIN_SECONDS = 180, NOTE_SECONDS = 600, CHALLENGE_SECONDS = 900, PROOF_SKEW = 600;
 /** The kind of the event that proves who is signing in: a login event (NIP-42's kind), which signers sign without asking. */
 export const PROOF_KIND = 22242;
 const FREE_TRIES = 5, FIRST_LOCK = 15 * 60, LONGEST_LOCK = 24 * 3600, TRIES_A_MINUTE = 30;
@@ -28,9 +32,8 @@ export const WEAK_SITE_LIMIT: Limit | null = null;
 const B64URL = /^[A-Za-z0-9_-]{1,1400}$/;
 
 export class PageApi {
-  #sessions = new Map<string, { account: string; until: number; how: How }>();
   #pkChallenges = new Map<string, { until: number; rpId: string; origin: string; account?: string }>();
-  #noteBy = new Map<string, string>();      // note id -> the session that left it
+  #noteBy = new Map<string, string>();      // note id -> the session that left it (its hash)
   #logins = new Map<string, { until: number; browser: string; account?: string }>();
   #notes = new Map<string, Note[]>();
   #challenges = new Map<string, number>();   // challenge -> good until
@@ -56,7 +59,7 @@ export class PageApi {
       const list = this.#notes.get(account) ?? [];
       if (!list.some((x) => x.id === id && x.result === undefined)) return false;
       this.#notes.set(account, list.filter((x) => x.id !== id));
-      const by = this.#noteBy.get(id); if (by) this.#sessions.delete(by);      // No ends that browser's session
+      const by = this.#noteBy.get(id); if (by) this.#end(by);      // No ends that browser's session
       this.#noteBy.delete(id);
       return true;
     };
@@ -96,7 +99,7 @@ export class PageApi {
           if (!good) refuse('wrong');
           this.#challenges.delete(challenge);                    // a challenge works once
           if (this.box.state.accounts[e.pubkey]) this.box.happened(e.pubkey, 'A browser was signed in to the account page by a device', now);
-          return { ok: true, session: this.#newSession(e.pubkey, now, 'scan', body.session) };
+          return { ok: true, session: this.#newSession(e.pubkey, now, 'scan', body.session, body.agent) };
         }
         case 'login_start': {
           if (!HEX32.test(body.browser ?? '')) refuse('bad_request');
@@ -110,28 +113,29 @@ export class PageApi {
           if (!l || l.browser !== body.browser) refuse('gone');
           if (!l!.account) return { ok: true, waiting: true };
           this.#logins.delete(body.code);
-          return { ok: true, session: this.#newSession(l!.account!, now, 'scan', body.session) };
+          return { ok: true, session: this.#newSession(l!.account!, now, 'scan', body.session, body.agent) };
         }
       }
       // Everything below needs a session.
-      const ses = this.#sessions.get(body?.session) ?? refuse('login');
+      const [hash, ses] = this.#session(body?.session, now);
       const a = this.box.state.accounts[ses.account];
       if (!a) {
         // Signed in, but this box holds no piece of the account yet. All it can do here is come in.
         switch (body.call) {
-          case 'me': return { ok: true, how: ses.how, npub: ses.account, held: false, open: this.open() };
+          case 'me': return { ok: true, how: ses.how, npub: ses.account, held: false, open: this.open(), browsers: this.#browsers(ses.account, hash) };
           case 'protect': {
             if (!this.open()) refuse('not_open');
             return { ok: true, text: this.box.newSetupCode(this.addr(), now, ses.account) };
           }
-          case 'logout': case 'logout_all': this.#sessions.delete(body.session); return { ok: true };
+          case 'logout': case 'logout_all': this.#end(hash); return { ok: true };
+          case 'logout_browser': return this.#logoutBrowser(ses.account, hash, body.id, now);
           default: return refuse('not_here');
         }
       }
       const strong = ses.how !== 'password';
       if (!strong && this.#needs(body) === 'strong') refuse('need_strong');
       switch (body.call) {
-        case 'me': return { ok: true, how: ses.how, strong, held: true, ...this.#view(a) };
+        case 'me': return { ok: true, how: ses.how, strong, held: true, ...this.#view(a, now), browsers: this.#browsers(a.npub, hash) };
         case 'block': { const n = this.#name(a, body.key); this.box.ownerBlock(body.key, a.npub); this.box.happened(a.npub, `${n} was blocked from the account page`, now); return { ok: true }; }
         case 'unblock': { const n = this.#name(a, body.key); this.box.unblockIn(a.npub, body.key); this.box.happened(a.npub, `${n} was unblocked from the account page`, now); return { ok: true }; }
         case 'revoke': {
@@ -146,15 +150,21 @@ export class PageApi {
         }
         case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
         case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
-        case 'logout': this.#sessions.delete(body.session); return { ok: true };
-        case 'logout_all': for (const [t, s] of this.#sessions) if (s.account === a.npub) this.#sessions.delete(t); return { ok: true };
+        case 'logout': this.#end(hash); return { ok: true };
+        case 'logout_all': for (const [h, s] of Object.entries(this.#all())) if (s.account === a.npub) this.#end(h); return { ok: true };
+        case 'logout_browser': return this.#logoutBrowser(a.npub, hash, body.id, now);
         case 'note_put': {
           if (!['nostrconnect', 'invite', 'bunker', 'cycle'].includes(body.kind) || typeof body.text !== 'string' || body.text.length > 4000) refuse('bad_request');
+          // Where the request came from, as the login page saw it, and which key the person chose (SPEC 11.6).
+          const from = body.from ?? null, as = body.as ?? 'main';
+          if (body.kind === 'nostrconnect' && ((from !== null && (typeof from !== 'string' || from.length > 200 || !/^https?:\/\/[^\s/?#]+$/.test(from))) || (as !== 'main' && as !== 'site'))) refuse('bad_request');
           const list = this.#notes.get(a.npub) ?? [];
           if (list.length >= 10) refuse('too_many');
           // Only the hard-to-undo one asks the person on a device. The rest a device just does.
-          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
-          this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, body.session);
+          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}),
+            ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
+          this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
+          if (body.kind === 'nostrconnect') this.box.rememberConnect(a, body.text, this.#all()[hash]?.agent, now);
           this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page' }[body.kind as Note['kind']], now);
           return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}) };
         }
@@ -218,11 +228,11 @@ export class PageApi {
         if (!v.verified) refuse('wrong');
         pk!.counter = v.authenticationInfo.newCounter; pk!.last = now; this.box.touch();
         this.box.happened(a!.npub, 'A browser signed in to the account page with a passkey', now);
-        return { ok: true, session: this.#newSession(a!.npub, now, 'passkey', body.session) };
+        return { ok: true, session: this.#newSession(a!.npub, now, 'passkey', body.session, body.agent) };
       }
     }
     // Adding and removing passkeys needs a strong session.
-    const ses = this.#sessions.get(body.session) ?? refuse('login');
+    const [, ses] = this.#session(body.session, now);
     const a = this.box.state.accounts[ses.account] ?? refuse('not_here');
     if (ses.how === 'password' && this.#needs(body) === 'strong') refuse('need_strong');
     switch (body.call) {
@@ -262,18 +272,51 @@ export class PageApi {
 
   #tidy(now: number) {
     for (const [c, x] of this.#pkChallenges) if (x.until < now) this.#pkChallenges.delete(c);
-    for (const [t, s] of this.#sessions) if (s.until < now) this.#sessions.delete(t);
+    let gone = false;
+    for (const [h, s] of Object.entries(this.#all())) if (untilOf(s) < now) { delete this.#all()[h]; gone = true; }
+    if (gone) this.box.touch();
     for (const [c, l] of this.#logins) if (l.until < now) this.#logins.delete(c);
     for (const [c, until] of this.#challenges) if (until < now) this.#challenges.delete(c);
     for (const id of this.#noteBy.keys()) if (![...this.#notes.values()].some((l) => l.some((n) => n.id === id))) this.#noteBy.delete(id);
     for (const [a, list] of this.#notes) { const keep = list.filter((n) => now - n.at < NOTE_SECONDS); if (keep.length) this.#notes.set(a, keep); else this.#notes.delete(a); }
   }
-  #newSession(account: string, now: number, how: How, old?: unknown) {
+  // ---- Page sessions (SPEC 11.6) ------------------------------------------------------------------------
+  // Kept in the box's state, so they live through a restart, by SHA-256 of the token: the state file alone
+  // cannot sign anyone in.
+  #all(): Record<string, PageSession> { return (this.box.state.sessions ??= {}); }
+  #session(token: unknown, now: number): [string, PageSession] {
+    if (typeof token !== 'string' || !HEX64.test(token)) refuse('login');
+    const h = hashOf(token as string), s = this.#all()[h];
+    if (!s || untilOf(s) < now) { if (s) this.#end(h); return refuse('login'); }
+    // A passkey's 90 days start again with each call. Saved at most once a minute, so calls stay cheap.
+    const save = now - s.last >= 60;
+    s.last = now;
+    if (save) this.box.touch();
+    return [h, s];
+  }
+  #end(hash: string) { if (this.#all()[hash]) { delete this.#all()[hash]; this.box.touch(); } }
+  #newSession(account: string, now: number, how: How, old?: unknown, agent?: unknown) {
+    const all = this.#all();
     // Confirming with a passkey or a scan replaces a weaker session of the same account (an upgrade in place).
-    if (typeof old === 'string' && this.#sessions.get(old)?.account === account) this.#sessions.delete(old);
+    if (typeof old === 'string' && HEX64.test(old) && all[hashOf(old)]?.account === account) delete all[hashOf(old)];
+    const mine = Object.entries(all).filter(([, s]) => s.account === account).sort((x, y) => x[1].last - y[1].last);
+    for (const [h] of mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS + 1))) delete all[h];
     const token = bytesToHex(randomBytes(32));
-    this.#sessions.set(token, { account, until: now + SESSION_SECONDS, how });
+    all[hashOf(token)] = { account, how, made: now, last: now, agent: typeof agent === 'string' ? agent.slice(0, 200) : '' };
+    this.box.touch();
     return token;
+  }
+  /** The account's signed-in browsers, for the Security section. `this` is the one asking. */
+  #browsers(account: string, mine: string) {
+    return Object.entries(this.#all()).filter(([, s]) => s.account === account).sort((x, y) => y[1].last - x[1].last)
+      .map(([h, s]) => ({ id: h.slice(0, 16), how: s.how, made: s.made, last: s.last, agent: s.agent, until: untilOf(s), this: h === mine }));
+  }
+  #logoutBrowser(account: string, mine: string, id: unknown, now: number) {
+    if (typeof id !== 'string' || !/^[0-9a-f]{16}$/.test(id)) refuse('bad_request');
+    const h = Object.keys(this.#all()).find((x) => x.startsWith(id as string) && this.#all()[x].account === account) ?? refuse('gone');
+    this.#end(h);
+    this.box.happened(account, 'A browser was signed out from the account page', now);
+    return { ok: true, this: h === mine };
   }
   #name(a: Account, key: unknown) { return a.members.find((m) => m.key === key)?.name ?? 'A device'; }
   /** When the account page last reached the box, for the admin page's "outside door" card. */
@@ -305,16 +348,21 @@ export class PageApi {
     }
     if (l.fails || l.lockedUntil) { delete l.fails; delete l.lockedUntil; this.box.touch(); }
     this.box.happened(a!.npub, 'A browser signed in to the account page with the password', now);
-    return { ok: true, session: this.#newSession(a!.npub, now, 'password') };
+    return { ok: true, session: this.#newSession(a!.npub, now, 'password', undefined, body.agent) };
   }
-  #view(a: Account) {
+  #view(a: Account, now: number) {
+    this.box.expireGrants(a, now);
     const name = (key: string) => a.members.find((m) => m.key === key)?.name ?? 'A device that was removed';
     return {
       npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key,
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
-      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, device: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null }))),
+      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null }))),
     };
   }
 }
+
+const hashOf = (token: string) => createHash('sha256').update(token).digest('hex');
+/** When a session ends: a passkey's 90 days after its last call, a password's or a scan's 12 hours after sign-in. */
+const untilOf = (s: PageSession) => s.how === 'passkey' ? s.last + PASSKEY_SECONDS : s.made + SESSION_SECONDS;

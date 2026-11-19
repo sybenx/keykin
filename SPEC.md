@@ -574,6 +574,10 @@ each device tells the box what it has let in.
   naming that grant, from any device. This is what makes a revoke stick even if the device that
   let the site in is offline.
 - The answer to `grants` includes `revoked: [ids]`, so the device drops them from its own list.
+- **A grant ends after 90 days unused** (2026-11-19). Use is any request naming it. The box keeps
+  each grant's last use (its `since` until the first one), and once that is more than 90 days old it
+  treats the grant as revoked: it answers `revoked` and lists it in `revoked`. The account page shows
+  each grant's last use, and the activity list records "<site> signed out after 90 days unused".
 
 **Limiting a grant to posting.** The person can let a site or app post and do nothing else.
 
@@ -601,7 +605,22 @@ Keykin Login is a public page with no piece and no list. It passes two kinds of 
 box and nothing else: device requests (`POST /keykin`, unchanged), and the page's own calls
 (`POST /page`). The box is the one that knows who is logged in.
 
-**Logging in to the page** gives a page session, a random token the box issues for 12 hours:
+**Logging in to the page** gives a page session, a random token the box issues. How long it lasts
+depends on how it was made (Aaron, 2026-11-19):
+
+- **Passkey:** 90 days, and each call the session makes starts the 90 days again.
+- **Password or scan:** 12 hours from sign-in, not extended by use.
+
+There is no "keep me signed in" choice. The box keeps sessions in its state so they live through a
+restart, storing `SHA-256(token)`, never the token itself. Each session records `how`, `made` and
+`last` (unix seconds) and `agent`, the browser's `User-Agent` as Keykin Login saw it, cut to 200
+characters. Keykin Login passes it in the `/page` body as `agent`. The page never sets it.
+
+**Signed-in browsers.** `me` returns `browsers: [{ id, how, made, last, agent, until, this }]`
+for the account's live page sessions. `id` is the first 16 hex of `SHA-256(token)`, and `this` marks
+the session asking. `logout_browser { id }` ends one. The Security section lists them ("Chrome on
+Windows · passkey · signed in 3 Nov · last used today") with Sign out on each, and the existing
+"Sign out everywhere" (`logout_all`) stays.
 
 - by password (section 11.3), or
 - by passkey (section 11.3), or
@@ -641,22 +660,62 @@ code in the fragment: `https://<login page>/#connect=<encodeURIComponent(nostrco
 Marble's name-first sign-in reads the account's pointer (section 11.1) and sends the person there
 this way. The page:
 
-- reads `connect=` once, checks it starts with `nostrconnect://`, has a 64-hex client key, at least
-  one `relay` and a `secret`, and takes the site's name and url from `name`/`url` (or the older
-  `metadata` JSON) to show "A site is asking you to sign in" above the sign-in card, with the relay;
+- reads `connect=` once. `connect=` must be the last fragment parameter. Everything after it is the
+  code, taken as it is if it starts with `nostrconnect://` (a raw code, whose own `&` and `=` would
+  otherwise split it), else URL-decoded once. It checks the code starts with `nostrconnect://`, has a
+  64-hex client key, at least one `relay` and a `secret`, and takes the site's name and url from
+  `name`/`url` (or the older `metadata` JSON);
+- reads where the request really came from: the origin of `document.referrer` when the page loads
+  with `connect=`, kept with the code. A site sending people here must not use `noreferrer`
+  (`rel="noopener"` and the default referrer policy send the origin, which is all this needs);
 - takes the parameter out of the address bar and history at once (`history.replaceState`), keeping
-  any other fragment parameters, and keeps the code in the tab's `sessionStorage` (`kk-connect`) so
-  it lives through the scan, the passkey or the password;
-- once signed in, leaves it as a `nostrconnect` note at once, shows "Waiting for one of your
-  devices…", then "Done. Go back to <site>" linking to the site's `url`. After 60 seconds with no
-  answer it says a device needs to be online with an up-to-date Marble, and keeps waiting while the
-  note lives. The code leaves `sessionStorage` as soon as the note is left, so a reload does not send
-  it twice;
+  any other fragment parameters, and keeps the code and the sender's origin in the tab's
+  `sessionStorage` (`kk-connect`) so they live through the scan, the passkey or the password;
+- **never leaves the note without a click** (2026-11-19). Before this, a browser already signed in
+  here left the note at once, so any site that knew the login page could open it in a tab and be
+  signed in with no click. Now it always shows a card first, after signing in or straight away if
+  the browser is signed in already: **"Sign in to <host> as <name>?"** with the account's name and
+  picture, the sender's origin, and the relay. The buttons are **Sign in** and **Not now**, and a
+  small **Use a separate account for this site** that sends `as: "site"` (below). An already-signed-in
+  browser needs no password, passkey or scan again: the click is the whole step;
+- **checks the sender.** The host on the card is the sender's origin. If there is no referrer, or
+  its host is not the code's `url` host, the card says so in plain words ("This request came from
+  <sender>, but says it is <url host>" or "This page could not tell which site sent you here"), shows
+  the code's name only as what it claims, and the button becomes **Sign in anyway** behind a second
+  confirm. A match is the one-click case;
+- on Sign in, leaves a `nostrconnect` note: `note_put { kind: "nostrconnect", text, from, as }`,
+  where `from` is the sender's origin or null, and `as` is `"main"` or `"site"`. It shows "Waiting
+  for one of your devices…", then "Done. Go back to <site>" linking to the sender's origin (or the
+  code's `url` when they matched). After 60 seconds with no answer it says a device needs to be
+  online with an up-to-date Marble, and keeps waiting while the note lives. The code leaves
+  `sessionStorage` as soon as the note is left, so a reload does not send it twice;
 - shows a code that is not a `nostrconnect://` code as wrong and leaves it alone.
 
-`connect` is about the site, and `kk=account` about the page's own code (above): they do not mix. A
-code passed in `connect` is answered like any pasted one, with the site's own child key or the main
-key as the signer decides (section 8k).
+**Which key a site gets** (Aaron, 2026-11-19). A site never chooses. `kk=account` on a site's own
+code means nothing, and Marble Web no longer adds it: the mark is only for an account page's own code
+(above). The person chooses once per site and the device remembers it in that site's record:
+
+- through the login page, on the card above: the main account unless they pick a separate one;
+- through a scan or a pasted code, on the device's own card (section 8k, Marble's `SiteChoice`);
+- a site signed in before uses its remembered choice either way, with no question. The device
+  matches it by origin, and for a note it uses `from` when the card showed a match, else the code's
+  `url`.
+
+The device answering a `nostrconnect` note names the grant by `from` when it is set and the card
+matched, and by the code's `url` host otherwise.
+
+**What a site does for name-first sign-in** (Discover, Tube and Marble Web follow this):
+
+1. One field: a name (`name@domain`, or a bare `domain` meaning `_@domain`), an npub or nprofile,
+   or 64 hex. A name is looked up by NIP-05 to get the account's key.
+2. Look up where the account's login page is (section 11.1). Sites keep this in one small function,
+   because where the address is published may still change.
+3. Found: show the address ("Sign in at account.syb.lol"), and on a click open
+   `<login page>/#connect=<encodeURIComponent(nostrconnect://…)>` in a new tab, with no
+   `noreferrer`, then keep listening for the signer's answer as for any `nostrconnect://` code. The
+   code carries `name` and `url` (the site's own origin), and no `kk=account`.
+4. Not found: the site's usual scan code, marked `kk_login=missing` (section 11.1), and a way to
+   paste a `bunker://` link. Those stay as fallbacks even when a login page is found.
 
 **A page session has the person's authority, however it was made** (Aaron, 2026-11-17: "the
 password *is* the auth"). The box records how it was made (`me` returns `how`: `password`,
@@ -690,7 +749,9 @@ Kotlin core are the test both sides use.
 
 **Notes: things the page starts and a device finishes.**
 
-- The page leaves a note: `note_put { kind, text }`. `kind` is `invite` (the text is a new
+- The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
+  (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
+  uses the main account, as before. `kind` is `invite` (the text is a new
   device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
   `cycle` (no text).
 - `{ op: "notes", account }` from a device returns the waiting ones, each

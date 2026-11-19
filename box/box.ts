@@ -210,9 +210,28 @@ export class Box {
   }
 
   /** Every request comes through here. Returns `{ ok, ... }` or `{ error }`. */
+  /** One line per device call that is not a signature, and per refused call, for the box's log. No secrets go in it. */
+  trace?: (line: string) => void;
+  #call: { op: string; name: string } | null = null;
   handle(req: Signed, now: number): any {
+    this.#call = null;
+    const r = this.#handle(req, now);
+    if (this.trace) {
+      const c = this.#call as { op: string; name: string } | null;
+      const quiet = c && (c.op === 'sign' || c.op === 'ecdh') && !r?.error;
+      if (!quiet) {
+        const notes = Array.isArray(r?.notes) ? ` ${r.notes.length ? r.notes.map((n: any) => `${String(n.id).slice(0, 8)} ${n.kind}`).join(', ') : 'no notes'}` : '';
+        this.trace(`device ${c ? `${c.op} from ${c.name}` : `request from ${String(req?.key ?? '?').slice(0, 8)}`}: ${r?.error ?? 'ok'}${notes}${r?.[HOLD] ? `, held up to ${r[HOLD].seconds}s` : ''}`);
+      }
+    }
+    return r;
+  }
+  /** A member's name, for the log. */
+  nameOf(account: string, key: string) { return this.state.accounts[account]?.members.find((m) => m.key === key)?.name ?? key.slice(0, 8); }
+  #handle(req: Signed, now: number): any {
     try {
       const body = open(req, now);
+      this.#call = { op: String(body.op), name: String(req.key).slice(0, 8) };
       for (const [id, ts] of this.#seen) if (now - ts > 2 * MAX_SKEW) this.#seen.delete(id);
       if (this.#seen.has(body.id)) refuse('replay');
       this.#seen.set(body.id, body.ts);
@@ -233,6 +252,7 @@ export class Box {
       if (body.op === 'transfer2') return this.#transfer2(body, req, now);
       const s = this.#accountOf(body);
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
+      this.#call = { op: String(body.op), name: from.name };
       if (from.blocked) refuse('blocked');
       // A device still on the old pieces is told so, and handed what it needs to catch up.
       if (EPOCH_OPS.has(body.op) && body.epoch !== s.epoch) {

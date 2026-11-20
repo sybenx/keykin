@@ -7,7 +7,8 @@ import * as D from '../src/device.ts';
 import { Box } from '../box/box.ts';
 import { PageApi } from '../box/pageapi.ts';
 import { eventId } from '../src/event.ts';
-import { hexToBytes, bytesToHex, randomBytes } from '../src/bytes.ts';
+import { hexToBytes, bytesToHex, randomBytes, sha } from '../src/bytes.ts';
+const schnorrSha = (v: string) => sha(new TextEncoder().encode(v));
 
 const NOW = 1_800_000_000;
 const device = (name: string, chip = true): D.Me => ({ ...newMemberKey(), name, ...(chip ? softwareChip() : {}) });
@@ -266,9 +267,15 @@ test('a signed-in page has the person\'s authority: devices do what it asks, and
   const { note: n1 } = call({ call: 'note_put', session, kind: 'invite', text: invite });
   assert.deepEqual(await D.answerNotes(noFp, held, send, can(true), NOW), ['added Work laptop']);
   assert.deepEqual(asked, []);
-  const join = JSON.parse(call({ call: 'note_get', session, note: n1 }).result).join;
+  const got1 = call({ call: 'note_get', session, note: n1 });
+  const join = JSON.parse(got1.result).join;
   assert.deepEqual(join, { addr: 'https://account.example', boxKey: held.boxKey, npub: held.npub });
-  const lh = await D.join(laptop, join.boxKey, join.npub, send, NOW);
+  // Added through the page: the piece waits for the code the page was given (SPEC 11.6). This invite came with
+  // no challenge (pasted on Devices), so the code alone is enough: the six digits, typed.
+  assert.match(got1.approval.short, /^\d{6}$/);
+  assert.equal(call({ call: 'note_get', session, note: n1 }).approval, undefined, 'the codes are given once');
+  await assert.rejects(D.join(laptop, join.boxKey, join.npub, send, NOW), /not_approved|wrong_code/);
+  const lh = await D.join(laptop, join.boxKey, join.npub, send, NOW, { code: got1.approval.short });
   assert.ok(valid(await D.signEvent(laptop, lh, note(held.npub), send, NOW)));
   // Without a note from a signed-in page, the same request with no fingerprint is still refused.
   const stray = device('Stray');
@@ -301,6 +308,80 @@ test('a signed-in page has the person\'s authority: devices do what it asks, and
   // And a note for one invite cannot be used to add someone else.
   const { note: n2 } = call({ call: 'note_put', session: s2, kind: 'invite', text: invite.replace(laptop.key, device('Other').key) });
   await assert.rejects(D.addMember(noFp, held, { key: stray.key, name: 'Stray', kind: 'device' }, send, NOW, n2), /bad_member/);
+});
+
+// The red team's case (2026-11-19): with `add=` a stranger can put THEIR invite in a link, and a person signed in
+// to their account page may press Add. The box keeps the stranger's piece until someone shows the approval code
+// the page was given, and the PKCE verifier the challenge was made from. The page hands the code only to a
+// loopback address on the same computer (tested in the browser, test/login.test.ts).
+test('a device added through the page gets its piece only with the approval code and its verifier', async () => {
+  const { box, send, call, tick } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const noFp = { ...phone, fp: undefined };
+  const can = { addr: 'https://account.example', tap: async () => false };
+  const pkce = () => { const verifier = Buffer.from(randomBytes(32)).toString('base64url'); return { verifier, challenge: Buffer.from(hexToBytes(bytesToHex(schnorrSha(verifier)))).toString('base64url') }; };
+  const inviteOf = (m: D.Me) => JSON.stringify({ keykin: 2, invite: { key: m.key, name: m.name } });
+  const ask = async (m: D.Me, more: object) => box.handle(JSON.parse(JSON.stringify(await seal({ op: 'welcome', account: held.npub, ...more }, m.sk, NOW))), NOW);
+
+  // A stranger's invite and challenge, in a link; the person presses Add; a phone adds it.
+  const stranger = device('Marble on Mac'), sp = pkce();
+  const { note: n1 } = call({ call: 'note_put', session, kind: 'invite', text: inviteOf(stranger), challenge: sp.challenge });
+  assert.deepEqual(await D.answerNotes(noFp, held, send, can, NOW), ['added Marble on Mac']);
+  // Before the page has its codes, and without them after: no piece, whatever the stranger knows.
+  assert.deepEqual(await ask(stranger, { verifier: sp.verifier }), { error: 'not_approved' });
+  const a1 = call({ call: 'note_get', session, note: n1 }).approval;
+  assert.ok(a1.code.length >= 22 && /^\d{6}$/.test(a1.short));
+  assert.deepEqual(await ask(stranger, { verifier: sp.verifier }), { error: 'wrong_code' });
+  assert.deepEqual(await ask(stranger, { verifier: sp.verifier, code: '123456' === a1.short ? '654321' : '123456' }), { error: 'wrong_code' });
+  // Waiting for its code, it can do nothing else: not read the account's notes, not answer them.
+  assert.deepEqual(box.handle(JSON.parse(JSON.stringify(await seal({ op: 'notes', account: held.npub }, stranger.sk, NOW))), NOW), { error: 'not_approved' });
+  assert.deepEqual(box.handle(JSON.parse(JSON.stringify(await seal({ op: 'members', account: held.npub }, stranger.sk, NOW))), NOW), { error: 'not_approved' });
+  // The right code with the wrong verifier is refused too: the code alone is not enough when the invite had a challenge.
+  assert.deepEqual(await ask(stranger, { code: a1.code, verifier: pkce().verifier }), { error: 'wrong_code' });
+  assert.deepEqual(await ask(stranger, { code: a1.code }), { error: 'wrong_code' });
+  assert.deepEqual(await ask(stranger, { code: 'x'.repeat(24), verifier: sp.verifier }), { error: 'wrong_code' });
+  // That was the fifth wrong try: the stranger is gone from the list, and even the right code and verifier do nothing now.
+  assert.ok(!box.only()!.members.some((m) => m.key === stranger.key));
+  assert.deepEqual(await ask(stranger, { code: a1.code, verifier: sp.verifier }), { error: 'unknown_member' });
+
+  // The real app: its own invite and verifier, and the code that came back through the browser.
+  const mac = device('Marble on Mac'), mp = pkce();
+  const { note: n2 } = call({ call: 'note_put', session, kind: 'invite', text: inviteOf(mac), challenge: mp.challenge });
+  await D.answerNotes(noFp, held, send, can, NOW);
+  const a2 = call({ call: 'note_get', session, note: n2 }).approval;
+  const mh = await D.join(mac, held.boxKey, held.npub, send, NOW, { code: a2.code, verifier: mp.verifier });
+  assert.ok(valid(await D.signEvent(mac, mh, note(held.npub), send, NOW)));
+  // One use: the code is spent, and another device added the same way cannot use it.
+  const other = device('Other'), op = pkce();
+  const { note: n3 } = call({ call: 'note_put', session, kind: 'invite', text: inviteOf(other), challenge: op.challenge });
+  await D.answerNotes(noFp, held, send, can, NOW);
+  const a3 = call({ call: 'note_get', session, note: n3 }).approval;
+  assert.deepEqual(await ask(other, { code: a2.code, verifier: op.verifier }), { error: 'wrong_code' });
+  // The six digits work with the verifier too, and without naming the account (typed into the app, which knows only the box).
+  const typed = box.handle(JSON.parse(JSON.stringify(await seal({ op: 'welcome', code: a3.short, verifier: op.verifier }, other.sk, NOW))), NOW);
+  assert.equal(typed.npub, held.npub); assert.equal(typed.boxKey, held.boxKey);
+
+  // Ten minutes after the codes, an unredeemed device goes.
+  const late = device('Late'), lp = pkce();
+  const { note: n4 } = call({ call: 'note_put', session, kind: 'invite', text: inviteOf(late), challenge: lp.challenge });
+  await D.answerNotes(noFp, held, send, can, NOW);
+  const a4 = call({ call: 'note_get', session, note: n4 }).approval;
+  assert.ok(box.only()!.members.some((m) => m.key === late.key));
+  assert.deepEqual(box.handle(JSON.parse(JSON.stringify(await seal({ op: 'welcome', account: held.npub, code: a4.code, verifier: lp.verifier }, late.sk, NOW + 601))), NOW + 601), { error: 'unknown_member' });
+  assert.ok(!box.only()!.members.some((m) => m.key === late.key));
+
+  // A bad challenge is refused at the page; a challenge on anything but an invite too.
+  assert.deepEqual(call({ call: 'note_put', session, kind: 'invite', text: inviteOf(device('X')), challenge: 'short' }), { error: 'bad_request' });
+  assert.deepEqual(call({ call: 'note_put', session, kind: 'bunker', text: '', challenge: mp.challenge }), { error: 'bad_request' });
+
+  // Added by a phone scan (the fingerprint, no page note): unchanged, no code.
+  const tablet = device('Tablet');
+  await D.addMember(phone, held, { key: tablet.key, name: 'Tablet', kind: 'device', chip: tablet.chip }, send, NOW);
+  const th = await D.join(tablet, held.boxKey, held.npub, send, NOW);
+  assert.ok(valid(await D.signEvent(tablet, th, note(held.npub), send, NOW)));
 });
 
 test('hard-to-undo signatures need a Yes on the device; ordinary ones do not', async () => {

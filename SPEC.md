@@ -173,6 +173,27 @@ waits at the box, sealed to the newcomer. The device's half follows with `welcom
 newcomer opens both, adds them, and checks the result against the commitment and against the
 npub it was told. The halves are dropped once the newcomer has signed.
 
+**A member added through the account page waits for its approval** (Aaron, 2026-11-19, after a red-team
+finding: anyone could put their own invite in an `add=` link, and a person signed in to their page might
+press Add). When the `add` names a page note (section 11.6), the box keeps a gate for the newcomer:
+`{ note, at, challenge, code, short, until, tries }`. Its `welcome` then needs `code`, and also `verifier`
+when the note carried a `challenge`:
+
+- `code` is the long approval code (base64url of 18 random bytes) or the six digits. The box keeps only
+  SHA-256 of each (of `"short:" + digits` for the six), compared in constant time.
+- `verifier` must hash to the challenge: base64url(SHA-256(verifier)) = `challenge` (PKCE, S256).
+- A wrong try counts. After 5 the newcomer is dropped from the list. It is dropped too 10 minutes after the
+  codes were given (`until`), or 20 minutes after the add if the page never fetched them. Dropped means
+  never added: its index is not used again, as always.
+- Right: the gate goes (the codes work once), and the welcome is answered as before, now also with
+  `boxKey`. A `welcome` with no `account` is taken for a gated member: the box finds the account by the
+  member key, so an app that knows only the box (the six digits typed in, below) can still collect.
+- Until then a gated member gets `not_approved` for every other op, so it cannot read or answer the
+  account's notes, list the members, or sign.
+
+A member added on a device by the fingerprint (a phone scanning an invite, `keykin add`) has no gate:
+nothing changes for it.
+
 ## 8. Falling back to the nsec
 
 With a fingerprint, `reveal` hands the box's piece to the asking device. That device forms the
@@ -776,6 +797,60 @@ this way. The page:
   `sessionStorage` as soon as the note is left, so a reload does not send it twice;
 - shows a code that is not a `nostrconnect://` code as wrong and leaves it alone.
 
+**An app can send the person here to add it as a device** (Aaron, 2026-11-19: "the simpler answer is 'sign
+in' opening a web page", then OAuth for native apps after the red team: RFC 8252 with PKCE). Marble on the
+Mac holds no sign-in of its own and becomes a device, holding a piece. Its Sign in:
+
+1. makes its invite (section 8b), a PKCE verifier (32 random bytes, base64url) and a `state`, and listens
+   on `http://127.0.0.1:<random port>/` (RFC 8252 section 7.3: no "Open Marble?" prompt, unlike a custom
+   scheme);
+2. opens Marble Web in the default browser:
+   `https://marble.syb.lol/#challenge=<base64url SHA-256(verifier)>&return=<encodeURIComponent(http://127.0.0.1:<port>/done)>&state=<state>&add=<encodeURIComponent(invite JSON)>`.
+
+Marble Web finds the login page as its own sign-in does: the account this browser is signed in as, else
+the name the person types (steps 1 and 2 of name-first sign-in, below). It shows the address, and a click
+goes there with the same four parameters, `add=` last. With no login page, Marble Web shows the invite as
+a code for the phone's Add a device instead. The login page:
+
+- reads `add=` by the same rules as `connect=`: the last fragment parameter, everything after it
+  URL-decoded once; `challenge`, `return` and `state` from the parameters before it, each URL-decoded once.
+  All four leave the address bar and history at once (any other fragment parameters stay), and are kept in
+  the tab's `sessionStorage` (`kk-add`) through the scan, the passkey or the password;
+- checks the invite is a Keykin invite: JSON, `keykin: 2`, an `invite` with a 64-hex `key`. The `name` is
+  shown (cut to 60 characters, "A new device" when there is none);
+- **sends approvals to this computer only.** `return` must be `http:` on `127.0.0.1` or `localhost`, with a
+  port, and no user, password or fragment. `challenge` must be 43 base64url characters and `state` 8 to
+  128. Anything else ("not a Keykin invite", "send the approval to <host>, which is not this computer",
+  "not complete") is said plainly and left alone: nothing is kept;
+- **never leaves the note without a click.** After signing in, or straight away if the browser is signed
+  in already, it shows a card: **"Add <name> to your account?"** with the account's name and picture, the
+  device's name, and **Add** and **Not now**. A tab an app opens has no referrer, so the card says to say
+  yes only if you just pressed Sign in on this computer;
+- on Add, leaves the usual note with the challenge: `note_put { kind: "invite", text, challenge }`. A
+  device adds the newcomer as for any invite note (section 7: the box now holds its piece behind a gate).
+  When the device has answered, `note_get` gives the page that left the note, once, `approval: { code,
+  short, until }`;
+- navigates to `return` with `code`, `state` and `join` (the join text, which is not secret) added to its
+  query. The app checks `state`, then asks for its welcome with `code` and `verifier`, joins, and its
+  listener answers the tab ("Done. Marble on Mac is signed in."). The listener takes one approval, and
+  closes after it or after 10 minutes;
+- **the fallback:** before leaving, the page keeps the six digits for this tab (`kk-add-done`, until they
+  run out), so if the way back fails and the person comes Back, the page shows them: "type this only into
+  <name> on this computer", with the page's address. The app has a small "Type a code instead": the six
+  digits and the page's address. It sends `welcome` to that address with the digits and its verifier and
+  no `account` (the box finds it, section 7).
+
+**Why this holds.** A stranger can put their own invite and challenge in a link, and a person may press
+Add. The device is added, but its piece stays at the box until someone shows the approval code with the
+stranger's verifier. The long code goes only to a loopback address on the person's own computer, and the
+six digits only to the person's own screen. Five wrong tries and ten minutes end it.
+
+**Devices, Add a device (a pasted invite) goes through the same gate**, with no challenge: there is no
+verifier behind a pasted invite. The page shows the join code and the six digits, "type this only into the
+new device", and the code alone redeems: `keykin join '<join text>' <code>`. This is the weaker, typed
+path: anyone who reads the digits off the screen within 10 minutes and holds the invite's key could use
+them, so the page says to give them only to the new device.
+
 **Which key a site gets** (Aaron, 2026-11-19). A site never chooses. `kk=account` on a site's own
 code means nothing, and Marble Web no longer adds it: the mark is only for an account page's own code
 (above). The person chooses once per site and the device remembers it in that site's record:
@@ -905,7 +980,14 @@ so the page's CSP now allows `https:` images. `note_put` refuses a `from` that i
 command-line device still uses the main account and names the grant as before, and the sites' side of
 name-first sign-in.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
+**Built (2026-11-19), `add=` and the gate:** on the box (`box/box.ts` gates, `approve`; `box/pageapi.ts`
+`challenge` and `approval`), the command-line device (`keykin join <join> <code>`), the account page
+(`login/static/account.js`; tested in `test/accounts.test.ts` and in a browser in `test/login.test.ts`), Marble
+Web (`~/marble`, branch `mac-signin`) and Marble on the Mac (`~/marble-desktop`, branch `keykin`). Not
+released or deployed. Marble on Android answers the notes unchanged; a device it adds by a page note now
+needs the code to collect its piece, which only matters for apps that join that way.
+
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` and `add` link parameters and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
 `invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, from its background
 service (verified 2026-11-18, with the app closed). On its branch `notes-wait` it keeps one `notes_wait` open
 at a time, so a note reaches it within about a second (a bunker note was answered in 0.1 to 0.8

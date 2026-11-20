@@ -124,9 +124,13 @@ export async function addMember(me: Me, h: Held, m: { key: string; name: string;
   return i;
 }
 
-/** The new device's side: collect both halves and build its piece. `npub` must be the one it was told. */
-export async function join(me: Me, boxKey: string, npub: string, send: Send, t = now()): Promise<Held> {
-  const r = await call(send, await seal({ op: 'welcome', account: npub }, me.sk, t));
+/**
+ * The new device's side: collect both halves and build its piece. `npub` must be the one it was told. A device
+ * added through the account page also shows the approval code the page gave (SPEC 11.6), and its PKCE verifier
+ * when its invite came with a challenge.
+ */
+export async function join(me: Me, boxKey: string, npub: string, send: Send, t = now(), approval?: { code: string; verifier?: string }): Promise<Held> {
+  const r = await call(send, await seal({ op: 'welcome', account: npub, ...(approval ? { code: approval.code, ...(approval.verifier ? { verifier: approval.verifier } : {}) } : {}) }, me.sk, t));
   if (r.npub !== npub) refuse('wrong_account');
   const C = commitmentFrom(r.commitment);
   if (compHex(C[0]).slice(2) !== npub) refuse('wrong_account');

@@ -202,7 +202,10 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     assert.deepEqual(await answered(), ['added Work PC']);
     await page.waitForSelector('#joincode');
     const jt = JSON.parse((await page.textContent('#joincode'))!).join;
-    const wh = await D.join(work, jt.boxKey, jt.npub, w.send);
+    // Added from the page: its piece waits for the six digits the page shows with the join code (SPEC 11.6).
+    await assert.rejects(D.join(work, jt.boxKey, jt.npub, w.send), /not_approved|wrong_code/);
+    const digits = /(\d{3}) (\d{3})/.exec((await page.textContent('#pastecode'))!)!;
+    const wh = await D.join(work, jt.boxKey, jt.npub, w.send, undefined, { code: digits[1] + digits[2] });
     assert.ok(verifyEvent(await D.signEvent(work, wh, note(held.npub), w.send)));
     assert.deepEqual(taps, []);
 
@@ -607,6 +610,157 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await p2.waitForSelector('#username');
     assert.deepEqual(errors, []);
   } finally { for (const s of sites) await s.close().catch(() => {}); agent?.close(); await browser.close(); await login.close(); await box.close(); relay.kill(); siteServer.close(); }
+});
+
+// An app (Marble on a Mac, through Marble Web) sends the person here with its own invite, as an app signs in with OAuth
+// (RFC 8252 with PKCE): #challenge=…&return=http://127.0.0.1:<port>/done&state=…&add=<invite>. They sign in (or already
+// are) and press Add; a device adds it; the box holds its piece; this page gets an approval code and sends it, with the
+// state and the join text, to the return address on this computer, and shows six digits to type as the fallback.
+test('an app sends you here to add it as a device: #add=, a click, and the approval back to this computer', { skip: !exe && 'no Chromium found', timeout: 120_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const { createServer } = await import('node:http');
+  const { createHash, randomBytes: rb } = await import('node:crypto');
+  const w = await world();
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = process.env.KEYKIN_SHOTS ?? join(tmpdir(), 'keykin-shots'); mkdirSync(shots, { recursive: true });
+  // The app's loopback listener (RFC 8252 7.3): what reaches it.
+  const back: URL[] = [];
+  const app = createServer((req, res) => { back.push(new URL(req.url!, 'http://127.0.0.1')); res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>Marble</title><p>Done. Marble on Mac is signed in.'); });
+  await new Promise<void>((r) => app.listen(0, '127.0.0.1', r));
+  const ret = `http://127.0.0.1:${(app.address() as any).port}/done`;
+  try {
+    const phone = device('Pixel 9a');
+    const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    if (w.hasRelay) {
+      const ev = await D.signEvent(phone, held, { pubkey: held.npub, created_at: Math.floor(Date.now() / 1000), kind: 0, tags: [], content: JSON.stringify({ name: 'Aaron', picture: 'https://pics.example/aaron.png' }) }, w.send);
+      await new Promise<void>((ok, no) => { const ws = new WebSocket(w.relay); ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; ws.onerror = no; });
+    }
+    const who = w.hasRelay ? 'Aaron' : 'aaron';
+    const away = { ...phone, fp: undefined };
+    const answered = async () => { for (let k = 0; k < 40; k++) { const did = await D.answerNotes(away, held, w.send, { addr: w.base, tap: async () => false }); if (did.length) return did; await new Promise((r) => setTimeout(r, 150)); } return []; };
+    const pkce = () => { const verifier = rb(32).toString('base64url'); return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') }; };
+    const inviteOf = (m: D.Me) => JSON.stringify({ keykin: 2, invite: { key: m.key, name: m.name } });
+    const link = (inv: string, p: { challenge: string }, state = 'st4te-' + Math.random().toString(36).slice(2), r = ret) => `challenge=${p.challenge}&return=${encodeURIComponent(r)}&state=${state}&add=${encodeURIComponent(inv)}`;
+
+    const errors: string[] = [], calls: any[] = [];
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const context = async () => { const ctx = await browser.newContext({ viewport: { width: 1100, height: 820 } }); await ctx.route('https://pics.example/**', (r) => r.fulfill({ contentType: 'image/png', body: png })); return ctx; };
+    const watch = (p: any) => {
+      p.on('pageerror', (e: any) => errors.push(String(e))); p.on('console', (m: any) => { if (m.type() === 'error') errors.push(m.text()); });
+      p.on('request', (r: any) => { if (r.url().endsWith('/api') && r.method() === 'POST') { try { calls.push(JSON.parse(r.postData())); } catch {} } });
+    };
+    const puts = () => calls.filter((c) => c.call === 'note_put');
+    const kept = (p: any) => p.evaluate(() => JSON.parse(sessionStorage.getItem('kk-add') ?? 'null'));
+    const mac = device('Marble on Mac'), mp = pkce(), invite = inviteOf(mac);
+
+    // Left alone, and said why: not an invite; an invite whose approval would go to another computer; one missing its challenge.
+    for (const [bad, why] of [
+      ['add=' + encodeURIComponent('not an invite'), /not a Keykin invite/],
+      ['add=' + encodeURIComponent(encodeURIComponent(invite)), /not a Keykin invite/],
+      [link(invite, mp, 'st4te-evil1', 'https://evil.example/done'), /send the approval to evil\.example, which is not this computer/],
+      [link(invite, mp, 'st4te-evil2', 'http://192.168.1.5:8080/done'), /which is not this computer/],
+      [link(invite, mp, 'st4te-evil3', 'http://127.0.0.1/done'), /which is not this computer/],
+      [`return=${encodeURIComponent(ret)}&state=st4te-xxxx&add=${encodeURIComponent(invite)}`, /not complete/],
+    ] as const) {
+      const p = await (await context()).newPage(); watch(p);
+      await p.goto(w.base + '/#' + bad);
+      await p.waitForSelector('#addasking[role=alert]');
+      assert.match((await p.textContent('#addasking'))!, why);
+      assert.equal(new URL(p.url()).hash, '');
+      assert.equal(await kept(p), null);
+      await p.context().close();
+    }
+
+    // Read, kept for this tab, and gone from the address bar (other fragment parameters stay).
+    {
+      const p = await (await context()).newPage(); watch(p);
+      await p.goto(w.base + '/#x=1&' + link(invite, mp, 'st4te-abcdefgh'));
+      await p.waitForSelector('#addname');
+      assert.equal(await p.textContent('#addname'), 'Marble on Mac');
+      assert.equal(new URL(p.url()).hash, '#x=1');
+      assert.deepEqual(await kept(p), { invite, challenge: mp.challenge, ret, state: 'st4te-abcdefgh' });
+      await p.context().close();
+    }
+
+    // Signed out: the request shows above the sign-in, lives through a reload, and after the password the card asks.
+    const ctx = await context(); const page = await ctx.newPage(); watch(page);
+    await page.goto(w.base + '/#' + link(invite, mp, 'st4te-mac00001'));
+    await page.waitForSelector('#username');
+    assert.match((await page.textContent('#addasking'))!, /A device is asking to be added to your account/);
+    await page.reload();
+    await page.waitForSelector('#addname');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+    await page.click('#pwgo');
+    await page.waitForSelector('#addcard');
+    assert.equal(await page.textContent('#addtitle'), 'Add Marble on Mac to your account?');
+    assert.equal(await page.textContent('#addwho'), who);
+    if (w.hasRelay) assert.equal(await page.getAttribute('#addcard img.avatar', 'src'), 'https://pics.example/aaron.png');
+    assert.equal(await page.textContent('#adddevice'), 'New device: Marble on Mac');
+    assert.match((await page.textContent('#addwarn'))!, /Only say yes if you just pressed Sign in on this computer/);
+    assert.deepEqual([await page.textContent('#addgo'), await page.textContent('#addno')], ['Add', 'Not now']);
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.deepEqual(puts(), [], 'nothing goes to a device before the click');
+    await page.screenshot({ path: join(shots, 'add-card.png') });
+
+    // Add: the invite note carries the challenge; a device adds it; the approval goes to the app on this computer.
+    await page.click('#addgo');
+    await page.waitForSelector('text=Waiting for one of your devices…');
+    await page.waitForFunction(() => sessionStorage.getItem('kk-add') === null);   // the box holds it now: a reload does not add it twice
+    assert.deepEqual(puts().map((x) => [x.kind, x.text, x.challenge]), [['invite', invite, mp.challenge]]);
+    // Until the app shows the code, the new device gets nothing, even with its own verifier.
+    assert.deepEqual(await answered(), ['added Marble on Mac']);
+    await assert.rejects(D.join(mac, held.boxKey, held.npub, w.send, undefined, { code: 'x'.repeat(24), verifier: mp.verifier }), /not_approved|wrong_code/);
+    await page.waitForURL((u: URL) => u.href.startsWith(ret));
+    assert.match((await page.textContent('body'))!, /Done/);
+    assert.equal(back.length, 1);
+    const got = back[0];
+    assert.equal(got.pathname, '/done'); assert.equal(got.searchParams.get('state'), 'st4te-mac00001');
+    assert.deepEqual(JSON.parse(got.searchParams.get('join')!), { keykin: 2, join: { addr: w.base, boxKey: held.boxKey, npub: held.npub } });
+    const code = got.searchParams.get('code')!;
+    assert.ok(code.length >= 22);
+    // The code with the wrong verifier is refused; with the app's own, the piece comes.
+    await assert.rejects(D.join(mac, held.boxKey, held.npub, w.send, undefined, { code, verifier: pkce().verifier }), /wrong_code/);
+    const mh = await D.join(mac, held.boxKey, held.npub, w.send, undefined, { code, verifier: mp.verifier });
+    assert.ok(verifyEvent(await D.signEvent(mac, mh, note(held.npub), w.send)));
+    // Back in the account page's tab (as when the way to the app failed): the six digits are still there to type.
+    await page.goBack();
+    await page.waitForSelector('#shortcode');
+    assert.match((await page.textContent('#shortcode'))!, /^\d{3} \d{3}$/);
+    assert.match((await page.textContent('#addcard, .card'))!, /type this only into Marble on Mac on this computer/);
+    assert.match((await page.textContent('#shortwhere'))!, new RegExp(`Your account page: ${new URL(w.base).host.replace(/\./g, '\\.')}`));
+    await page.screenshot({ path: join(shots, 'add-done.png') });
+    await page.click('#toaccount');
+    await page.waitForSelector('text=Welcome, Aaron');
+
+    // A stranger's link: their invite, their challenge. Pressed Add on the real page, a device adds it, but the
+    // approval goes to a return on THIS computer, and without it the stranger's device gets nothing.
+    calls.length = 0; back.length = 0;
+    const stranger = device('Marble on Mac'), sp = pkce();
+    await page.goto('about:blank');
+    await page.goto(w.base + '/#' + link(inviteOf(stranger), sp, 'st4te-strange1'));
+    await page.waitForSelector('#addcard');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(puts(), [], 'an already signed-in page leaves no note before the click');
+    await page.click('#addgo');
+    assert.deepEqual(await answered(), ['added Marble on Mac']);
+    await page.waitForURL((u: URL) => u.href.startsWith(ret));
+    for (const guess of ['000000', '123456', 'x'.repeat(24)]) await assert.rejects(D.join(stranger, held.boxKey, held.npub, w.send, undefined, { code: guess, verifier: sp.verifier }), /wrong_code/);
+    assert.equal(back.length, 1, 'the code went to this computer only');
+
+    // Not now sends nothing.
+    calls.length = 0;
+    await page.goto('about:blank');
+    await page.goto(w.base + '/#' + link(inviteOf(device('Marble on Mac')), pkce(), 'st4te-notnow01'));
+    await page.waitForSelector('#addno');
+    await page.click('#addno');
+    await page.waitForSelector('#notadded');
+    assert.equal(await page.textContent('#notadded'), 'Marble on Mac was not added.');
+    assert.equal(await kept(page), null);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual(puts(), []);
+    assert.deepEqual(errors.filter((e) => !/ERR_CONNECTION|Failed to load resource/.test(e)), []);
+  } finally { await browser.close(); await w.close(); app.close(); }
 });
 
 test('sign-in strength: one session for every way in today, and tiers a box owner can switch on', async () => {

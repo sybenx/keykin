@@ -5,8 +5,9 @@
 //   node tools/signin-vectors.mjs
 //
 // The events are signed here with two fixed test keys, so the file is plain data any implementation can read.
-// `expect` is the rule. `differs` names an implementation that answers otherwise today, with what it gives
-// (test/signin-vectors.test.ts holds signin/ and login/static/pointer.js to both).
+// `expect` is the rule. signin/ gives `expect` in every case. `differs` names another implementation that answers
+// otherwise today (only keykin-login, login/static/pointer.js), with what it gives; test/signin-vectors.test.ts holds
+// signin/ to `expect` and login/static/pointer.js to `differs` where it says so.
 import { writeFileSync } from 'node:fs';
 import { schnorr, sha256 } from '../signin/vendor/noble.js';
 import { toHex, fromHex, npub } from '../signin/ids.js';
@@ -57,11 +58,11 @@ const templates = [
     [null, 'missing'],
   ].map(([template, why]) => ({ template, origin: null, why })),
   { template: 'https://<nostrconnect>', origin: null, from: 'tube', why: 'the code would go into the host',
-    differs: { signin: 'https://x', [KL]: 'https://x' } },
+    differs: { [KL]: 'https://x' } },
   { template: 'https://account.syb.lol<nostrconnect>', origin: null, from: 'tube', why: 'the code would go into the host: the origin shown is not where the link goes',
-    differs: { signin: 'https://account.syb.lolx', [KL]: 'https://account.syb.lolx' } },
+    differs: { [KL]: 'https://account.syb.lolx' } },
   { template: 'https://account.syb.lol.<nostrconnect>', origin: null, from: 'tube', why: 'the code would go into the host',
-    differs: { signin: 'https://account.syb.lol.x', [KL]: 'https://account.syb.lol.x' } },
+    differs: { [KL]: 'https://account.syb.lol.x' } },
   { template: 'https://account.syb.lol/ #connect=<nostrconnect>', origin: null, from: 'tube', why: 'white space', differs: { [KL]: 'https://account.syb.lol' } },
   { template: ' https://account.syb.lol/#connect=<nostrconnect>', origin: null, why: 'white space before it', differs: { [KL]: 'https://account.syb.lol' } },
   { template: 'https://account.syb.lol/' + 'a'.repeat(500) + '<nostrconnect>', origin: null, from: 'tube', why: 'longer than 500', differs: { [KL]: 'https://account.syb.lol' } },
@@ -139,9 +140,8 @@ const pointers = [
   { why: 'a local template, for a reader that is not local', events: [p46('http://127.0.0.1:7470/#connect=<nostrconnect>')], expect: REMOVED },
   { why: 'a template with white space', events: [p46('https://account.syb.lol/ #connect=<nostrconnect>')], expect: REMOVED, differs: { [KL]: found('https://account.syb.lol', 'https://account.syb.lol/ #connect=<nostrconnect>') } },
   { why: 'two 10046 at the same second: the lower id wins (NIP-01), given higher id first', events: [hi, lo], expect: found(loOrigin, lo.tags[0][1]),
-    differs: { signin: found(hiOrigin, hi.tags[0][1]), [KL]: found(hiOrigin, hi.tags[0][1]) } },
-  { why: 'a 30078 whose first d is another app\'s: its address is that one (NIP-01), so it is not the pointer', events: [signed(30078, [['d', 'other'], ['d', 'keykin/login'], ['url', 'https://x.example']], 100)], expect: NONE,
-    differs: { signin: old('https://x.example') } },
+    differs: { [KL]: found(hiOrigin, hi.tags[0][1]) } },
+  { why: 'a 30078 whose first d is another app\'s: its address is that one (NIP-01), so it is not the pointer', events: [signed(30078, [['d', 'other'], ['d', 'keykin/login'], ['url', 'https://x.example']], 100)], expect: NONE },
 ];
 
 // ── Typed names: { pubkey } for a key, { name, domain } to look up by NIP-05 (a bare domain is _), or null ──
@@ -163,15 +163,15 @@ const typed = [
   { typed: relayFirst, expect: { pubkey: KEY }, why: 'an nprofile with its relay before its key' },
   { typed: KEY, expect: { pubkey: KEY } },
   { typed: KEY.toUpperCase(), expect: { pubkey: KEY } },
-  { typed: n.toUpperCase(), expect: { pubkey: KEY }, why: 'bech32 may be all upper case', differs: { signin: null } },
-  { typed: 'NOSTR:' + n, expect: { pubkey: KEY }, differs: { signin: null } },
-  { typed: n.slice(0, 10) + n.slice(10).toUpperCase(), expect: null, why: 'mixed case is not bech32', differs: { signin: { pubkey: KEY } } },
+  { typed: n.toUpperCase(), expect: { pubkey: KEY }, why: 'bech32 may be all upper case' },
+  { typed: 'NOSTR:' + n, expect: { pubkey: KEY } },
+  { typed: n.slice(0, 10) + n.slice(10).toUpperCase(), expect: null, why: 'mixed case is not bech32' },
   { typed: flipped, expect: null, why: 'a bad checksum' },
   { typed: KEY.slice(1), expect: null, why: '63 hex' },
   { typed: bech('npub', new Uint8Array(31)), expect: null, why: '31 bytes' },
   { typed: bech('nsec', new Uint8Array(32).fill(1)), expect: null, why: 'never a secret key' },
-  { typed: 'aaron+tag@example.com', expect: null, why: 'NIP-05 names are a-z0-9-_.', differs: { signin: { name: 'aaron+tag', domain: 'example.com' } } },
-  { typed: 'a'.repeat(401) + '.com', expect: null, why: 'longer than 400', differs: { signin: { name: '_', domain: 'a'.repeat(401) + '.com' } } },
+  { typed: 'aaron+tag@example.com', expect: null, why: 'NIP-05 names are a-z0-9-_.' },
+  { typed: 'a'.repeat(401) + '.com', expect: null, why: 'longer than 400' },
   ...['', '   ', 'aaron', 'aaron@', '@herbstmeister.com', 'a b@c.com', 'https://herbstmeister.com', 'x@y', null].map((t) => ({ typed: t, expect: null })),
 ];
 
@@ -179,7 +179,7 @@ const typed = [
 const nip05 = [
   { name: 'aaron', domain: 'herbstmeister.com', status: 200, body: { names: { aaron: KEY } }, expect: KEY },
   { name: 'aaron', domain: 'x.com', status: 200, body: { names: { Aaron: KEY } }, expect: KEY, why: 'a name in another case still matches' },
-  { name: 'aaron', domain: 'x.com', status: 200, body: { names: { Aaron: KEY.toUpperCase() } }, expect: KEY, why: 'an upper case key, lowercased', differs: { signin: null } },
+  { name: 'aaron', domain: 'x.com', status: 200, body: { names: { Aaron: KEY.toUpperCase() } }, expect: KEY, why: 'an upper case key, lowercased' },
   { name: 'aaron', domain: 'x.com', status: 200, body: { names: {} }, expect: null },
   { name: 'aaron', domain: 'x.com', status: 200, body: { names: { aaron: 'npub1xyz' } }, expect: null },
   { name: 'aaron', domain: 'x.com', status: 404, body: {}, expect: null },
@@ -189,7 +189,7 @@ const nip05 = [
 ];
 
 const out = {
-  about: 'Shared cases for the login-page pointer (Keykin SPEC 11.1) and name-first sign-in. Made by tools/signin-vectors.mjs; run by test/signin-vectors.test.ts. `expect` is the rule; `differs` names an implementation that answers otherwise today, and what it gives. `here` is the reader\'s own hostname (default marble.example). Pointer states: found (origin, template, kind), removed (keykin-login says bad for a bad one), none.',
+  about: 'Shared cases for the login-page pointer (Keykin SPEC 11.1) and name-first sign-in. Made by tools/signin-vectors.mjs; run by test/signin-vectors.test.ts. `expect` is the rule, and signin/ gives it in every case; `differs` names another implementation that answers otherwise today, and what it gives. `here` is the reader\'s own hostname (default marble.example). Pointer states: found (origin, template, kind), removed (keykin-login says bad for a bad one), none.',
   account: ME, other: THEM, here: 'marble.example',
   templates, origins, links, legacy, pointers, typed, nip05,
 };

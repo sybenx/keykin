@@ -22,7 +22,9 @@ function graph(start: string): Set<string> {
 
 test('signin: layer 1 loads none of the screen\'s files', () => {
   const files = [...graph('rules.js')].sort();
-  assert.deepEqual(files, ['connect.js', 'hooks.js', 'ids.js', 'pointer.js', 'pool.js', 'rules.js', 'vendor/noble.js', 'vendor/sign.js']);
+  assert.deepEqual(files, ['connect.js', 'hooks.js', 'ids.js', 'pointer.js', 'pool.js', 'pure.js', 'rules.js', 'vendor/noble.js', 'vendor/sign.js']);
+  // the pure rules alone: a page can load them without the relay pool or the crypto
+  assert.deepEqual([...graph('pure.js')].sort(), ['ids.js', 'pure.js']);
   // and layer 2 loads no part of layer 3
   for (const f of graph('me.js')) assert.ok(!['dialog.js', 'toast.js', 'account-page.js'].includes(f), f);
 });

@@ -86,7 +86,7 @@ export function clientOf(code: string): string | null {
 /** Something the account page started for a device to finish (SPEC 11.6). */
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
 /** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null }
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null; lists?: boolean; dms?: boolean }
 /** A signed-in account page (SPEC 11.6), kept by SHA-256 of its token, never the token. Unix seconds. */
 export interface PageSession { account: string; how: 'password' | 'passkey' | 'scan'; made: number; last: number; agent: string }
 /** One line of an account's recent activity. */
@@ -359,7 +359,7 @@ export class Box {
   }
 
   #waitingNotes(npub: string) {
-    return this.onNotes(npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}) }));
+    return this.onNotes(npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as, lists, dms }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}), ...(kind === 'bunker' ? { lists: lists === true, dms: dms === true } : {}) }));
   }
 
   // --- Holding a `notes_wait` (SPEC 11.6). The request was checked once, in `handle`; this only waits. ---

@@ -7,15 +7,21 @@ import { v2 as nip44 } from 'nostr-tools/nip44';
 import { Relay } from 'nostr-tools/relay';
 import * as D from './device.ts';
 import { KeykinError, hexToBytes, bytesToHex, randomBytes } from './bytes.ts';
+import { TICKET_SECONDS } from './ticket.ts';
 
 export interface BunkerState {
   sk: string; secret: string; clients: string[];
   /** The relay the signer listens on, so a ticket can name it. */
   relay?: string;
   /** Sign-in tickets handed out and not yet used (QRST signer-ticket). Each works once, until `expires`. */
-  tickets?: { t: string; expires: number; origin?: string }[];
+  /** A bunker link's ticket may carry the site's name, as the person typed it, and its two switches. */
+  tickets?: { t: string; expires: number; origin?: string; name?: string; lists?: boolean; dms?: boolean }[];
   /** Which site each signed-in client key belongs to, when it came in by a ticket. */
   origins?: Record<string, string>;
+  /** A site's name when it has no origin: the one the person typed, else the site's own (its code's, or its first post's client tag). */
+  names?: Record<string, string>;
+  /** A site's two switches, "Read your private lists" and "Read and send DMs", when its link turned one on. Kept for the site; this core does not act on them yet. */
+  scopes?: Record<string, { lists: boolean; dms: boolean }>;
   /** The grant each signed-in client key is known by at the box (SPEC 11.5). */
   grants?: Record<string, D.Grant>;
   /** For a site that came in by a nostrconnect:// code: the relays its code named, which the signer also listens on. */
@@ -24,14 +30,20 @@ export interface BunkerState {
 /** Signs one site out. The link's secret changes too, so an old link cannot be used to come back. */
 export function signOut(b: BunkerState, prefix: string): string[] {
   const gone = b.clients.filter((c) => c.startsWith(prefix));
-  const named = Object.entries(b.origins ?? {}).filter(([, o]) => o === prefix || o.includes(prefix)).map(([k]) => k);
+  const named = Object.entries({ ...b.names, ...b.origins }).filter(([, o]) => o === prefix || o.includes(prefix)).map(([k]) => k);
   for (const k of named) if (!gone.includes(k)) gone.push(k);
-  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) { delete b.origins?.[k]; delete b.grants?.[k]; delete b.relaysOf?.[k]; } b.secret = bytesToHex(randomBytes(16)); }
+  if (gone.length) { b.clients = b.clients.filter((c) => !gone.includes(c)); for (const k of gone) { delete b.origins?.[k]; delete b.names?.[k]; delete b.scopes?.[k]; delete b.grants?.[k]; delete b.relaysOf?.[k]; } b.secret = bytesToHex(randomBytes(16)); }
   return gone;
 }
 export const newBunker = (): BunkerState => ({ sk: bytesToHex(randomBytes(32)), secret: bytesToHex(randomBytes(16)), clients: [] });
 export const bunkerUrl = (b: BunkerState, relay: string) =>
   `bunker://${getPublicKey(hexToBytes(b.sk))}?relay=${encodeURIComponent(relay)}&secret=${b.secret}`;
+/** A bunker link whose secret is a ticket: it works once, for 15 minutes, and names the site and sets its switches as asked. */
+export function bunkerTicket(b: BunkerState, relay: string, o: { name?: string; lists?: boolean; dms?: boolean } = {}): string {
+  const t = bytesToHex(randomBytes(16)), name = D.siteName(o.name);
+  (b.tickets ??= []).push({ t, expires: Math.floor(Date.now() / 1000) + TICKET_SECONDS, ...(name ? { name } : {}), ...(o.lists ? { lists: true } : {}), ...(o.dms ? { dms: true } : {}) });
+  return `bunker://${getPublicKey(hexToBytes(b.sk))}?relay=${encodeURIComponent(relay)}&secret=${t}`;
+}
 
 /** Answers one request from `client`. Returns the NIP-46 `result` string, or throws. */
 export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D.Send, client: string, method: string, params: string[], onChange: () => void): Promise<string> {
@@ -45,8 +57,10 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
       if (ticket) {            // a ticket works once, and the site's key is tied to the origin the person approved
         b.tickets = b.tickets.filter((x) => x !== ticket);
         if (ticket.origin) (b.origins ??= {})[client] = ticket.origin;
+        if (ticket.name) (b.names ??= {})[client] = ticket.name;
+        if (ticket.lists || ticket.dms) (b.scopes ??= {})[client] = { lists: !!ticket.lists, dms: !!ticket.dms };
       }
-      admit(b, client, b.origins?.[client]);
+      admit(b, client, b.origins?.[client] ?? b.names?.[client]);
       onChange();
     }
     return params[1] ? params[1] : 'ack';
@@ -65,6 +79,7 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
     case 'get_public_key': return h.npub;
     case 'sign_event': {
       const e = JSON.parse(params[0]);
+      nameFromPost(b, client, e.tags, onChange);
       const signed = await D.signEvent(me, h, { pubkey: h.npub, created_at: e.created_at, kind: e.kind, tags: e.tags ?? [], content: e.content ?? '' }, send, undefined, grant);
       return JSON.stringify(signed);
     }
@@ -81,11 +96,26 @@ function admit(b: BunkerState, client: string, name?: string) {
   (b.grants ??= {})[client] ??= D.newGrant('site', name ?? `A site (${client.slice(0, 8)})`);
 }
 
-/** Forgets a site: its key, its grant, the origin it was approved for and the relays it named. */
+/**
+ * A site with no origin and no name takes the name its first post carries in a client tag
+ * (`["client", "<name>", ...]`). A name, once there, stays: the person's own word, or the first tag.
+ */
+function nameFromPost(b: BunkerState, client: string, tags: unknown, onChange: () => void) {
+  if (b.origins?.[client] || b.names?.[client] || !Array.isArray(tags)) return;
+  const name = D.siteName(tags.find((t) => Array.isArray(t) && t[0] === 'client' && D.siteName(t[1]))?.[1]);
+  if (!name) return;
+  (b.names ??= {})[client] = name;
+  const g = b.grants?.[client]; if (g) g.name = name;
+  onChange();
+}
+
+/** Forgets a site: its key, its grant, the origin it was approved for, its name and the relays it named. */
 export function dropClient(b: BunkerState, client: string) {
   b.clients = b.clients.filter((c) => c !== client);
   if (b.grants) delete b.grants[client];
   if (b.origins) delete b.origins[client];
+  if (b.names) delete b.names[client];
+  if (b.scopes) delete b.scopes[client];
   if (b.relaysOf) delete b.relaysOf[client];
 }
 
@@ -159,7 +189,8 @@ export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held
     const c = readNostrConnect(text);
     o.before?.();
     if (c.url) (o.bunker.origins ??= {})[c.client] = c.url;
-    admit(o.bunker, c.client, c.url ?? c.name);
+    const name = D.siteName(c.name); if (name) (o.bunker.names ??= {})[c.client] = name;
+    admit(o.bunker, c.client, c.url ?? name);
     (o.bunker.relaysOf ??= {})[c.client] = c.relays;
     o.onChange?.();
     let sent = 0;

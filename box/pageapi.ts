@@ -165,6 +165,7 @@ export class PageApi {
           if (list.length >= 10) refuse('too_many');
           // Only the hard-to-undo one asks the person on a device. The rest a device just does.
           const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}), ...(body.kind === 'invite' ? { challenge } : {}),
+            ...(body.kind === 'bunker' ? { lists: body.lists === true, dms: body.dms === true } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
           this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now

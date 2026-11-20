@@ -17,7 +17,8 @@
 //   keykin agent <relay url>                             stay on and do what the account page asks: add a device,
 //                                                        hand out bunker links, sign in to a site that shows a
 //                                                        nostrconnect:// code, and (after a Yes here) remove blocked devices
-//   keykin bunker <relay url>                            sign in to sites (NIP-46)
+//   keykin bunker <relay url> [--name <site>]           sign in to sites (NIP-46). With a name: a link good once, for 15 minutes,
+//                                                        and the site is listed by that name
 //   keykin scan '<a site's sign-in code>' [--yes]         sign in to a site that shows a code (the bunker must be running)
 //   keykin sites | signout <site or key prefix>          the sites signed in through the bunker
 //   keykin login '<text from the box page>'              log a browser in to the box's page
@@ -33,7 +34,7 @@ import * as D from '../src/device.ts';
 import { createServer } from 'node:http';
 import { load, save, meOf, heldOf, keep, sender } from './store.ts';
 import { DeviceHelper } from '../src/helper.ts';
-import { newBunker, runBunker, signOut, bunkerUrl, syncGrants } from '../src/nip46.ts';
+import { newBunker, runBunker, signOut, bunkerUrl, bunkerTicket, syncGrants } from '../src/nip46.ts';
 import { readCode, answerCode, newTicket } from '../src/ticket.ts';
 import { getPublicKey } from 'nostr-tools/pure';
 import { createInterface } from 'node:readline/promises';
@@ -205,7 +206,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       });
       return out(`${params.origin ?? 'That site'} can now sign as you.`);
     }
-    case 'sites': { const cs = s.bunker?.clients ?? []; if (!cs.length) return out('No site is signed in.'); for (const c of cs) out(`  ${c}${s.bunker?.origins?.[c] ? `  ${s.bunker.origins[c]}` : ''}`); return; }
+    case 'sites': { const cs = s.bunker?.clients ?? []; if (!cs.length) return out('No site is signed in.'); for (const c of cs) { const n = s.bunker?.origins?.[c] ?? s.bunker?.names?.[c]; out(`  ${c}${n ? `  ${n}` : ''}`); } return; }
     case 'signout': {
       if (!s.bunker || !a) fail('Give the start of a site key from "keykin sites".');
       const gone = signOut(s.bunker!, a); save(file, s);
@@ -227,7 +228,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       };
       const tick = async () => {
         try {
-          for (const did of await D.answerNotes(me, held, send, { addr: s.addr!, tap, bunker: async () => bunkerUrl(s.bunker!, a), connect: run.connect })) out(`agent: ${did}`);
+          for (const did of await D.answerNotes(me, held, send, { addr: s.addr!, tap, bunker: async (o) => o.name || o.lists || o.dms ? bunkerTicket(s.bunker!, a, o) : bunkerUrl(s.bunker!, a), connect: run.connect })) out(`agent: ${did}`);
           if (await syncGrants(s.bunker!, me, held, send)) out('agent: a sign-in was revoked at the box');
           keepAll();
         } catch (e: any) { if (e?.code === 'blocked' || e?.code === 'unknown_member') out(`agent: this device is ${e.code === 'blocked' ? 'blocked' : 'no longer in the account'}`); }
@@ -241,9 +242,12 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       if (!a) fail('Give a relay address, for example wss://relay.example.com');
       const held = heldOf(s);
       if (!s.bunker) { s.bunker = newBunker(); save(file, s); }
+      const at = argv.indexOf('--name'), name = at > 0 ? D.siteName(argv[at + 1]) : undefined;
+      const link = name ? bunkerTicket(s.bunker, a, { name }) : undefined;
+      if (link) save(file, s);
       const run = await runBunker({ bunker: s.bunker, me, held, send: box(), relay: a, onChange: () => { keep(s, held, s.addr!); save(file, s); },
-        before: () => { const fresh = load(file).bunker; if (fresh) Object.assign(s.bunker!, { clients: fresh.clients, secret: fresh.secret, tickets: fresh.tickets, origins: fresh.origins }); }, log: out });
-      out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
+        before: () => { const fresh = load(file).bunker; if (fresh) Object.assign(s.bunker!, { clients: fresh.clients, secret: fresh.secret, tickets: fresh.tickets, origins: fresh.origins, names: fresh.names }); }, log: out });
+      out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${link ?? run.url}`);
       return run;
     }
     default: out('Commands: create, import, forget-key, invite, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;

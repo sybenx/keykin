@@ -8,6 +8,8 @@ import { Box } from '../box/box.ts';
 import { PageApi } from '../box/pageapi.ts';
 import { eventId } from '../src/event.ts';
 import { hexToBytes, bytesToHex, randomBytes, sha } from '../src/bytes.ts';
+import { newBunker, bunkerTicket, answerRequest, syncGrants } from '../src/nip46.ts';
+import { getPublicKey } from 'nostr-tools/pure';
 const schnorrSha = (v: string) => sha(new TextEncoder().encode(v));
 
 const NOW = 1_800_000_000;
@@ -733,4 +735,60 @@ test('the Sites and apps detail line', async () => {
   assert.equal(siteDetail({ kind: 'app', since, deviceName: 'Pixel 9a', last: null }, since), 'App on Pixel 9a · added 19 Nov 06:14 · not used yet');
   assert.deepEqual([0, 1, 4, 6, 7, 99999].map(kindWord), ['profile', 'note', 'DM', 'repost', 'reaction', 'kind 99999 event']);
   for (const s of [siteDetail(g, since)]) assert.ok(!s.includes('—'));
+});
+
+test('a bunker link names its site: the name typed on the page, else the site\'s first client tag; the box lists it', async () => {
+  const { box, send, call, tick } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  tick(Math.floor(Date.now() / 1000) - NOW);           // a bunker signs at the real time
+  const T = Math.floor(Date.now() / 1000);
+  const b = newBunker(), bunkerKey = getPublicKey(hexToBytes(b.sk));
+  let changes = 0; const changed = () => { changes++; };
+  const ask = (client: string, method: string, params: string[]) => answerRequest(b, phone, held, send, client, method, params, changed);
+  const post = (client: string, tags: string[][]) => ask(client, 'sign_event', [JSON.stringify({ kind: 1, created_at: T, tags, content: 'hi' })]);
+  const names = async () => { await syncGrants(b, phone, held, send); return call({ call: 'me', session }).grants.map((g: any) => g.name).sort(); };
+  const secretOf = (link: string) => new URL(link.replace('bunker://', 'https://')).searchParams.get('secret')!;
+  let asked: any;
+  const can = { addr: 'https://account.example', tap: async () => false, bunker: async (o: any) => { asked = o; return bunkerTicket(b, 'wss://r', o); } };
+
+  // The page asks for a link with a name and both switches. The note carries them; the device cleans the name.
+  const { note } = call({ call: 'note_put', session, kind: 'bunker', text: ' \u0007Jumble\n', lists: true, dms: true });
+  const [n] = await D.notes(phone, held, send, T);
+  assert.deepEqual([n.text, n.lists, n.dms], [' \u0007Jumble\n', true, true]);
+  assert.deepEqual(await D.answerNotes(phone, held, send, can, T), ['gave a bunker link']);
+  assert.deepEqual(asked, { name: 'Jumble', lists: true, dms: true });
+  const jumble = bytesToHex(randomBytes(32));
+  await ask(jumble, 'connect', [bunkerKey, secretOf(call({ call: 'note_get', session, note }).result)]);
+  assert.deepEqual(b.scopes?.[jumble], { lists: true, dms: true });
+  assert.deepEqual(await names(), ['Jumble']);
+  // The typed name wins over the site's own client tag.
+  changes = 0;
+  assert.ok(valid(JSON.parse(await post(jumble, [['client', 'Other app']]))));
+  assert.equal(b.grants![jumble].name, 'Jumble'); assert.equal(changes, 0);
+
+  // A site in by the plain link, with no name: "A site" until a post carries a client tag. The first tag names it, once.
+  const plain = bytesToHex(randomBytes(32));
+  await ask(plain, 'connect', [bunkerKey, b.secret]);
+  assert.match((await names())[0], /^A site \(/);
+  await post(plain, [['t', 'keykin']]);
+  assert.equal(changes, 1);                                // only the connect
+  await post(plain, [['client', ''], ['client', '  Coracle  ', '31990:abc:def', 'wss://r']]);
+  assert.equal(b.grants![plain].name, 'Coracle'); assert.equal(changes, 2);
+  assert.deepEqual(await names(), ['Coracle', 'Jumble']); // the box takes the renamed grant
+  await post(plain, [['client', 'Snort']]);
+  assert.equal(b.grants![plain].name, 'Coracle'); assert.equal(changes, 2);
+  assert.equal(b.scopes?.[plain], undefined);
+
+  // With nothing typed and the switches left off, the note says so and the site has no name yet.
+  call({ call: 'note_put', session, kind: 'bunker', text: '   ' });
+  const [n2] = await D.notes(phone, held, send, T);
+  assert.deepEqual([n2.lists, n2.dms], [false, false]);
+  await D.answerNotes(phone, held, send, can, T);
+  assert.deepEqual(asked, { name: undefined, lists: false, dms: false });
+  // Other kinds of note carry no switches.
+  call({ call: 'note_put', session, kind: 'nostrconnect', text: 'nostrconnect://x', lists: true });
+  assert.equal((await D.notes(phone, held, send, T)).find((x) => x.kind === 'nostrconnect')!.lists, undefined);
 });

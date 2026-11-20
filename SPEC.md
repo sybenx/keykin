@@ -240,6 +240,15 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Each answer goes back on the relay its request came in on.
 - Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
   forgets the site and answers `not_connected` from then on.
+- **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
+  the person may name the site when asking for the link ("Which site is it for?"). The link's secret
+  is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
+  A site with no origin and no name takes one from the first `sign_event` it asks for that has a
+  client tag (`["client", "<name>", ...]`, the second item). A name is cleaned (no control
+  characters, trimmed, at most 60 characters; empty means none) and, once set, stays: the person's
+  word wins over a client tag, and the first client tag over later ones. Devices name a site, here
+  and in its grant, by its origin, else its name, else "A site". `keykin bunker <relay> --name <site>`
+  prints such a link.
 
 ## 8d. The command-line device
 
@@ -639,7 +648,9 @@ each device tells the box what it has let in.
 
 - A **grant** is `{ id, kind, name, since }`. `id` is 16 random bytes, hex, made by the device.
   `kind` is `site` (a site signed in through this device) or `app` (another app on the phone).
-  `name` is the site's origin or the app's name. `since` is unix seconds.
+  `name` is the site's origin or the app's name. A site with no origin is named as in section 8c:
+  the name the person typed, else its first client tag, else "A site". When a name comes later the
+  device sends its list again with the new name. `since` is unix seconds.
 - A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
   changes. The box keeps the list per device.
 - **Telling grants apart** (Aaron, 2026-11-19). A grant may also carry, all optional:
@@ -912,10 +923,13 @@ Kotlin core are the test both sides use.
 - The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
   (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
   uses the main account, as before. `kind` is `invite` (the text is a new
-  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
-  `cycle` (no text).
+  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (the text is
+  an optional name for the site, section 8c, which the device cleans) or `cycle` (no text). A
+  `bunker` note may also carry `lists` and `dms`, the site's two switches ("Read your private lists",
+  "Read and send DMs"). Only `true` turns one on; other kinds ignore them.
 - `{ op: "notes", account }` from a device returns the waiting ones, each
-  `{ id, kind, text, at, tap }`. `tap` is true only for `cycle`.
+  `{ id, kind, text, at, tap }`, and for `bunker` also `lists` and `dms` (true or false). `tap` is
+  true only for `cycle`. The device's link gives the site those switches when it connects.
 - `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
   the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
   such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the

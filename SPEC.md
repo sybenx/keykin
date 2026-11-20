@@ -1025,11 +1025,16 @@ Kotlin core are the test both sides use.
   an optional name for the site, section 8c, which the device cleans), `cycle` (no text) or `pointer`
   (no text: the box puts in its own login page address, section 11.1, and refuses with `no_login_page`
   when it has none). A `pointer` note needs no more than a `bunker` note does: any page session. A
-  `bunker` note may also carry `lists` and `dms`, the site's two switches ("Read your private lists",
-  "Read and send DMs"). Only `true` turns one on; other kinds ignore them.
+  `bunker` or `nostrconnect` note may also carry `lists` and `dms`, the site's two switches ("Read
+  your private lists", "Read and send DMs"). Only `true` turns one on; other kinds ignore them. For a
+  `nostrconnect` note the account page's sign-in card shows both switches, and "Read your private
+  lists" starts on when the code's `perms` name `nip44_decrypt` or `nip04_decrypt`, as a phone's
+  scan does (Aaron, 2026-11-20). No device shows a card of its own for a code from the page, so
+  without this a site that needs to decrypt, such as Marble Web's vault, was let in with both off.
 - `{ op: "notes", account }` from a device returns the waiting ones, each
-  `{ id, kind, text, at, tap }`, and for `bunker` also `lists` and `dms` (true or false). `tap` is
-  true for `cycle` and `pointer`. The device's link gives the site those switches when it connects.
+  `{ id, kind, text, at, tap }`, and for `bunker` and `nostrconnect` also `lists` and `dms` (true or
+  false). `tap` is true for `cycle` and `pointer`. The device gives the site those switches when it
+  connects.
 - `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
   the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
   such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the

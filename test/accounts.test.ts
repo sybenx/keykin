@@ -872,7 +872,14 @@ test('a bunker link names its site: the name typed on the page, else the site\'s
   assert.deepEqual([n2.lists, n2.dms], [false, false]);
   await D.answerNotes(phone, held, send, can, T);
   assert.deepEqual(asked, { name: undefined, lists: false, dms: false });
-  // Other kinds of note carry no switches.
+  // A site's sign-in code handed over by the page carries the switches too, and the device gets them with the code.
   call({ call: 'note_put', session, kind: 'nostrconnect', text: 'nostrconnect://x', lists: true });
-  assert.equal((await D.notes(phone, held, send, T)).find((x) => x.kind === 'nostrconnect')!.lists, undefined);
+  const nc = (await D.notes(phone, held, send, T)).find((x) => x.kind === 'nostrconnect')!;
+  assert.deepEqual([nc.lists, nc.dms], [true, false]);
+  let connected: any;
+  assert.ok((await D.answerNotes(phone, held, send, { ...can, connect: async (uri: string, o: any) => { connected = [uri, o]; return true; } }, T)).includes('signed a site in'));
+  assert.deepEqual(connected, ['nostrconnect://x', { lists: true, dms: false }]);
+  // Other kinds of note carry no switches.
+  call({ call: 'note_put', session, kind: 'invite', text: '{}', lists: true });
+  assert.equal((await D.notes(phone, held, send, T)).find((x) => x.kind === 'invite')!.lists, undefined);
 });

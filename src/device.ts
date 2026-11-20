@@ -296,12 +296,13 @@ export async function noteRefuse(me: Me, h: Held, note: string, send: Send, t = 
  *   `tap(text)`    asks the person Yes or No. Called only for hard-to-undo notes.
  *   `bunker(o)`    makes a bunker:// link, or null if this device runs no remote signer. `o.name` is the
  *                  site's name if the person gave one, and `o.lists`, `o.dms` the site's two switches.
- *   `connect(uri)` becomes the signer for a nostrconnect:// code, or false if this device cannot.
+ *   `connect(uri, o)` becomes the signer for a nostrconnect:// code, or false if this device cannot. `o.lists`,
+ *                  `o.dms` are the site's two switches, as the person set them on the account page.
  *   `pointer(origin)` signs and publishes the sign-in-page pointer (both kinds, SPEC 11.1) naming `origin`,
  *                  true once a relay took it. Asked first with `tap`; No answers `declined`, not `note_refuse`.
  * Returns what it did, for the device to show or log.
  */
-export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: (o: { name?: string; lists: boolean; dms: boolean }) => Promise<string | null>; connect?: (uri: string) => Promise<boolean>; pointer?: (origin: string) => Promise<boolean> }, t = now()): Promise<string[]> {
+export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: (o: { name?: string; lists: boolean; dms: boolean }) => Promise<string | null>; connect?: (uri: string, o: { lists: boolean; dms: boolean }) => Promise<boolean>; pointer?: (origin: string) => Promise<boolean> }, t = now()): Promise<string[]> {
   const did: string[] = [];
   for (const n of await notes(me, h, send, t)) {
     try {
@@ -314,7 +315,7 @@ export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: stri
         const link = await can.bunker?.({ name: siteName(n.text), lists: n.lists === true, dms: n.dms === true });
         if (link) { await noteDone(me, h, n.id, link, send, t); did.push('gave a bunker link'); }
       } else if (n.kind === 'nostrconnect') {
-        if (await can.connect?.(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push('signed a site in'); }
+        if (await can.connect?.(n.text, { lists: n.lists === true, dms: n.dms === true })) { await noteDone(me, h, n.id, 'ok', send, t); did.push('signed a site in'); }
       } else if (n.kind === 'pointer') {
         if (!can.pointer || !/^https?:\/\/[^\s/?#]+$/.test(n.text)) continue;
         if (!(await can.tap(`Make ${new URL(n.text).host} your sign-in page?`))) { await noteDone(me, h, n.id, 'declined', send, t); did.push('said No to the sign-in page'); }

@@ -94,7 +94,7 @@ export function clientOf(code: string): string | null {
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
 /** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose.
  *  For `pointer`, `text` is the box's own login page address, never anything the page sent.
- *  For `bunker`, `text` is an optional name for the site and `lists`, `dms` the site's two switches. */
+ *  For `bunker`, `text` is an optional name for the site. `bunker` and `nostrconnect` carry `lists`, `dms`, the site's two switches. */
 export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null; lists?: boolean; dms?: boolean }
 /** A signed-in account page (SPEC 11.6), kept by SHA-256 of its token, never the token. Unix seconds. */
 export interface PageSession { account: string; how: 'password' | 'passkey' | 'scan'; made: number; last: number; agent: string }
@@ -371,7 +371,7 @@ export class Box {
   }
 
   #waitingNotes(npub: string) {
-    return this.onNotes(npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as, lists, dms }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}), ...(kind === 'bunker' ? { lists: lists === true, dms: dms === true } : {}) }));
+    return this.onNotes(npub).filter((n) => n.result === undefined).map(({ id, kind, text, at, tap, from, as, lists, dms }) => ({ id, kind, text, at, tap, ...(kind === 'nostrconnect' ? { from: from ?? null, as: as ?? 'main' } : {}), ...(kind === 'bunker' || kind === 'nostrconnect' ? { lists: lists === true, dms: dms === true } : {}) }));
   }
 
   // --- Holding a `notes_wait` (SPEC 11.6). The request was checked once, in `handle`; this only waits. ---

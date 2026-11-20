@@ -73,7 +73,10 @@
     const name = String(u.searchParams.get('name') ?? meta.name ?? '').trim().slice(0, 60) || null;
     let url = u.searchParams.get('url') ?? meta.url ?? null;
     try { url = url && /^https?:$/.test(new URL(url).protocol) ? new URL(url).href : null; } catch { url = null; }
-    return { uri, name, url, host: url ? new URL(url).host : null, relays };
+    // "Read your private lists" starts on when the code asks to decrypt (NIP-46 perms), as on a phone's scan; DMs never do.
+    const perms = (u.searchParams.get('perms') ?? '').split(',').map((p) => p.trim().split(':')[0]);
+    const asksLists = perms.includes('nip44_decrypt') || perms.includes('nip04_decrypt');
+    return { uri, name, url, host: url ? new URL(url).host : null, relays, asksLists };
   }
   const senderOf = () => {
     try { const o = document.referrer ? new URL(document.referrer).origin : null; return o && /^https?:\/\//.test(o) ? o : null; } catch { return null; }
@@ -547,12 +550,17 @@
     const go = el('button', { className: 'btn go', type: 'button', id: 'connectgo' }, warn ? 'Sign in anyway' : 'Sign in');
     const no = el('button', { className: 'btn', type: 'button', id: 'connectno' }, 'Not now');
     const own = el('button', { className: 'linkish small', type: 'button', id: 'connectsite', style: 'align-self:flex-start' }, 'Use a separate account for this site');
+    // The site's two switches (SPEC 11.5), chosen here since no device shows a card for a code from this page.
+    const scopes = { lists: !!c.asksLists, dms: false };
+    const toggle = (k, text) => el('label', { className: 'toggle' },
+      el('input', { type: 'checkbox', id: 'connect' + k, checked: scopes[k], on: { change: (e) => { scopes[k] = e.currentTarget.checked; } } }), text);
     const node = card(
       el('h2', { id: 'connecttitle' }, host ? `Sign in to ${host} as ${who}?` : `Sign in to a site as ${who}?`),
       el('div', { className: 'hello small-hello' }, pic, el('div', {}, el('div', { className: 'name', id: 'connectwho' }, who), me?.npubText ? el('div', { className: 'mono small dim' }, me.npubText.slice(0, 16) + '…' + me.npubText.slice(-6)) : null)),
       c.from ? el('div', { className: 'small dim', id: 'askfrom' }, `Sent from ${c.from}`) : null,
       warn ? el('div', { className: 'notice warn', id: 'connectwarn', role: 'alert' }, warn, c.name || c.host ? ` It calls itself ${c.name ?? c.host}. Only sign in if you trust it.` : ' Only sign in if you trust it.') : null,
       el('div', { className: 'small dim mono', id: 'askrelay' }, `Relay: ${c.relays.join(', ')}`),
+      el('div', { className: 'stickopts', id: 'connectopts' }, toggle('lists', 'Read your private lists'), toggle('dms', 'Read and send DMs')),
       el('div', { className: 'with-note' }, go, no), own);
     node.id = 'connectcard';
     const yes = (as) => {
@@ -561,7 +569,7 @@
       const slow = el('p', { className: 'small dim', id: 'slow', hidden: true }, 'No device has answered yet. One of your devices needs to be online with an up-to-date Marble. This page keeps waiting for a few more minutes.');
       const next = card(el('h2', {}, `Signing in to ${siteName(c)}`), el('div', { className: 'small dim mono' }, `Relay: ${c.relays.join(', ')}`), line, slow);
       node.replaceWith(next);
-      handOff(c, line, slow, as);
+      handOff(c, line, slow, as, scopes);
     };
     go.onclick = () => yes('main');
     own.onclick = () => yes('site');
@@ -631,8 +639,8 @@
     });
   }
 
-  async function handOff(c, line, slow, as) {
-    const r = await api('note_put', { kind: 'nostrconnect', text: c.uri, from: c.from, as }).catch(() => ({ error: 'no_box' }));
+  async function handOff(c, line, slow, as, scopes = {}) {
+    const r = await api('note_put', { kind: 'nostrconnect', text: c.uri, from: c.from, as, ...(scopes.lists ? { lists: true } : {}), ...(scopes.dms ? { dms: true } : {}) }).catch(() => ({ error: 'no_box' }));
     if (r.error === 'login') return showLogin(say('login'));
     if (!r.ok) { line.textContent = say(r.error); return; }
     store.set(PENDING, null);                    // the box holds it now; a reload must not send it twice

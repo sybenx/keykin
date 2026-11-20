@@ -793,11 +793,11 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     };
     // The account's name and picture, which the sign-in card shows.
     await publish({ kind: 0, created_at: now(), tags: [], content: JSON.stringify({ name: 'Aaron', picture: 'https://pics.example/aaron.png' }) });
-    const code = (name: string, url = siteOrigin + '/') => {
+    const code = (name: string, url = siteOrigin + '/', perms?: string[]) => {
       const key = generateSecretKey();
-      return { key, uri: createNostrConnectURI({ clientPubkey: getPublicKey(key), relays: [relay.url], secret: 'c0ffee' + Math.random().toString(16).slice(2, 8), name, url }) };
+      return { key, uri: createNostrConnectURI({ clientPubkey: getPublicKey(key), relays: [relay.url], secret: 'c0ffee' + Math.random().toString(16).slice(2, 8), name, url, perms }) };
     };
-    const site = async (name: string, url?: string) => { const c = code(name, url); return { uri: c.uri, waiting: BunkerSigner.fromURI(c.key, c.uri, {}, 30_000) }; };
+    const site = async (name: string, url?: string, perms?: string[]) => { const c = code(name, url, perms); return { uri: c.uri, waiting: BunkerSigner.fromURI(c.key, c.uri, {}, 30_000) }; };
     const tickUntil = async (page: any, sel: string) => { for (let k = 0; k < 60; k++) { await agent.tick(); if (await page.locator(sel).count()) return; await new Promise((r) => setTimeout(r, 250)); } throw new Error('no answer: ' + sel); };
     const errors: string[] = [];
     // Every call the page makes, to see that nothing goes to a device before a click.
@@ -863,6 +863,8 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     assert.match((await page.textContent('#askfrom'))!, new RegExp(siteOrigin));
     assert.equal(await page.locator('#connectwarn').count(), 0);
     assert.equal(await page.textContent('#connectgo'), 'Sign in');
+    // The site's two switches: off, since this code does not ask to decrypt.
+    assert.deepEqual([await page.isChecked('#connectlists'), await page.isChecked('#connectdms')], [false, false]);
     await new Promise((r) => setTimeout(r, 800));
     assert.deepEqual(puts(), [], 'nothing goes to a device before the click');
     // No pointer yet, and no signer here to sign one: the page says so plainly.
@@ -871,7 +873,7 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await page.click('#connectgo');
     await page.waitForSelector('text=Waiting for one of your devices…');
     await tickUntil(page, '#backto');
-    assert.deepEqual(puts().map((x) => [x.text, x.from, x.as]), [[first.uri, siteOrigin, 'main']]);
+    assert.deepEqual(puts().map((x) => [x.text, x.from, x.as, x.lists, x.dms]), [[first.uri, siteOrigin, 'main', undefined, undefined]]);
     assert.equal(await page.textContent('#handoff'), 'Done. Go back to Marble');
     assert.equal(await page.getAttribute('#backto', 'href'), siteOrigin + '/');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('kk-connect')), null);
@@ -882,7 +884,7 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
 
     // Signed out, the passkey is the first way in, and after a click it signs in the next site too.
     await ctx.clearCookies();
-    const again = await site('Marble');
+    const again = await site('Marble', undefined, ['sign_event:1', 'nip44_decrypt', 'get_public_key']);
     await page.goto('about:blank');
     await fromSite(page, page0 + '/#connect=' + encodeURIComponent(again.uri));
     await page.waitForSelector('#pkgo');
@@ -891,8 +893,11 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await page.waitForSelector('#connectgo');
     // A passkey's session lasts 90 days, so its cookie does too.
     assert.ok((await ctx.cookies()).some((k) => k.name === 'ks' && k.expires > Date.now() / 1000 + 80 * 86400));
+    // This code asks to decrypt, so "Read your private lists" starts on, as on a phone's scan; DMs stay off.
+    assert.deepEqual([await page.isChecked('#connectlists'), await page.isChecked('#connectdms')], [true, false]);
     await page.click('#connectgo');
     await tickUntil(page, '#backto');
+    assert.deepEqual(puts().map((x) => [x.lists, x.dms]).at(-1), [true, undefined], 'the switch goes with the code');
     sites.push(await again.waiting);
     await page.click('#toaccount');
     await page.waitForSelector('text=signed in with a passkey');

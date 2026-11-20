@@ -85,8 +85,10 @@ export function clientOf(code: string): string | null {
 }
 /** Something the account page started for a device to finish (SPEC 11.6). */
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
-/** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null; lists?: boolean; dms?: boolean }
+/** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose.
+ *  For `pointer`, `text` is the box's own login page address, never anything the page sent.
+ *  For `bunker`, `text` is an optional name for the site and `lists`, `dms` the site's two switches. */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null; lists?: boolean; dms?: boolean }
 /** A signed-in account page (SPEC 11.6), kept by SHA-256 of its token, never the token. Unix seconds. */
 export interface PageSession { account: string; how: 'password' | 'passkey' | 'scan'; made: number; last: number; agent: string }
 /** One line of an account's recent activity. */

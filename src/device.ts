@@ -269,7 +269,7 @@ export async function limit(me: Me, h: Held, grant: string, to: 'posts' | null, 
 /** For `nostrconnect`: `from` is the origin that sent the person to the login page (null if it could not tell),
  *  and `as` the key they chose, `main` or `site` (SPEC 11.6). A device that does not know `as` uses the main account. */
 /** For `bunker`: `text` is an optional name for the site, and `lists` and `dms` the site's two switches (SPEC 11.6). */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site'; lists?: boolean; dms?: boolean }
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site'; lists?: boolean; dms?: boolean }
 /** A site's name as a person or the site gave it: no control characters, trimmed, at most 60 characters. Undefined when empty. */
 export const siteName = (s: unknown): string | undefined => typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60) || undefined : undefined;
 export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
@@ -289,9 +289,11 @@ export async function noteRefuse(me: Me, h: Held, note: string, send: Send, t = 
  *   `bunker(o)`    makes a bunker:// link, or null if this device runs no remote signer. `o.name` is the
  *                  site's name if the person gave one, and `o.lists`, `o.dms` the site's two switches.
  *   `connect(uri)` becomes the signer for a nostrconnect:// code, or false if this device cannot.
+ *   `pointer(origin)` signs and publishes the sign-in-page pointer (both kinds, SPEC 11.1) naming `origin`,
+ *                  true once a relay took it. Asked first with `tap`; No answers `declined`, not `note_refuse`.
  * Returns what it did, for the device to show or log.
  */
-export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: (o: { name?: string; lists: boolean; dms: boolean }) => Promise<string | null>; connect?: (uri: string) => Promise<boolean> }, t = now()): Promise<string[]> {
+export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: (o: { name?: string; lists: boolean; dms: boolean }) => Promise<string | null>; connect?: (uri: string) => Promise<boolean>; pointer?: (origin: string) => Promise<boolean> }, t = now()): Promise<string[]> {
   const did: string[] = [];
   for (const n of await notes(me, h, send, t)) {
     try {
@@ -305,6 +307,10 @@ export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: stri
         if (link) { await noteDone(me, h, n.id, link, send, t); did.push('gave a bunker link'); }
       } else if (n.kind === 'nostrconnect') {
         if (await can.connect?.(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push('signed a site in'); }
+      } else if (n.kind === 'pointer') {
+        if (!can.pointer || !/^https?:\/\/[^\s/?#]+$/.test(n.text)) continue;
+        if (!(await can.tap(`Make ${new URL(n.text).host} your sign-in page?`))) { await noteDone(me, h, n.id, 'declined', send, t); did.push('said No to the sign-in page'); }
+        else if (await can.pointer(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push(`published ${n.text} as the sign-in page`); }
       } else if (n.kind === 'cycle') {
         if (await can.tap('Remove blocked devices for good? Their pieces stop working. This cannot be undone.')) { await cycle(me, h, send, t, n.id); await noteDone(me, h, n.id, 'ok', send, t); did.push('removed blocked devices'); }
         else { await noteRefuse(me, h, n.id, send, t); did.push('said No to removing blocked devices'); }

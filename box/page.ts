@@ -85,6 +85,12 @@ details.remove summary { color:var(--danger); font-size:14px; text-decoration:un
 .notice { margin:20px 32px 0; padding:12px 16px; border-radius:10px; background:#e2efea; color:#075c45; font-size:14px; max-width:1216px; }
 @media (prefers-color-scheme: dark) { .notice { background:#1f3a32; color:#9be8d0; } }
 .single { max-width:640px; margin:0 auto; padding:28px 16px 56px; }
+.alerts { max-width:1280px; margin:0 auto; padding:20px 32px 0; }
+@media (max-width:860px) { .alerts { padding:16px 16px 0; } }
+.alert { background:var(--card); border:1px solid var(--danger); border-left-width:4px; border-radius:14px; padding:18px 22px; display:flex; flex-direction:column; gap:8px; }
+.alert h2 { font-size:17px; font-weight:600; margin:0; }
+.alert form { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.alert .mono { font-size:14px; } .alert a { color:var(--accent); }
 `;
 const adminShell = (title: string, where: string, csrf: string, logout: boolean, body: string, nonce = '', script = '') => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -141,7 +147,7 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
   const lp = o.loginPage ?? { fixed: false };
   const why = '<p class="sub">Invites and setup codes include this address, so a phone that joins can tell sites where to send this account to sign in.</p>';
   const from = lp.suggest ? (lp.suggest.from === 'here' ? 'the address you opened this page at' : 'where Keykin Login says it is') : '';
-  const loginCard = `<div class="card"><h2>Your login page address</h2>
+  const loginCard = `<div class="card" id="loginpage"><h2>Your login page address</h2>
   ${why}
   ${lp.fixed ? `<div class="kv"><span>Address</span><span class="mono">${esc(lp.addr!)}</span></div>
   <p class="sub small">Set by KEYKIN_LOGIN_URL on this box. Change it there.</p>` : `<form method="post" action="/admin/loginpage">${hidden(o.csrf)}
@@ -150,6 +156,13 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
     <input id="lp" name="address" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://account.example.com" value="${esc(lp.suggest?.addr ?? lp.addr ?? '')}" style="margin-bottom:0">
     ${lp.suggest ? `<p class="sub small">Suggested from ${from}. Nothing changes until you press Save.</p>` : '<p class="sub small">https:// and the host, nothing after.</p>'}
     <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button>${lp.addr ? '<button type="submit" name="do" value="clear">Clear</button>' : ''}</div></form>`}</div>`;
+
+  // Until the address is set (and KEYKIN_LOGIN_URL does not set it), the page says so above everything else.
+  const alert = lp.fixed || lp.addr ? '' : `<div class="alerts"><div class="alert" id="loginalert" role="alert"><h2>Set your login page address</h2>
+  <p class="sub">New invites need it, so sites can find this box's accounts by name.</p>
+  ${lp.suggest ? `<form method="post" action="/admin/loginpage">${hidden(o.csrf, { address: lp.suggest.addr })}
+    <span class="mono">${esc(lp.suggest.addr)}</span><button class="go" type="submit" name="do" value="save">Save</button><a class="small" href="#loginpage">Use another address</a></form>`
+    : '<p class="sub"><a href="#loginpage">Set it below</a></p>'}</div></div>`;
 
   const accounts = o.accounts.map((a) => {
     const rows = [...a.members.filter((m) => m.kind === 'device'), ...a.members.filter((m) => m.kind === 'box')].map((m) => {
@@ -169,7 +182,7 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
     <button class="danger" type="submit">Remove the account</button></form></details></div>`;
   }).join('');
 
-  return adminShell('Keykin Box', whereText(o.where), o.csrf, o.logout, `${o.notice ? `<div class="notice" role="status">${esc(o.notice)}</div>` : ''}
+  return adminShell('Keykin Box', whereText(o.where), o.csrf, o.logout, `${alert}${o.notice ? `<div class="notice" role="status">${esc(o.notice)}</div>` : ''}
 <div class="cols"><div class="col">
 ${asks}
 <div class="card"><h2>Add an account yourself</h2>

@@ -75,6 +75,9 @@ input.field { height:44px; width:100%; border:1px solid var(--line); border-radi
 .subcard { border:1px solid var(--line); border-radius:12px; padding:18px; display:flex; flex-direction:column; gap:10px; }
 .dashed { min-height:44px; border:1px dashed var(--line); border-radius:10px; display:flex; align-items:center; padding:8px 14px; font-size:13px; color:var(--dim); word-break:break-all; }
 .dashed.has { color:var(--text); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+.card.alert { flex-direction:row; align-items:flex-start; gap:14px; border-color:var(--danger); border-left-width:4px; }
+.card.alert svg { flex:none; margin-top:1px; }
+.notice.quiet { background:var(--off); color:var(--dim); border:1px solid var(--line); display:flex; gap:8px; flex-wrap:wrap; align-items:baseline; }
 .notice { padding:12px 16px; border-radius:10px; background:var(--here); color:var(--here-text); font-size:14px; }
 ul.plain { margin:0; padding-left:18px; font-size:14px; line-height:1.6; }
 

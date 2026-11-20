@@ -118,6 +118,58 @@
       el('button', { className: 'linkish small', id: 'notnow', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(PENDING, null); document.getElementById('asking')?.remove(); } } }, 'Do not sign in there'));
   }
 
+  // ---- An app sent you here to add it as a device: #relay=…&secret=…&add=<its Keykin invite> -------------
+  // Marble on a Mac signs in through Marble Web, which sends you here with the Mac's invite. The same rules as
+  // `connect=`: `add=` is the last fragment parameter, URL-decoded once, taken out of the address bar at once
+  // (with the `relay` and `secret` before it), kept in this tab's sessionStorage through the sign-in, and never
+  // acted on without a click. The join code goes back to the invite's key on `relay`, with `secret` beside it,
+  // the way a site hears a nostrconnect answer (SPEC 11.6). An app opening a browser sends no referrer, so the
+  // card says plainly when to say yes.
+  const ADDING = 'kk-add';
+  let badAdd = false;
+  function readInvite(text) {
+    const t = (text ?? '').trim();
+    if (!t.startsWith('{') || t.length > 4000) return null;
+    let v; try { v = JSON.parse(t); } catch { return null; }
+    const inv = v && v.keykin === 2 && v.invite && typeof v.invite === 'object' ? v.invite : null;
+    if (!inv || typeof inv.key !== 'string' || !/^[0-9a-f]{64}$/i.test(inv.key)) return null;
+    const name = (typeof inv.name === 'string' ? inv.name.trim().slice(0, 60) : '') || 'A new device';
+    return { text: t, key: inv.key.toLowerCase(), name };
+  }
+  const relayOk = (r) => typeof r === 'string' && r.length < 300 && /^wss?:\/\/[^\s]+$/.test(r) ? r : null;
+  const secretOk = (s) => typeof s === 'string' && /^[0-9a-f]{16,64}$/i.test(s) ? s : null;
+  function takeAdd() {
+    const hash = location.hash.slice(1);
+    const at = hash.startsWith('add=') ? 0 : hash.indexOf('&add=') + 1;
+    if (at === 0 && !hash.startsWith('add=')) return;
+    const raw = hash.slice(at + 'add='.length);
+    const before = hash.slice(0, Math.max(0, at - 1)).split('&').filter(Boolean);
+    const param = (k) => { const p = before.find((x) => x.startsWith(k + '=')); try { return p ? decodeURIComponent(p.slice(k.length + 1)) : null; } catch { return null; } };
+    const relay = relayOk(param('relay')), secret = secretOk(param('secret'));
+    const rest = before.filter((x) => !/^(relay|secret)=/.test(x));
+    history.replaceState(null, '', location.pathname + location.search + (rest.length ? '#' + rest.join('&') : ''));
+    let text = ''; try { text = decodeURIComponent(raw); } catch {}
+    const a = readInvite(text);
+    if (a) store.set(ADDING, JSON.stringify({ invite: a.text, relay: relay && secret ? relay : null, secret: relay && secret ? secret : null })); else badAdd = true;
+  }
+  function pendingAdd() {
+    let o = null; try { o = JSON.parse(store.get(ADDING) ?? 'null'); } catch {}
+    const a = o && readInvite(o.invite);
+    return a ? { ...a, relay: relayOk(o.relay), secret: secretOk(o.secret) } : null;
+  }
+  // Above the sign-in, while the person signs in: what is waiting, and that nothing happens yet.
+  function addAsking() {
+    if (badAdd) return el('div', { className: 'notice', id: 'addasking', role: 'alert' }, 'Something sent you here to add a device, but what it sent is not a Keykin invite, so it was left alone. Go back to the app and try again.');
+    const a = pendingAdd();
+    if (!a) return null;
+    return el('div', { className: 'card', id: 'addasking' },
+      el('div', { className: 'small dim' }, 'A device is asking to be added to your account'),
+      el('div', {}, el('strong', { id: 'addname' }, a.name)),
+      el('div', { className: 'small dim' }, 'Sign in below. You are asked once more before it is added.'),
+      el('button', { className: 'linkish small', id: 'addnotnow', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(ADDING, null); document.getElementById('addasking')?.remove(); } } }, 'Do not add it'));
+  }
+  const joinOf = (t) => { try { const v = JSON.parse(t); return v?.keykin === 2 && typeof v.join?.npub === 'string' && typeof v.join?.addr === 'string' ? v : null; } catch { return null; } };
+
   // ---- The login-page pointer (section 11.1): does the account name a login page yet? ----------------
   // The page asks its own relays for both kinds (10046, and 30078 during the move); KeykinPointer holds the
   // rules. It does not check the signature: the answer only decides what to offer, and a reader such as
@@ -237,10 +289,10 @@
     if (!r.ok || r.held === false) { close(); return showAccount(); }
     me = r;
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
-    const c = pending();
-    const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c ? findProfile(r.npub, r.relays ?? []) : null]);
-    if (!c && (!signer || !['none', 'bad'].includes(found.state))) { close(); return showAccount(); }
-    showFinish(c, found, signer, r.relays ?? [], profile);
+    const c = pending(), a = pendingAdd();
+    const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c || a ? findProfile(r.npub, r.relays ?? []) : null]);
+    if (!c && !a && (!signer || !['none', 'bad'].includes(found.state))) { close(); return showAccount(); }
+    showFinish(c, found, signer, r.relays ?? [], profile, a);
   }
 
   async function savePassword(username, password) {
@@ -290,7 +342,7 @@
         } catch (x) { line.textContent = pkError(x); }
         save.disabled = false;
       };
-      app.replaceChildren(el('div', { className: 'signin' }, asking(),
+      app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
         el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'You are signed in'), el('div', { className: 'dim' }, location.host)),
         el('div', { className: 'panel' }, el('div', { className: 'half' },
           el('h2', {}, 'Save a passkey so next time it’s one tap'),
@@ -299,8 +351,9 @@
     });
   }
 
-  function showFinish(c, found, signer, relays, profile) {
+  function showFinish(c, found, signer, relays, profile, a = null) {
     const parts = [];
+    if (a) parts.push(addCard(a, profile));
     if (c) parts.push(connectCard(c, profile));
     if (found.state !== 'found' || signer) parts.push(pointerCard(found, signer, relays));
     parts.push(el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => { signer?.close().catch(() => {}); showAccount(); } } }, 'Go to your account'));
@@ -341,6 +394,63 @@
     own.onclick = () => yes('site');
     no.onclick = () => { store.set(PENDING, null); node.replaceWith(el('p', { className: 'small dim', id: 'notsigned' }, `Nothing was sent to ${host ?? 'the site'}.`)); };
     return node;
+  }
+
+  // "Add <device> to your account?" for an app that sent its invite here (#add=). Nothing goes to a device
+  // until Add, even when this browser was signed in already. On Add it leaves the same `invite` note as Devices,
+  // Add a device, and hands the join code back to Marble by a marble://join link.
+  function addCard(a, profile) {
+    const who = profile?.name ?? me?.username ?? (me?.npubText ? me.npubText.slice(0, 12) + '…' : 'your account');
+    const pic = profile?.picture
+      ? el('img', { className: 'avatar small', src: profile.picture, alt: '', referrerPolicy: 'no-referrer' })
+      : el('div', { className: 'avatar small', ariaHidden: 'true' }, who.charAt(0).toUpperCase());
+    const go = el('button', { className: 'btn go', type: 'button', id: 'addgo' }, 'Add');
+    const no = el('button', { className: 'btn', type: 'button', id: 'addno' }, 'Not now');
+    const node = card(
+      el('h2', { id: 'addtitle' }, `Add ${a.name} to your account?`),
+      el('div', { className: 'hello small-hello' }, pic, el('div', {}, el('div', { className: 'name', id: 'addwho' }, who), me?.npubText ? el('div', { className: 'mono small dim' }, me.npubText.slice(0, 16) + '…' + me.npubText.slice(-6)) : null)),
+      el('div', { className: 'small dim', id: 'adddevice' }, `New device: ${a.name}`),
+      el('div', { className: 'notice warn', id: 'addwarn' }, 'Only say yes if you just pressed Sign in on this computer. An app opened this page, so it cannot tell which one sent you. A device you add can sign as you, together with your box.'),
+      el('div', { className: 'with-note' }, go, no));
+    node.id = 'addcard';
+    go.onclick = () => {
+      const line = el('p', { className: 'sub', id: 'addline', role: 'status' }, 'Waiting for one of your devices…');
+      const slow = el('p', { className: 'small dim', id: 'addslow', hidden: true }, 'No device has answered yet. One of your devices needs to be online with an up-to-date Marble. This page keeps waiting for a few more minutes.');
+      const next = card(el('h2', {}, `Adding ${a.name}`), line, slow);
+      next.id = 'adddone'; next.style.alignSelf = 'stretch';
+      node.replaceWith(next);
+      addHandOff(a, next, line, slow);
+    };
+    no.onclick = () => { store.set(ADDING, null); node.replaceWith(el('p', { className: 'small dim', id: 'notadded' }, `${a.name} was not added.`)); };
+    return node;
+  }
+
+  async function addHandOff(a, box, line, slow) {
+    const r = await api('note_put', { kind: 'invite', text: a.text }).catch(() => ({ error: 'no_box' }));
+    if (r.error === 'login') return showLogin(say('login'));
+    if (!r.ok) { line.textContent = say(r.error); return; }
+    store.set(ADDING, null);                     // the box holds it now; a reload must not add it twice
+    const started = Date.now();
+    const t = every(2000, async () => {
+      if (Date.now() - started > 60000) slow.hidden = false;
+      const g = await api('note_get', { note: r.note }).catch(() => null);
+      if (g && g.error === 'login') { clearInterval(t); return showLogin('A device said No, so this browser was signed out.'); }
+      if (!g || !g.ok || g.state === 'waiting') return;
+      clearInterval(t); slow.hidden = true;
+      if (g.state !== 'done') { line.textContent = `No device answered in time. One of your devices needs to be online with an up-to-date Marble. Go back to ${a.name} and try again.`; return; }
+      const join = joinOf(g.result);
+      if (!join) { line.textContent = 'Done, but your device answered with something this page cannot hand on.'; return; }
+      const code = (open) => el('details', { className: 'small', id: 'addcode', open }, el('summary', { className: 'dim' }, `${a.name} did not sign in? Paste this join code into it`),
+        el('p', { className: 'mono small', id: 'joincode' }, g.result));
+      // Back to the app on its relay: the join code, with the secret it sent, to the invite's key.
+      let sent = false;
+      if (a.relay && a.secret) {
+        line.textContent = `Sending it to ${a.name}…`;
+        sent = await sendEvent(a.relay, KeykinSignIn.answerEvent(a.key, JSON.stringify({ ...join, secret: a.secret })));
+      }
+      line.textContent = sent ? `Done. ${a.name} is signed in.` : a.relay ? `Done, but this page could not reach ${a.name}. Paste this join code into it:` : `Done. Paste this join code into ${a.name}:`;
+      box.append(code(!sent));
+    });
   }
 
   async function handOff(c, line, slow, as) {
@@ -415,7 +525,7 @@
       } catch (x) { pkErr.textContent = pkError(x); }
       pkErr.hidden = false; pk.disabled = false;
     } } }, 'Sign in with a passkey') : null;
-    app.replaceChildren(el('div', { className: 'signin' }, asking(),
+    app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
       pk ? el('div', { className: 'card', id: 'pkcard' }, pk, pkErr) : null,
       el('div', { className: 'panel' },
@@ -492,12 +602,12 @@
         r.open ? go : null, note);
     };
     start();
-    app.replaceChildren(el('div', { className: 'signin' }, asking(),
+    app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Your account'), el('div', { className: 'dim' }, location.host)),
       el('div', { className: 'panel' }, body), out));
     every(3000, async () => {
       const n = await api('me').catch(() => null);
-      if (n && n.ok && n.held !== false) { if (pending()) afterSignIn(null); else showAccount(); }
+      if (n && n.ok && n.held !== false) { if (pending() || pendingAdd()) afterSignIn(null); else showAccount(); }
       else if (n && n.error === 'login') showLogin(say('login'));
     });
   }
@@ -747,6 +857,6 @@
       el('div', { className: 'with-note' }, save, off, line));
   }
 
-  takeConnect();
-  if (fromCamera()) showHandoff(); else if (pending()) afterSignIn(null); else showAccount();
+  takeConnect(); takeAdd();
+  if (fromCamera()) showHandoff(); else if (pending() || pendingAdd()) afterSignIn(null); else showAccount();
 })();

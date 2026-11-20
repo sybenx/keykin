@@ -609,6 +609,138 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
   } finally { for (const s of sites) await s.close().catch(() => {}); agent?.close(); await browser.close(); await login.close(); await box.close(); relay.kill(); siteServer.close(); }
 });
 
+// An app (Marble on a Mac, through Marble Web) sends the person here with its own invite: #relay=…&secret=…&add=<invite>.
+// They sign in (or already are), press Add on a card, one of their devices adds it, and the page sends the join code
+// back to the invite's key on that relay, NIP-44 from a throwaway key, with the secret beside it.
+test('an app sends you here to add it as a device: #add=, a click, and the join code back to the app on its relay', { skip: (!exe && 'no Chromium found') || (!existsSync(relayTool) && 'no test relay'), timeout: 120_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const nip44 = await import('nostr-tools/nip44');
+  const w = await world();
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = process.env.KEYKIN_SHOTS ?? join(tmpdir(), 'keykin-shots'); mkdirSync(shots, { recursive: true });
+  try {
+    const phone = device('Pixel 9a');
+    const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    // The account's name and picture, on the page's relay, for the card.
+    const ev = await D.signEvent(phone, held, { pubkey: held.npub, created_at: Math.floor(Date.now() / 1000), kind: 0, tags: [], content: JSON.stringify({ name: 'Aaron', picture: 'https://pics.example/aaron.png' }) }, w.send);
+    await new Promise<void>((ok, no) => { const ws = new WebSocket(w.relay); ws.onopen = () => ws.send(JSON.stringify(['EVENT', ev])); ws.onmessage = (m) => { ws.close(); JSON.parse(String(m.data))[2] ? ok() : no(new Error(String(m.data))); }; ws.onerror = no; });
+    const away = { ...phone, fp: undefined };
+    const answered = async () => { for (let k = 0; k < 40; k++) { const did = await D.answerNotes(away, held, w.send, { addr: w.base, tap: async () => false }); if (did.length) return did; await new Promise((r) => setTimeout(r, 150)); } return []; };
+    const mac = device('Marble on Mac');
+    const invite = JSON.stringify({ keykin: 2, invite: { key: mac.key, name: 'Marble on Mac' } });
+    const secret = 'c0ffee'.repeat(4);
+    const ask = (inv = invite, relay: string | null = w.relay) => (relay ? `relay=${encodeURIComponent(relay)}&secret=${secret}&` : '') + 'add=' + encodeURIComponent(inv);
+    // The app's side: listening on its relay for kind 24133 to the invite's key.
+    const listen = (key: string) => {
+      const got: any[] = [];
+      const ws = new WebSocket(w.relay);
+      const ready = new Promise<void>((ok) => { ws.onopen = () => { ws.send(JSON.stringify(['REQ', 'mac', { kinds: [24133], '#p': [key] }])); ok(); }; });
+      ws.onmessage = (m) => { const d = JSON.parse(String(m.data)); if (d[0] === 'EVENT') got.push(d[2]); };
+      return { got, ready, close: () => ws.close() };
+    };
+
+    const errors: string[] = [], calls: any[] = [];
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const context = async () => { const ctx = await browser.newContext({ viewport: { width: 1100, height: 820 } }); await ctx.route('https://pics.example/**', (r) => r.fulfill({ contentType: 'image/png', body: png })); return ctx; };
+    const watch = (p: any) => {
+      p.on('pageerror', (e: any) => errors.push(String(e))); p.on('console', (m: any) => { if (m.type() === 'error') errors.push(m.text()); });
+      p.on('request', (r: any) => { if (r.url().endsWith('/api') && r.method() === 'POST') { try { calls.push(JSON.parse(r.postData())); } catch {} } });
+    };
+    const puts = () => calls.filter((c) => c.call === 'note_put');
+    const kept = (p: any) => p.evaluate(() => JSON.parse(sessionStorage.getItem('kk-add') ?? 'null'));
+
+    // Not a Keykin invite (not JSON, a short key, encoded twice): said plainly and left alone, and the address bar is cleared.
+    for (const bad of [encodeURIComponent('not an invite'), encodeURIComponent(JSON.stringify({ keykin: 2, invite: { key: 'ab12', name: 'x' } })), encodeURIComponent(encodeURIComponent(invite))]) {
+      const p = await (await context()).newPage(); watch(p);
+      await p.goto(w.base + '/#add=' + bad);
+      await p.waitForSelector('#addasking[role=alert]');
+      assert.match((await p.textContent('#addasking'))!, /not a Keykin invite, so it was left alone/);
+      assert.equal(new URL(p.url()).hash, '');
+      assert.equal(await kept(p), null);
+      await p.context().close();
+    }
+
+    // Raw or encoded once, after other parameters: read, kept for this tab with the relay and secret, and gone from the address bar.
+    for (const tail of [invite, encodeURIComponent(invite)]) {
+      const p = await (await context()).newPage(); watch(p);
+      await p.goto(w.base + `/#x=1&relay=${encodeURIComponent(w.relay)}&secret=${secret}&add=` + tail);
+      await p.waitForSelector('#addname');
+      assert.equal(await p.textContent('#addname'), 'Marble on Mac');
+      assert.equal(new URL(p.url()).hash, '#x=1', 'other fragment parameters stay; relay, secret and add go');
+      assert.deepEqual(await kept(p), { invite, relay: w.relay, secret });
+      await p.context().close();
+    }
+
+    // Signed out: the request shows above the sign-in, lives through a reload, and after the password the card asks.
+    const ctx = await context(); const page = await ctx.newPage(); watch(page);
+    await page.goto(w.base + '/#' + ask());
+    await page.waitForSelector('#username');
+    assert.match((await page.textContent('#addasking'))!, /A device is asking to be added to your account/);
+    await page.reload();
+    await page.waitForSelector('#addname');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+    await page.click('#pwgo');
+    await page.waitForSelector('#addcard');
+    assert.equal(await page.textContent('#addtitle'), 'Add Marble on Mac to your account?');
+    assert.equal(await page.textContent('#addwho'), 'Aaron');
+    assert.equal(await page.getAttribute('#addcard img.avatar', 'src'), 'https://pics.example/aaron.png');
+    assert.equal(await page.textContent('#adddevice'), 'New device: Marble on Mac');
+    assert.match((await page.textContent('#addwarn'))!, /Only say yes if you just pressed Sign in on this computer/);
+    assert.deepEqual([await page.textContent('#addgo'), await page.textContent('#addno')], ['Add', 'Not now']);
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.deepEqual(puts(), [], 'nothing goes to a device before the click');
+    await page.screenshot({ path: join(shots, 'add-card.png') });
+
+    // Add: the same invite note as Devices, Add a device; a device adds it; the join code goes back on the app's relay.
+    const app = listen(mac.key); await app.ready;
+    await page.click('#addgo');
+    await page.waitForSelector('text=Waiting for one of your devices…');
+    await page.waitForFunction(() => sessionStorage.getItem('kk-add') === null);   // the box holds it now: a reload does not add it twice
+    assert.deepEqual(puts().map((x) => [x.kind, x.text]), [['invite', invite]]);
+    assert.deepEqual(await answered(), ['added Marble on Mac']);
+    await page.waitForSelector('text=Done. Marble on Mac is signed in.');
+    await page.screenshot({ path: join(shots, 'add-done.png') });
+    for (let k = 0; k < 40 && !app.got.length; k++) await new Promise((r) => setTimeout(r, 100));
+    app.close();
+    assert.equal(app.got.length, 1);
+    const back = app.got[0];
+    assert.ok(verifyEvent(back)); assert.equal(back.kind, 24133); assert.deepEqual(back.tags, [['p', mac.key]]);
+    assert.notEqual(back.pubkey, held.npub, 'from a throwaway key');
+    const opened = JSON.parse(nip44.decrypt(back.content, nip44.getConversationKey(Buffer.from(mac.sk, 'hex'), back.pubkey)));
+    assert.deepEqual(opened, { keykin: 2, join: { addr: w.base, boxKey: held.boxKey, npub: held.npub }, secret });
+    assert.equal(await page.textContent('#joincode'), JSON.stringify({ keykin: 2, join: { addr: w.base, boxKey: held.boxKey, npub: held.npub } }), 'and shown, folded, to paste by hand');
+    // The join code it sent really joins the new device.
+    const mh = await D.join(mac, held.boxKey, held.npub, w.send);
+    assert.ok(verifyEvent(await D.signEvent(mac, mh, note(held.npub), w.send)));
+
+    // Already signed in: the card at once, and still nothing without a click. Not now sends nothing.
+    calls.length = 0;
+    const other = device('Marble on Mac');
+    await page.goto('about:blank');
+    await page.goto(w.base + '/#' + ask(JSON.stringify({ keykin: 2, invite: { key: other.key, name: 'Marble on Mac' } })));
+    await page.waitForSelector('#addcard');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(puts(), [], 'an already signed-in page leaves no note before the click');
+    await page.click('#addno');
+    await page.waitForSelector('#notadded');
+    assert.equal(await page.textContent('#notadded'), 'Marble on Mac was not added.');
+    assert.equal(await kept(page), null);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual(puts(), []);
+
+    // No relay given (an older app): the join code is shown to paste.
+    const third = device('Laptop');
+    await page.goto('about:blank');
+    await page.goto(w.base + '/#' + ask(JSON.stringify({ keykin: 2, invite: { key: third.key, name: 'Laptop' } }), null));
+    await page.click('#addgo');
+    assert.deepEqual(await answered(), ['added Laptop']);
+    await page.waitForSelector('text=Done. Paste this join code into Laptop:');
+    assert.ok(await page.locator('#addcode[open]').count());
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); await w.close(); }
+});
+
 test('sign-in strength: one session for every way in today, and tiers a box owner can switch on', async () => {
   const { allowedBy } = await import('../box/box.ts');
   const now = () => Math.floor(Date.now() / 1000);

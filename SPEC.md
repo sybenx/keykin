@@ -776,6 +776,62 @@ this way. The page:
   `sessionStorage` as soon as the note is left, so a reload does not send it twice;
 - shows a code that is not a `nostrconnect://` code as wrong and leaves it alone.
 
+**An app can send the person here to add it as a device** (Aaron, 2026-11-19: "the simpler answer is 'sign
+in' opening a web page", and "it should be easier"). Marble on the Mac holds no sign-in of its own and
+becomes a device, holding a piece. Its Sign in makes its invite (section 8b) and a fresh `secret`, and opens
+Marble Web in the default browser:
+
+`https://marble.syb.lol/#relay=<encodeURIComponent(relay)>&secret=<hex>&add=<encodeURIComponent(invite JSON)>`
+
+Marble Web finds the login page as its own sign-in does: the account this browser is signed in as, else
+the name the person types (steps 1 and 2 of name-first sign-in, below). It shows the address, and a click
+goes there with the same three parameters: `https://<login page origin>/#relay=…&secret=…&add=…`. With no
+login page, Marble Web shows the invite as a code for the phone's Add a device instead. The relay is
+where Marble Web's own nostrconnect codes ask for answers (the first of its relays, `wss://syb.lol`). The
+login page:
+
+- reads `add=` by the same rules as `connect=`: the last fragment parameter, everything after it
+  URL-decoded once, and `relay` and `secret` from the parameters before it (each URL-decoded once). All
+  three are taken out of the address bar and history at once (any other fragment parameters stay), and
+  kept in the tab's `sessionStorage` (`kk-add`, as `{ invite, relay, secret }`) through the scan, the
+  passkey or the password;
+- checks the invite is a Keykin invite: JSON, `keykin: 2`, and an `invite` with a 64-hex `key`. The `name`
+  is shown (cut to 60 characters, "A new device" when there is none). Anything else is shown as wrong
+  ("not a Keykin invite, so it was left alone") and nothing is kept. `relay` must be a `ws(s)://` address
+  and `secret` 16 to 64 hex characters; without both, the invite is still taken, and the join code is
+  only shown to paste (below);
+- **never leaves the note without a click.** After signing in, or straight away if the browser is
+  signed in already, it shows a card: **"Add <name> to your account?"** with the account's name and
+  picture (as on the sign-in card), the device's name, and the buttons **Add** and **Not now**. A browser
+  tab an app opens has no referrer, so there is no sender to show or check: the card says plainly to say
+  yes only if you just pressed Sign in on this computer, and that a device you add can sign as you;
+- on Add, leaves the same note as Devices, Add a device: `note_put { kind: "invite", text }`, with the
+  invite exactly as it came. The invite leaves `sessionStorage` as soon as the note is left. It shows
+  "Waiting for one of your devices…", and after 60 seconds the same line as for a site;
+- when a device answers with the join text, sends it back the way a site hears a nostrconnect answer,
+  to the invite's key on `relay`:
+
+  ```json
+  { "kind": 24133, "pubkey": "<a throwaway key, made for this one event>", "created_at": 1790000000,
+    "tags": [["p", "<the invite's key>"]],
+    "content": "<NIP-44 v2, from the throwaway key to the invite's key, of the text below>" }
+  ```
+
+  The text is the join text with the secret beside it: `{ "keykin": 2, "join": { addr, boxKey, npub },
+  "secret": "<from the link>" }`. Once a relay takes it (`OK` true), the page says **"Done. <name> is
+  signed in."**, with the join text folded below it to paste by hand ("<name> did not sign in?"). If the
+  relay did not take it, or there was no relay, the page says so and shows the join text open.
+
+**The app's side.** While its invite waits, Marble on the Mac listens on that relay for
+`{ "kinds": [24133], "#p": ["<its invite key>"] }`. For an event it hears, it checks the signature,
+opens the content with its own member key (the invite's key: NIP-44 between that key and the event's
+`pubkey`), and takes it only when the `secret` is the one it made for this Sign in. Then it joins as with
+a pasted join code, and the box welcomes only the member key the note added. Nothing is asked on the Mac:
+the Add on the account page is the yes (Aaron, 2026-11-19: the account page is the auth). The piece goes
+into the Mac's keychain item, readable only by Marble. The secret never reaches the relay in the clear, so
+a relay that sees the invite's key in the `p` tag cannot answer for the page. Anything else to that key is
+left alone. Copying the invite and pasting a join code stays as the fallback.
+
 **Which key a site gets** (Aaron, 2026-11-19). A site never chooses. `kk=account` on a site's own
 code means nothing, and Marble Web no longer adds it: the mark is only for an account page's own code
 (above). The person chooses once per site and the device remembers it in that site's record:
@@ -905,7 +961,12 @@ so the page's CSP now allows `https:` images. `note_put` refuses a `from` that i
 command-line device still uses the main account and names the grant as before, and the sites' side of
 name-first sign-in.
 
-**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` link parameter and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
+**Built (2026-11-19), `add=`:** on the account page (`login/static/account.js`, the answer event in
+`site/signin.ts` as `KeykinSignIn.answerEvent`; tested in a browser in `test/login.test.ts`), in Marble Web
+(`~/marble`, branch `mac-signin`: `site/js/add-device.js` and its part of `site/js/act.js`), and in Marble on
+the Mac (`~/marble-desktop`, branch `keykin`). Not released or deployed.
+
+**Built:** every call above on the box, Keykin Login in front of it (`login/`), and the account page, including the `connect` and `add` link parameters and passkeys. Notes travel end to end. The command-line device answers every kind of note with `keykin agent <relay>` and reports the sites it signs in as grants. The Kotlin core can answer a `nostrconnect` note (`SiteSigner.connect`). Marble on Android answers
 `invite`, `bunker` and `nostrconnect` notes with no prompt and asks Yes or No for `cycle`, from its background
 service (verified 2026-11-18, with the app closed). On its branch `notes-wait` it keeps one `notes_wait` open
 at a time, so a note reaches it within about a second (a bunker note was answered in 0.1 to 0.8

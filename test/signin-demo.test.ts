@@ -80,7 +80,7 @@ test('signin demo: the dialog opens on its own, and another signer app gets a no
     // The first screen, word for word as Marble Web's.
     const text = (await dialog.innerText()).split('\n').map((l: string) => l.trim()).filter(Boolean);
     assert.deepEqual(text, ['Sign in', 'Your Nostr address or npub', 'Continue', 'or', 'Sign in with your phone', 'Use a signer app', 'Here to manage your account? Your account page']);
-    assert.equal(await page.getAttribute('#si-who', 'placeholder'), 'herbstmeister.com or npub1…');
+    assert.equal(await page.getAttribute('#si-who', 'placeholder'), 'name@site.com or npub1…');
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'si-who');
 
     // Another signer app: the plain nostrconnect code, drawn and ready to copy.

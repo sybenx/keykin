@@ -162,7 +162,7 @@ function askName(note = "", typed = "") {
   missingFor = null;
   view(`<h2 id="si-title">Sign in</h2>
     <form data-form="name"><label for="si-who">Your Nostr address or npub</label>
-      <input id="si-who" name="who" class="acct-who" type="text" value="${esc(typed)}" placeholder="herbstmeister.com or npub1…" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      <input id="si-who" name="who" class="acct-who" type="text" value="${esc(typed)}" placeholder="name@site.com or npub1…" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" required>
       <div class="si-actions"><button type="submit" class="si-button">Continue</button></div></form>
     ${note ? `<div class="si-said" role="status">${note}</div>` : `<p class="si-or"><span>or</span></p>${PHONE_BUTTON}`}
     <div class="si-actions"><button type="button" class="link si-small" data-si="signer">Use a signer app</button></div>

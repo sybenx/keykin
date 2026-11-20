@@ -158,10 +158,13 @@ export class PageApi {
           // Where the request came from, as the login page saw it, and which key the person chose (SPEC 11.6).
           const from = body.from ?? null, as = body.as ?? 'main';
           if (body.kind === 'nostrconnect' && ((from !== null && (typeof from !== 'string' || from.length > 200 || !/^https?:\/\/[^\s/?#]+$/.test(from))) || (as !== 'main' && as !== 'site'))) refuse('bad_request');
+          // An app's PKCE challenge for the device it invites (SPEC 11.6, `add=`): base64url SHA-256 of its verifier.
+          const challenge = body.challenge ?? null;
+          if (challenge !== null && (body.kind !== 'invite' || typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge))) refuse('bad_request');
           const list = this.#notes.get(a.npub) ?? [];
           if (list.length >= 10) refuse('too_many');
           // Only the hard-to-undo one asks the person on a device. The rest a device just does.
-          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}),
+          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}), ...(body.kind === 'invite' ? { challenge } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
           this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now
@@ -171,7 +174,12 @@ export class PageApi {
         }
         case 'note_get': {
           const n = (this.#notes.get(a.npub) ?? []).find((x) => x.id === body.note);
-          return n ? { ok: true, state: n.result === undefined ? 'waiting' : 'done', result: n.result } : { ok: true, state: 'gone' };
+          if (!n) return { ok: true, state: 'gone' };
+          if (n.result === undefined) return { ok: true, state: 'waiting', result: undefined };
+          // A device was added: the page that left the note gets its approval codes, once (SPEC 11.6). Without them the
+          // device gets no piece.
+          const approval = n.kind === 'invite' && this.#noteBy.get(n.id) === hash ? this.box.approve(a.npub, n.id, now) : null;
+          return { ok: true, state: 'done', result: n.result, ...(approval ? { approval } : {}) };
         }
         default: return refuse('unknown_call');
       }

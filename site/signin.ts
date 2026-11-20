@@ -104,14 +104,3 @@ export function link(o: { relays: string[]; name?: string; account?: boolean }):
   })();
   return { uri, done, cancel: stop };
 }
-
-// An app that sent its invite to the account page (SPEC 11.6, `add=`) hears the join code back the way a site
-// hears a nostrconnect answer: a kind 24133 event to the invite's key, NIP-44 encrypted, from a throwaway key.
-//   const event = KeykinSignIn.answerEvent(inviteKey, text);   then send it to the app's relay
-import { finalizeEvent } from 'nostr-tools/pure';
-
-export function answerEvent(to: string, text: string) {
-  const sk = generateSecretKey();
-  const content = nip44.encrypt(text, nip44.getConversationKey(sk, to));
-  return finalizeEvent({ kind: 24133, created_at: Math.floor(Date.now() / 1000), tags: [['p', to]], content }, sk);
-}

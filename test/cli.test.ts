@@ -195,7 +195,10 @@ test('the agent: a computer left on does what the account page asks, and its sit
     const pc = tmp('kk-pc-');
     const { note: id2 } = b.page.call({ call: 'note_put', session, kind: 'invite', text: (await cli(pc, 'invite', 'Work PC')).text }, now());
     await agent.tick();
-    await cli(pc, 'join', b.page.call({ call: 'note_get', session, note: id2 }, now()).result);
+    // Added from the page: the join text and the six digits the page shows (SPEC 11.6), typed as `keykin join '<join>' <code>`.
+    const got2 = b.page.call({ call: 'note_get', session, note: id2 }, now());
+    await assert.rejects(cli(pc, 'join', got2.result), /not_approved|wrong_code/);
+    await cli(pc, 'join', got2.result, got2.approval.short);
     assert.ok(verifyEvent(JSON.parse((await cli(pc, 'sign', '{"content":"hi from the work PC"}')).text)));
     // Removing blocked devices asks for a Yes. Nobody is at this keyboard, so it is No, and that browser is signed out.
     b.page.call({ call: 'block', session, key: b.box.only()!.members.find((m) => m.name === 'Work PC')!.key }, now());

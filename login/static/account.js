@@ -125,8 +125,9 @@
   // URL-decoded once, taken out of the address bar at once (with the parameters before it), kept in this tab's
   // sessionStorage through the sign-in, and never acted on without a click. After Add the box holds the new
   // device's piece until it shows the approval code this page gets, with the verifier its `challenge` was made
-  // from. The code goes back only to a `return` address on this same computer (127.0.0.1 or localhost), and as
-  // six digits to type (SPEC 11.6). An app opening a browser sends no referrer, so the card says when to say yes.
+  // from. The code goes back only to a `return` address on this same computer (127.0.0.1 or localhost) or to a phone
+  // app's own App Link (APP_RETURNS), and as six digits to type (SPEC 11.6). An app opening a browser sends no
+  // referrer, so the card says when to say yes.
   const ADDING = 'kk-add', ADDED = 'kk-add-done';
   let badAdd = null;
   function readInvite(text) {
@@ -140,11 +141,18 @@
   }
   const challengeOk = (c) => typeof c === 'string' && /^[A-Za-z0-9_-]{43}$/.test(c) ? c : null;
   const stateOk = (x) => typeof x === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(x) ? x : null;
-  /** A return address on this computer only: http, 127.0.0.1 or localhost, a port, nothing else (RFC 8252 7.3). */
+  // The https addresses a phone app takes its approval back on (RFC 8252 7.2, a claimed App Link), exactly as written.
+  const APP_RETURNS = ['https://marble.syb.lol/joined'];
+  /**
+   * Where the approval may go: a loopback address on this computer (http, 127.0.0.1 or localhost, a port, nothing
+   * else; RFC 8252 7.3), or one of the phone apps' own App Link addresses above. Anything else is left alone.
+   */
   function returnOk(r) {
+    if (typeof r === 'string' && APP_RETURNS.includes(r)) return r;
     let u; try { u = new URL(r); } catch { return null; }
     return typeof r === 'string' && r.length < 300 && u.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(u.hostname) && u.port && !u.username && !u.password && !u.hash ? u.href : null;
   }
+  const onPhone = (ret) => typeof ret === 'string' && APP_RETURNS.includes(ret);
   function takeAdd() {
     const hash = location.hash.slice(1);
     const at = hash.startsWith('add=') ? 0 : hash.indexOf('&add=') + 1;
@@ -161,7 +169,7 @@
     if (r !== null || c !== null || st !== null) {
       // An app's return: all three, and the address must be this computer. Anything else is left alone.
       const ret = r !== null ? returnOk(r) : null;
-      if (r !== null && !ret) { let h = 'somewhere else'; try { h = new URL(r).host || h; } catch {} badAdd = `Something sent you here to add a device and send the approval to ${h}, which is not this computer, so it was left alone.`; return; }
+      if (r !== null && !ret) { let h = 'somewhere else'; try { h = new URL(r).host || h; } catch {} badAdd = `Something sent you here to add a device and send the approval to ${h}, which is not this device, so it was left alone.`; return; }
       if (!ret || !challengeOk(c) || !stateOk(st)) { badAdd = 'Something sent you here to add a device, but what it sent is not complete, so it was left alone. Go back to the app and try again.'; return; }
       store.set(ADDING, JSON.stringify({ invite: a.text, challenge: c, ret, state: st }));
     } else store.set(ADDING, JSON.stringify({ invite: a.text }));
@@ -189,7 +197,7 @@
   function addedCard(o) {
     return card(el('h2', {}, `${o.name} was added`),
       el('p', { className: 'sub', id: 'addline' }, o.ret ? `Done. ${o.name} is signing in.` : 'Done.'),
-      el('div', { className: 'small dim' }, o.ret ? `If ${o.name} did not sign in, type this only into ${o.name} on this computer:` : `Type this only into ${o.name}, with its join code below:`),
+      el('div', { className: 'small dim' }, o.ret ? `If ${o.name} did not sign in, type this only into ${o.name} on this ${o.phone ? 'phone' : 'computer'}:` : `Type this only into ${o.name}, with its join code below:`),
       el('div', { className: 'shortcode mono', id: 'shortcode' }, spaced(o.short)),
       el('div', { className: 'small dim', id: 'shortwhere' }, `Your account page: ${location.host}. The code works once, for 10 minutes.`),
       o.join ? el('details', { className: 'small', id: 'addcode' }, el('summary', { className: 'dim' }, 'Its join code'), el('p', { className: 'mono small', id: 'joincode' }, o.join)) : null);
@@ -551,7 +559,7 @@
 
   // "Add <device> to your account?" for an app that sent its invite here (#add=). Nothing goes to a device
   // until Add, even when this browser was signed in already. On Add it leaves the same `invite` note as Devices,
-  // Add a device, and hands the join code back to Marble by a marble://join link.
+  // Add a device, and hands the approval code and the join text back to the app at its `return` address.
   function addCard(a, profile) {
     const who = profile?.name ?? me?.username ?? (me?.npubText ? me.npubText.slice(0, 12) + '…' : 'your account');
     const pic = profile?.picture
@@ -592,7 +600,7 @@
       clearInterval(t); slow.hidden = true;
       if (g.state !== 'done') { line.textContent = `No device answered in time. One of your devices needs to be online with an up-to-date Marble. Go back to ${a.name} and try again.`; return; }
       if (!g.approval) { line.textContent = 'Done, but this page did not get the approval code. Go back to the app and try again.'; return; }
-      const o = { name: a.name, short: g.approval.short, until: g.approval.until, ret: !!a.ret, join: a.ret ? null : g.result };
+      const o = { name: a.name, short: g.approval.short, until: g.approval.until, ret: !!a.ret, phone: onPhone(a.ret), join: a.ret ? null : g.result };
       store.set(ADDED, JSON.stringify(o));
       // On the way back to the app the six digits stay out of sight: they show only if this tab is come back to
       // (the way back failed), from what was just kept. Without a way back they are what the person needs now.
@@ -600,10 +608,12 @@
       const going = card(el('h2', {}, `Opening ${a.name}`), el('p', { className: 'sub', id: 'addline', role: 'status' }, `Done. ${a.name} is signing in.`));
       going.id = 'adddone';
       box.replaceWith(going);
-      // Back to the app on this computer, with the code (RFC 8252): only a loopback address gets here (returnOk).
+      // Back to the app, with the code (RFC 8252): only a loopback address or a phone app's App Link gets here (returnOk).
       {
         const u = new URL(a.ret);
-        u.searchParams.set('code', g.approval.code); u.searchParams.set('state', a.state); u.searchParams.set('join', g.result);
+        const q = new URLSearchParams({ code: g.approval.code, state: a.state, join: g.result });
+        // A phone app's https return takes them in the fragment, so its web server never sees them if the app does not open.
+        if (onPhone(a.ret)) u.hash = q.toString(); else for (const [k, v] of q) u.searchParams.set(k, v);
         location.assign(u.href);
       }
     });
@@ -794,6 +804,18 @@
     await refresh(); draw();
   }
 
+  // A site's two switches beside Posts only (SPEC 11.5), where the device that let it in has them. A change
+  // waits at the box until that device picks it up. Posts only already stops both, so they are off then.
+  const SWITCHES = [['lists', 'Private lists', 'Let it read your private lists', 'read your private lists'], ['dms', 'DMs', 'Let it read and send your direct messages', 'read and send DMs']];
+  function scopeSwitches(g) {
+    if (g.kind !== 'site') return [];
+    const site = g.name.replace(/^https?:\/\//, ''), posts = g.limit === 'posts';
+    return SWITCHES.filter(([k]) => typeof g[k] === 'boolean').map(([k, label, title, what]) =>
+      el('label', { className: 'toggle', title: posts ? 'Posts only is on, so it cannot read anything. Turn Posts only off first.' : title },
+        el('input', { type: 'checkbox', checked: globalThis.KeykinRows.scopeShown(g, k), disabled: posts, ariaLabel: `${label} for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'scopes', { grant: g.id, [k]: e.currentTarget.checked },
+          `${site} can ${e.currentTarget.checked ? '' : 'no longer '}${what} once ${g.deviceName} picks it up.`) } }), label));
+  }
+
   const card = (...kids) => el('div', { className: 'card' }, kids);
   const head = (title, sub) => el('div', { className: 'head' }, el('h1', {}, title), sub ? el('div', { className: 'dim' }, sub) : null);
   const link = (text, to) => el('button', { className: 'go-link linkish', on: { click: () => go(to) } }, text);
@@ -867,6 +889,7 @@
           el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
             el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
               e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),
+          ...scopeSwitches(g),
           el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${g.name.replace(/^https?:\/\//, '')} is revoked.`) } }, 'Revoke')))
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         link('Sign in to another app', 'home')],

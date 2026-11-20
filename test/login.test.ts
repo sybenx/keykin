@@ -243,6 +243,24 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.uncheck('input[aria-label="Posts only for https://jumble.social"]');
     await page.waitForSelector('text=jumble.social can do everything again.');
     assert.ok(verifyEvent(await D.signEvent(work, wh, follows, w.send, undefined, jumble.id)));
+    // A site with the phone's two switches: DMs turned on here waits for the phone, which picks it up when it reports.
+    const chat: D.Grant = { ...D.newGrant('site', 'https://chat.nostr.com'), lists: false, dms: false, via: 'bunker' };
+    await D.reportGrants(phone, held, [amethyst, chat], w.send);
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Sites and apps');
+    const dms = 'input[aria-label="DMs for https://chat.nostr.com"]', lists = 'input[aria-label="Private lists for https://chat.nostr.com"]';
+    assert.equal(await page.locator('input[aria-label="DMs for https://jumble.social"]').count(), 0);
+    await page.check(dms);
+    await page.waitForSelector('text=chat.nostr.com can read and send DMs once Pixel 9a picks it up.');
+    assert.ok(await page.isChecked(dms)); assert.ok(!(await page.isChecked(lists)));
+    await page.waitForSelector('text=waiting for Pixel 9a');
+    await shot('sites-switches');
+    const got = await D.syncGrants(phone, held, [amethyst, chat], w.send);
+    assert.deepEqual(got.scopes, { [chat.id]: { dms: true } });
+    await D.reportGrants(phone, held, [amethyst, { ...chat, dms: true }], w.send);
+    await page.check('input[aria-label="Posts only for https://chat.nostr.com"]');
+    await page.waitForSelector('text=chat.nostr.com can only post now.');
+    assert.ok(await page.isDisabled(dms)); assert.ok(await page.isDisabled(lists));
+    assert.equal(await page.locator('text=waiting for Pixel 9a').count(), 0);
     await page.click('button[aria-label="Revoke Amethyst"]');
     await page.waitForSelector('text=Amethyst is revoked.');
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);
@@ -901,9 +919,9 @@ test('an app sends you here to add it as a device: #add=, a click, and the appro
     for (const [bad, why] of [
       ['add=' + encodeURIComponent('not an invite'), /not a Keykin invite/],
       ['add=' + encodeURIComponent(encodeURIComponent(invite)), /not a Keykin invite/],
-      [link(invite, mp, 'st4te-evil1', 'https://evil.example/done'), /send the approval to evil\.example, which is not this computer/],
-      [link(invite, mp, 'st4te-evil2', 'http://192.168.1.5:8080/done'), /which is not this computer/],
-      [link(invite, mp, 'st4te-evil3', 'http://127.0.0.1/done'), /which is not this computer/],
+      [link(invite, mp, 'st4te-evil1', 'https://evil.example/done'), /send the approval to evil\.example, which is not this device/],
+      [link(invite, mp, 'st4te-evil2', 'http://192.168.1.5:8080/done'), /which is not this device/],
+      [link(invite, mp, 'st4te-evil3', 'http://127.0.0.1/done'), /which is not this device/],
       [`return=${encodeURIComponent(ret)}&state=st4te-xxxx&add=${encodeURIComponent(invite)}`, /not complete/],
     ] as const) {
       const p = await (await context()).newPage(); watch(p);
@@ -1009,6 +1027,56 @@ test('an app sends you here to add it as a device: #add=, a click, and the appro
     assert.deepEqual(puts(), []);
     assert.deepEqual(errors.filter((e) => !/ERR_CONNECTION|Failed to load resource/.test(e)), []);
   } finally { await browser.close(); await w.close(); app.close(); }
+});
+
+// A phone app (Marble on Android) does the same with its App Link as the return: the approval comes back in the
+// fragment of https://marble.syb.lol/joined, so marble.syb.lol never sees it if the app does not open.
+test('a phone app adds itself through the page, with its App Link as the return', { skip: !exe && 'no Chromium found', timeout: 120_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const { createHash, randomBytes: rb } = await import('node:crypto');
+  const w = await world();
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  try {
+    const phone = device('Pixel 9a');
+    const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    const ctx = await browser.newContext();
+    const landed: string[] = [];
+    // Stands in for the App Link: what the browser would hand to the app, or load if it did not.
+    await ctx.route('https://marble.syb.lol/**', (r) => { landed.push(r.request().url()); r.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Marble</title><p>Opening Marble' }); });
+    const page = await ctx.newPage();
+    const errors: string[] = []; page.on('pageerror', (e) => errors.push(String(e)));
+    const tablet = device('Galaxy Tab');
+    const verifier = rb(32).toString('base64url'), challenge = createHash('sha256').update(verifier).digest('base64url');
+    const invite = JSON.stringify({ keykin: 2, invite: { key: tablet.key, name: tablet.name } });
+    await page.goto(w.base + `/#challenge=${challenge}&return=${encodeURIComponent('https://marble.syb.lol/joined')}&state=st4te-tab00001&add=${encodeURIComponent(invite)}`);
+    await page.waitForSelector('#username');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+    await page.click('#pwgo');
+    await page.waitForSelector('#addcard');
+    assert.equal(await page.textContent('#addtitle'), 'Add Galaxy Tab to your account?');
+    await page.click('#addgo');
+    for (let k = 0; k < 40; k++) { if ((await D.answerNotes({ ...phone, fp: undefined }, held, w.send, { addr: w.base, tap: async () => false })).length) break; await new Promise((r) => setTimeout(r, 150)); }
+    await page.waitForURL((u: URL) => u.href.startsWith('https://marble.syb.lol/joined'));
+    const u = new URL(page.url());
+    assert.equal(u.search, '', 'nothing in the query: the web server never sees the code');
+    assert.equal(landed.length, 1); assert.equal(new URL(landed[0]!).search, '');
+    const q = new URLSearchParams(u.hash.slice(1));
+    assert.equal(q.get('state'), 'st4te-tab00001');
+    assert.deepEqual(JSON.parse(q.get('join')!), { keykin: 2, join: { addr: w.base, boxKey: held.boxKey, npub: held.npub } });
+    const th = await D.join(tablet, held.boxKey, held.npub, w.send, undefined, { code: q.get('code')!, verifier });
+    assert.ok(verifyEvent(await D.signEvent(tablet, th, note(held.npub), w.send)));
+    // Back in the page's tab: the six digits are for "this phone".
+    await page.goBack();
+    await page.waitForSelector('#shortcode');
+    assert.match((await page.textContent('.card'))!, /type this only into Galaxy Tab on this phone/);
+    // Any other https return is still refused.
+    const p2 = await (await browser.newContext()).newPage();
+    await p2.goto(w.base + `/#challenge=${challenge}&return=${encodeURIComponent('https://marble.syb.lol/joined/x')}&state=st4te-tab00002&add=${encodeURIComponent(invite)}`);
+    await p2.waitForSelector('#addasking[role=alert]');
+    assert.match((await p2.textContent('#addasking'))!, /which is not this device/);
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); await w.close(); }
 });
 
 test('sign-in strength: one session for every way in today, and tiers a box owner can switch on', async () => {

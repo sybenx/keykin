@@ -191,8 +191,12 @@ when the note carried a `challenge`:
 - Until then a gated member gets `not_approved` for every other op, so it cannot read or answer the
   account's notes, list the members, or sign.
 
-A member added on a device by the fingerprint (a phone scanning an invite, `keykin add`) has no gate:
-nothing changes for it.
+A member added on a device by the fingerprint (a phone scanning a new device's code or invite, `keykin add`)
+has no gate: nothing changes for it.
+
+**Marble on Android signs in this way too** when no device of the account is at hand ("Use my name"): it
+opens Marble Web with its invite, a PKCE challenge, a `state` and `return=https://marble.syb.lol/joined`,
+and collects its piece with the code and its verifier as the Mac does.
 
 ## 8. Falling back to the nsec
 
@@ -211,12 +215,47 @@ with.
 
 ## 8b. A new device learning where the box is
 
-Three short texts, shown as QRs or pasted:
+**One code** (Aaron, 2026-11-19). The new device shows one code; a device in the account scans it and
+decides what the newcomer gets, because only it knows how the account is set up. The code is the QRST
+profile `keykin-device` (`qr-secret-transfer/profiles/keykin-device.md`), Flow A (`mode=offer`, the new
+device is the Receiver), as an `https` link: Keykin's apps use `https://marble.syb.lol/add#…`, an App
+Link to Marble. It carries one extra fragment parameter, `invite`, the new device's invite below,
+base64url with no padding.
 
-1. The new device shows an **invite**: `{ keykin: 2, invite: { key, name, chip } }`.
-2. A device in the account adds it (section 7) and shows the **join text**:
-   `{ keykin: 2, join: { addr, boxKey, npub } }`.
-3. The new device reads that, collects its two halves from the box, and checks the npub.
+1. The new device shows the code and listens on its relays.
+2. A device in the account reads it and asks **"Add *name*?"** (Add, Not now). On Add, with the
+   fingerprint for an account change (section 4):
+   - **The account has a box:** it adds the newcomer (section 7) and releases the **join text**. The
+     newcomer collects its two halves from the box (`welcome`) and checks the npub.
+   - **The account has no box** (the whole key lives on the adding device): it releases the **whole
+     key**, and the newcomer keeps it as its own, the same as a QRST nsec transfer. The adding device
+     keeps its own copy: nothing is forgotten.
+   The rule is a box or not, never the person's choice and never the number of devices: a piece needs
+   the box, which is one of the two helpers that make it.
+3. The new device keeps what arrived with no second tap and is signed in, showing whose account it is.
+
+The digits of QRST are compared only when the code was not read by the adding device's own camera (a
+pasted link, the `qrst:` hand-off): then the adding device shows five digits and asks whether the new
+device shows the same, and nothing is added until they match. A camera scan has no digits. Where this
+departs from QRST section 9 (a short prompt, no second tap on the new device) is written in the profile.
+
+**The texts**, unchanged and still accepted by the apps and the command line:
+
+- An **invite**: `{ keykin: 2, invite: { key, name, chip } }`. `key` is the new device's member key.
+- The **join text**: `{ keykin: 2, join: { addr, boxKey, npub, loginPage } }`. It holds no secret.
+- The older way still works: the new device shows its invite, a device in the account adds it and shows
+  the join text, and the new device reads that.
+
+**Another app on the same phone** does not join. It signs through the app that is already in the
+account, by NIP-55 (section 8i).
+
+**Built (2026-11-19, branches `add-device`, not released):** the profile in qr-secret-transfer (spec, TypeScript,
+Kotlin, vectors); here `src/adddevice.ts`, `keykin signin <relay>` and `keykin add '<code>'`, and the account
+page's App Link return; Marble on Android (Welcome with Create your account and Sign in, the one code, Add with
+the box or no-box rule, digits for a pasted code, Use my name) and Marble Web (`/add`, `/joined`, the App Link
+return). Until qr-secret-transfer's main carries the profile, Keykin (`src/adddevice.ts`) and Marble
+(`keykin/core/AddDevice.kt`) keep copies, tested against its vectors. Marble on the Mac and the browser extension
+do not read the code yet.
 
 ## 8c. Signing in to sites (NIP-46)
 
@@ -240,10 +279,19 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Each answer goes back on the relay its request came in on.
 - Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
   forgets the site and answers `not_connected` from then on.
+- **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
+  the person may name the site when asking for the link ("Which site is it for?"). The link's secret
+  is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
+  A site with no origin and no name takes one from the first `sign_event` it asks for that has a
+  client tag (`["client", "<name>", ...]`, the second item). A name is cleaned (no control
+  characters, trimmed, at most 60 characters; empty means none) and, once set, stays: the person's
+  word wins over a client tag, and the first client tag over later ones. Devices name a site, here
+  and in its grant, by its origin, else its name, else "A site". `keykin bunker <relay> --name <site>`
+  prints such a link.
 
 ## 8d. The command-line device
 
-`cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `add`,
+`cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `signin`, `add`,
 `join`, `status`, `sign`, `child`, `block`, `unblock`, `cycle`, `serve`, `agent`, `bunker`, `scan`, `sites`,
 `signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
 readable only by its owner. The piece in it is not encrypted.
@@ -653,7 +701,9 @@ each device tells the box what it has let in.
 
 - A **grant** is `{ id, kind, name, since }`. `id` is 16 random bytes, hex, made by the device.
   `kind` is `site` (a site signed in through this device) or `app` (another app on the phone).
-  `name` is the site's origin or the app's name. `since` is unix seconds.
+  `name` is the site's origin or the app's name. A site with no origin is named as in section 8c:
+  the name the person typed, else its first client tag, else "A site". When a name comes later the
+  device sends its list again with the new name. `since` is unix seconds.
 - A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
   changes. The box keeps the list per device.
 - **Telling grants apart** (Aaron, 2026-11-19). A grant may also carry, all optional:
@@ -718,6 +768,39 @@ from that map, and Sites and apps shows it ("last used …"). Devices change not
 `browser` from the nostrconnect note, `lastKind`), the account page's detail line (`login/static/rows.js`),
 Marble (Android reports them, Marble Web sends `device=` and shows its key) and Tube (`device=` from the
 start request's User-Agent).
+
+**Turning on DMs and private lists from the account page.** (Aaron, 2026-11-19.) A device may keep two
+switches of its own for a site: may it read the private lists (a message key with the account's own
+key), and may it read and send DMs. Marble has them for each site it lets in, off at first, and checks
+them on the phone. The account page can turn them on or off; the box only carries the choice.
+
+1. In `grants`, a grant may carry `lists` and `dms`, booleans: the device's switches for that site
+   as they are now. Absent means the device has no such switch for it (apps, the command-line
+   signer). The box keeps them only when they are booleans.
+2. The page's call is `scopes { grant, lists?, dms? }`, each a boolean, at least one. The box answers
+   `gone` if the grant is not on the account's list, and `bad_request` if it is not a `site`, if its
+   device did not report the switch asked about, or if the body is wrong. It keeps what the page
+   wants in the account's `wants` map (by grant id, `{ lists?, dms? }`), merged with any want
+   already there, and writes a line like "chat.nostr.com may read and send DMs, from the account
+   page" or "chat.nostr.com may no longer read your private lists, from the account page". It
+   follows the sign-in strength rows of 11.6 as `limit` does: turning a switch on is `limit:none`,
+   turning one off is `limit:posts`.
+3. The answer to `grants` carries `scopes: { "<grant id>": { lists?, dms? } }` for that device's
+   grants with a want, and leaves the field out when there are none. The device sets its switches
+   and reports again; once a report shows a switch as wanted, that part of the want is done. A want
+   for a grant no device lists any more goes, and revoking a grant (from anywhere, or after 90 days
+   unused) drops its want.
+4. The page's `me` gives each grant `lists` and `dms` (as reported, or `null`) and `want` (or
+   `null`). Sites and apps shows "Private lists" and "DMs" switches beside Posts only for a site
+   that has them, showing the want while there is one, and adds "waiting for Pixel 9a" to the line
+   while the want and the device differ. With Posts only on, both are greyed out: that limit already
+   refuses every message key.
+
+**Built (2026-11-19), the switches:** on the box (`wants`, `scopes` in the `grants` answer), the page
+call and `me` (`box/pageapi.ts`, passed through by Keykin Login), the account page
+(`login/static/account.js`, the waiting text in `login/static/rows.js`), and the TS device core
+(`lists` and `dms` on `Grant`; `syncGrants` returns `{ revoked, scopes }`, and `reportGrants` still
+returns `revoked` alone). Marble is built against this format separately.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -832,10 +915,12 @@ a code for the phone's Add a device instead. The login page:
   the tab's `sessionStorage` (`kk-add`) through the scan, the passkey or the password;
 - checks the invite is a Keykin invite: JSON, `keykin: 2`, an `invite` with a 64-hex `key`. The `name` is
   shown (cut to 60 characters, "A new device" when there is none);
-- **sends approvals to this computer only.** `return` must be `http:` on `127.0.0.1` or `localhost`, with a
-  port, and no user, password or fragment. `challenge` must be 43 base64url characters and `state` 8 to
-  128. Anything else ("not a Keykin invite", "send the approval to <host>, which is not this computer",
-  "not complete") is said plainly and left alone: nothing is kept;
+- **sends approvals to this device only.** `return` must be `http:` on `127.0.0.1` or `localhost`, with a
+  port, and no user, password or fragment (RFC 8252 7.3), or exactly one of the phone apps' own App Link
+  addresses (RFC 8252 7.2): today only `https://marble.syb.lol/joined`, which Marble on Android claims.
+  `challenge` must be 43 base64url characters and `state` 8 to 128. Anything else ("not a Keykin invite",
+  "send the approval to <host>, which is not this device", "not complete") is said plainly and left alone:
+  nothing is kept;
 - **never leaves the note without a click.** After signing in, or straight away if the browser is signed
   in already, it shows a card: **"Add <name> to your account?"** with the account's name and picture, the
   device's name, and **Add** and **Not now**. A tab an app opens has no referrer, so the card says to say
@@ -845,7 +930,8 @@ a code for the phone's Add a device instead. The login page:
   When the device has answered, `note_get` gives the page that left the note, once, `approval: { code,
   short, until }`;
 - navigates to `return` with `code`, `state` and `join` (the join text, which is not secret) added to its
-  query. The app checks `state`, then asks for its welcome with `code` and `verifier`, joins, and its
+  query, or, for an App Link return, in its fragment, so that the web server behind it never sees them if
+  the app does not open. The app checks `state`, then asks for its welcome with `code` and `verifier`, joins, and its
   listener answers the tab ("Done. Marble on Mac is signed in."). The listener takes one approval, and
   closes after it or after 10 minutes;
 - **the fallback:** before leaving, the page keeps the six digits for this tab (`kk-add-done`, until they
@@ -926,12 +1012,15 @@ Kotlin core are the test both sides use.
 - The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
   (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
   uses the main account, as before. `kind` is `invite` (the text is a new
-  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text),
-  `cycle` (no text) or `pointer` (no text: the box puts in its own login page address, section 11.1,
-  and refuses with `no_login_page` when it has none). A `pointer` note needs no more than a `bunker`
-  note does: any page session.
+  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (the text is
+  an optional name for the site, section 8c, which the device cleans), `cycle` (no text) or `pointer`
+  (no text: the box puts in its own login page address, section 11.1, and refuses with `no_login_page`
+  when it has none). A `pointer` note needs no more than a `bunker` note does: any page session. A
+  `bunker` note may also carry `lists` and `dms`, the site's two switches ("Read your private lists",
+  "Read and send DMs"). Only `true` turns one on; other kinds ignore them.
 - `{ op: "notes", account }` from a device returns the waiting ones, each
-  `{ id, kind, text, at, tap }`. `tap` is true for `cycle` and `pointer`.
+  `{ id, kind, text, at, tap }`, and for `bunker` also `lists` and `dms` (true or false). `tap` is
+  true for `cycle` and `pointer`. The device's link gives the site those switches when it connects.
 - `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
   the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
   such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the
@@ -1024,8 +1113,6 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - **The camera scan on a real phone.** The scanner is wired in but was only exercised through
   pasted and intent-fed codes on an emulator.
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
-- **The Android app answering the account page's notes, and reporting grants** (sections 11.5 and
-  11.6). The Kotlin core has the calls; the app does not use them yet.
 - **Screens for moving an account to another box.** Built in the device cores and on the command
   line only.
 - **Limits other than posting only, on the page.** The box also knows `dms` (posts and direct messages, section 11.6), but the page offers only posts only.

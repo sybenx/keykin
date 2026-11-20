@@ -190,6 +190,16 @@ test('the agent: a computer left on does what the account page asks, and its sit
     await assert.rejects(site.signEvent({ kind: 1, created_at: now(), tags: [], content: 'after the revoke' }), /revoked/);
     await agent.tick();
     assert.match((await cli(home, 'sites')).text, /No site is signed in/);
+    // Asked for with a name: the site is listed by that name, on the page and here.
+    const { note: named } = b.page.call({ call: 'note_put', session, kind: 'bunker', text: 'Jumble' }, now());
+    await agent.tick();
+    const site2 = BunkerSigner.fromBunker(generateSecretKey(), (await parseBunkerInput(b.page.call({ call: 'note_get', session, note: named }, now()).result))!);
+    try {
+      await site2.connect();
+      await agent.tick();
+      assert.deepEqual(b.page.call({ call: 'me', session }, now()).grants.map((g: any) => g.name), ['Jumble']);
+      assert.match((await cli(home, 'sites')).text, /Jumble/);
+    } finally { await site2.close(); }
 
     // "Add a device" from the page: the agent adds it with nobody at the keyboard.
     const pc = tmp('kk-pc-');

@@ -26,3 +26,8 @@ export function parseUri(input: string): PairingParams;
 export const relayPolicy: { loopback: boolean };
 export function isPrivateHost(hostname: string): boolean;
 export const DEFAULT_MAX_PAYLOAD: number;
+export function publicKey(secretKey: Uint8Array): string;
+export function npubEncode(publicKeyHex: string): string;
+export function isValidPublicKey(publicKeyHex: string): boolean;
+export function bytesToHex(bytes: Uint8Array): string;
+export function hexToBytes(hex: string): Uint8Array;

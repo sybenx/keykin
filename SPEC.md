@@ -730,6 +730,39 @@ from that map, and Sites and apps shows it ("last used …"). Devices change not
 Marble (Android reports them, Marble Web sends `device=` and shows its key) and Tube (`device=` from the
 start request's User-Agent).
 
+**Turning on DMs and private lists from the account page.** (Aaron, 2026-11-19.) A device may keep two
+switches of its own for a site: may it read the private lists (a message key with the account's own
+key), and may it read and send DMs. Marble has them for each site it lets in, off at first, and checks
+them on the phone. The account page can turn them on or off; the box only carries the choice.
+
+1. In `grants`, a grant may carry `lists` and `dms`, booleans: the device's switches for that site
+   as they are now. Absent means the device has no such switch for it (apps, the command-line
+   signer). The box keeps them only when they are booleans.
+2. The page's call is `scopes { grant, lists?, dms? }`, each a boolean, at least one. The box answers
+   `gone` if the grant is not on the account's list, and `bad_request` if it is not a `site`, if its
+   device did not report the switch asked about, or if the body is wrong. It keeps what the page
+   wants in the account's `wants` map (by grant id, `{ lists?, dms? }`), merged with any want
+   already there, and writes a line like "chat.nostr.com may read and send DMs, from the account
+   page" or "chat.nostr.com may no longer read your private lists, from the account page". It
+   follows the sign-in strength rows of 11.6 as `limit` does: turning a switch on is `limit:none`,
+   turning one off is `limit:posts`.
+3. The answer to `grants` carries `scopes: { "<grant id>": { lists?, dms? } }` for that device's
+   grants with a want, and leaves the field out when there are none. The device sets its switches
+   and reports again; once a report shows a switch as wanted, that part of the want is done. A want
+   for a grant no device lists any more goes, and revoking a grant (from anywhere, or after 90 days
+   unused) drops its want.
+4. The page's `me` gives each grant `lists` and `dms` (as reported, or `null`) and `want` (or
+   `null`). Sites and apps shows "Private lists" and "DMs" switches beside Posts only for a site
+   that has them, showing the want while there is one, and adds "waiting for Pixel 9a" to the line
+   while the want and the device differ. With Posts only on, both are greyed out: that limit already
+   refuses every message key.
+
+**Built (2026-11-19), the switches:** on the box (`wants`, `scopes` in the `grants` answer), the page
+call and `me` (`box/pageapi.ts`, passed through by Keykin Login), the account page
+(`login/static/account.js`, the waiting text in `login/static/rows.js`), and the TS device core
+(`lists` and `dms` on `Grant`; `syncGrants` returns `{ revoked, scopes }`, and `reportGrants` still
+returns `revoked` alone). Marble is built against this format separately.
+
 ### 11.6 The account page's calls, and what needs a device
 
 Keykin Login is a public page with no piece and no list. It passes two kinds of thing to the

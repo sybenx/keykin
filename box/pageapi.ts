@@ -2,7 +2,7 @@
 // and no list: it passes these calls through, and the box decides. Nothing here can sign, add a device,
 // unblock one or form the key. Those need a device's fingerprint and go through /keykin.
 
-import { Box, type Limit, type Account, type Note, type Passkey, type PageSession, USERNAME } from './box.ts';
+import { Box, SCOPES, type Limit, type Account, type Note, type Passkey, type PageSession, USERNAME } from './box.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha } from '../src/bytes.ts';
 import { timingSafeEqual, createHash } from 'node:crypto';
@@ -148,6 +148,17 @@ export class PageApi {
           this.box.happened(a.npub, body.to === 'posts' ? `${g.name} was limited to posting from the account page` : body.to === 'dms' ? `${g.name} was limited to posts and direct messages from the account page` : `${g.name} may do everything again, from the account page`, now);
           return { ok: true };
         }
+        case 'scopes': {
+          // A site's two switches on the device that let it in (SPEC 11.5): the box keeps what the page wants,
+          // and hands it to that device the next time it reports its grants.
+          const g = Object.values(a.grants ?? {}).flat().find((x) => x.id === body.grant) ?? refuse('gone');
+          const asked = SCOPES.filter((k) => body[k] !== undefined);
+          if (!asked.length || asked.some((k) => typeof body[k] !== 'boolean' || typeof g[k] !== 'boolean') || g.kind !== 'site') refuse('bad_request');
+          this.box.wantScopes(a.npub, g.id, { lists: body.lists, dms: body.dms });
+          const site = g.name.replace(/^https?:\/\//, ''), what = { lists: 'read your private lists', dms: 'read and send DMs' };
+          for (const k of asked) this.box.happened(a.npub, `${site} may ${body[k] ? '' : 'no longer '}${what[k]}, from the account page`, now);
+          return { ok: true };
+        }
         case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
         case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
         case 'logout': this.#end(hash); return { ok: true };
@@ -204,8 +215,11 @@ export class PageApi {
     catch (e) { if (e instanceof KeykinError) return { error: e.code }; return { error: 'wrong' }; }
   }
   #needs(body: any): Need {
-    const row = body.call === 'note_put' ? `note_put:${body.kind}` : body.call === 'limit' ? `limit:${body.to ?? 'none'}` : body.call;
-    return this.policy[row] ?? this.policy[body.call] ?? 'any';
+    // A site's switches (`scopes`) follow the limit rows: turning one on gives the site more, like lifting a
+    // limit (`limit:none`); turning one off takes some away, like adding one (`limit:posts`).
+    const on = body.call === 'scopes' && (body.lists === true || body.dms === true), call = body.call === 'scopes' ? 'limit' : body.call;
+    const row = body.call === 'note_put' ? `note_put:${body.kind}` : body.call === 'limit' ? `limit:${body.to ?? 'none'}` : body.call === 'scopes' ? `limit:${on ? 'none' : 'posts'}` : body.call;
+    return this.policy[row] ?? this.policy[call] ?? 'any';
   }
   #place(body: any) {
     // A box that knows its login page uses that, not whatever host the request came in by: a lookalike
@@ -372,7 +386,8 @@ export class PageApi {
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
-      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null }))),
+      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null,
+        lists: typeof g.lists === 'boolean' ? g.lists : null, dms: typeof g.dms === 'boolean' ? g.dms : null, want: a.wants?.[g.id] ?? null }))),
     };
   }
 }

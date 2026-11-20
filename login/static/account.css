@@ -65,6 +65,9 @@ button.btn.go:disabled { background:var(--off); border:1px solid var(--line); }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .toggle { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--dim); white-space:nowrap; cursor:pointer; }
 .toggle input { width:16px; height:16px; margin:0; accent-color:var(--accent); cursor:pointer; }
+.toggle:has(input:disabled), .toggle:has(input:disabled) input { opacity:.55; cursor:default; }
+/* A site row with its switches: on a phone the name gets its own line and the switches go under it. */
+@media (max-width:520px) { .row:has(.toggle) { flex-wrap:wrap; row-gap:10px; } .row:has(.toggle) > .grow { flex-basis:100%; } }
 .with-note { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .side-note { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
 .needs { font-size:12px; color:var(--dim); }

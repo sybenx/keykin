@@ -25,7 +25,7 @@ const FILES: Record<string, [string, string]> = {
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.
-const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'logout_browser', 'note_put', 'note_get', 'protect', 'pk_add_start', 'pk_add', 'pk_remove']);
+const NEED_SESSION = new Set(['me', 'block', 'unblock', 'revoke', 'limit', 'scopes', 'pw_set', 'pw_clear', 'logout', 'logout_all', 'logout_browser', 'note_put', 'note_get', 'protect', 'pk_add_start', 'pk_add', 'pk_remove']);
 const OPEN = new Set(['pw_salt', 'pw_login', 'login_start', 'login_wait', 'signin_start', 'signin', 'pk_login_start', 'pk_login']);
 /** Where the page and a phone meet for sign-in by a scanned code, unless KEYKIN_RELAYS says otherwise. */
 const RELAYS = ['wss://syb.lol', 'wss://nos.lol', 'wss://relay.primal.net'];

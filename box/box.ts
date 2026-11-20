@@ -62,11 +62,18 @@ export interface Account {
   connects?: Record<string, { browser: string; at: number }>;
   /** Grants the person limited (SPEC 11.5): `posts` lets that site or app post and nothing else. */
   limits?: Record<string, Limit>;
+  /** Switches the account page turned on or off for a site (SPEC 11.5), by grant id, waiting for the device that let it in. */
+  wants?: Record<string, Scopes>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
 }
 /** `client`, `device`, `via` come from the device; `browser` is set by the box from the page session that left the nostrconnect note (SPEC 11.5). */
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number; client?: string; device?: string; via?: Via; browser?: string }
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number; client?: string; device?: string; via?: Via; browser?: string;
+  /** The device's own switches for a site (SPEC 11.5): may it read the private lists, may it read and send DMs. Absent: it has none. */
+  lists?: boolean; dms?: boolean }
+/** What the account page wants a site's switches to be (SPEC 11.5). */
+export interface Scopes { lists?: boolean; dms?: boolean }
+export const SCOPES = ['lists', 'dms'] as const;
 export type Via = 'login' | 'scan' | 'paste' | 'bunker';
 const VIAS = new Set(['login', 'scan', 'paste', 'bunker']);
 /** A short label for a browser from its User-Agent, e.g. "Chrome on Windows" (the account page's browserOf). */
@@ -307,6 +314,7 @@ export class Box {
             const label = typeof g.device === 'string' ? g.device.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60) : '';
             if (label) out.device = label;
             if (VIAS.has(g.via)) out.via = g.via;
+            for (const k of SCOPES) if (typeof g[k] === 'boolean') out[k] = g[k];
             // The browser is the box's own word, from the page session whose note carried this client key.
             const c = out.client && s.connects?.[out.client];
             if (c) out.browser = c.browser;
@@ -322,9 +330,10 @@ export class Box {
           }
           (s.grants ??= {})[from.key] = clean.filter((g) => !revoked.has(g.id));
           this.expireGrants(s, now);
+          const scopes = this.#scopesFor(s, from.key);
           this.#save();
           const gone = new Set(s.revoked ?? []);
-          return { ok: true, revoked: clean.filter((g) => gone.has(g.id)).map((g) => g.id) };
+          return { ok: true, revoked: clean.filter((g) => gone.has(g.id)).map((g) => g.id), ...(Object.keys(scopes).length ? { scopes } : {}) };
         }
         case 'revoke': this.revokeGrant(s.npub, body.grant); return { ok: true };
         case 'limit': this.limitGrant(s.npub, body.grant, body.to); return { ok: true };
@@ -438,6 +447,7 @@ export class Box {
     if (r.length > 2000) r.splice(0, r.length - 2000);
     for (const k of Object.keys(s.grants ?? {})) s.grants![k] = s.grants![k].filter((g) => g.id !== grant);
     if (s.limits) delete s.limits[grant as string];
+    if (s.wants) { delete s.wants[grant as string]; if (!Object.keys(s.wants).length) delete s.wants; }
     if (s.used) delete s.used[grant as string];
     if (s.kinds) delete s.kinds[grant as string];
     this.#save();
@@ -485,6 +495,32 @@ export class Box {
     if (to !== null) { l[grant as string] = to as Limit; if (Object.keys(l).length > 2000) delete l[Object.keys(l)[0]]; }
     else delete l[grant as string];
     this.#save();
+  }
+  /**
+   * The account page turns a site's switches on or off (SPEC 11.5). The box keeps it as a want, merged with
+   * any earlier one, until the device that let the site in reports the same values.
+   */
+  wantScopes(npub: string, grant: string, want: Scopes) {
+    const s = this.state.accounts[npub] ?? refuse('unknown_account');
+    const w = ((s.wants ??= {})[grant] ??= {});
+    for (const k of SCOPES) if (typeof want[k] === 'boolean') w[k] = want[k];
+    this.#save();
+  }
+  // After a device reports: a want its report now matches is done, and a want for a grant no device lists
+  // any more goes. What is still wanted for this device's grants goes back to it.
+  #scopesFor(s: Account, device: string): Record<string, Scopes> {
+    if (!s.wants) return {};
+    const listed = new Set(Object.values(s.grants ?? {}).flat().map((g) => g.id));
+    for (const id of Object.keys(s.wants)) if (!listed.has(id)) delete s.wants[id];
+    const out: Record<string, Scopes> = {};
+    for (const g of s.grants?.[device] ?? []) {
+      const w = s.wants[g.id];
+      if (!w) continue;
+      for (const k of SCOPES) if (w[k] !== undefined && g[k] === w[k]) delete w[k];
+      if (Object.keys(w).length) out[g.id] = { ...w }; else delete s.wants[g.id];
+    }
+    if (!Object.keys(s.wants).length) delete s.wants;
+    return out;
   }
   /** Saves after the page API changed something in the state (a password try count, say). */
   touch() { this.#save(); }

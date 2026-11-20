@@ -110,3 +110,40 @@ ul.plain { margin:0; padding-left:18px; font-size:14px; line-height:1.6; }
 a.linkbtn { display:inline-flex; align-items:center; justify-content:center; height:46px; padding:0 22px; border-radius:10px; text-decoration:none; background:var(--accent); color:var(--on); font:600 15px Inter, system-ui, sans-serif; }
 a.linkbtn:hover { color:var(--on); }
 .shortcode { font-size:34px; font-weight:700; letter-spacing:.08em; margin:4px 0; user-select:all; }
+
+/* Connect a site: one connection, two ends. The site on the left, you on the right, the code on the line between. */
+.stick { --end:132px; display:flex; align-items:flex-start; margin:8px 0 2px; }
+.stick .end { width:var(--end); flex:none; display:flex; flex-direction:column; align-items:center; gap:4px; text-align:center; font-size:13px; overflow-wrap:anywhere; min-width:0; }
+.stick .ball { width:48px; height:48px; border-radius:24px; border:1px solid var(--line); background:var(--card); color:var(--text); display:flex; align-items:center; justify-content:center; font-weight:600; font-size:20px; margin-bottom:2px; position:relative; z-index:1; transition:box-shadow .3s; }
+.stick .end.held .ball { box-shadow:0 0 0 3px var(--accent); }
+.stick .endname { font-weight:600; font-size:14px; }
+.stick .which { display:flex; flex-direction:column; align-items:stretch; gap:2px; width:100%; margin-top:4px; }
+.stick .which label { font-size:12px; }
+.stick .which input.field { height:40px; padding:0 10px; font-size:13px; text-align:center; }
+/* The line runs from ball to ball: the wire reaches in under both ends. */
+.stick .wire { flex:1; min-width:56px; position:relative; height:48px; margin:0 calc((48px - var(--end)) / 2); }
+.stick .wire::before { content:''; position:absolute; left:0; right:0; top:23px; border-top:2px solid var(--line); transition:border-color .3s; }
+.stick[data-phase="done"] .wire::before { top:22px; border-top:3px solid var(--accent); }
+.stick .onwire { position:absolute; top:24px; left:calc(100% - 10px); transform:translate(-100%, -50%); max-width:calc(100% - 20px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:12px; font-weight:500; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:99px; padding:2px 10px; transition:left .4s ease, transform .4s ease; }
+.stick[data-dir="code"] .onwire { left:10px; transform:translate(0, -50%); }
+.stick[data-phase="done"] .onwire { left:50%; transform:translate(-50%, -50%); }
+.stick[data-phase="waiting"] .onwire, .stick[data-phase="sending"] .onwire { display:none; }
+.stick .runner { display:none; position:absolute; top:19px; left:0; width:10px; height:10px; border-radius:5px; background:var(--accent); }
+.stick[data-phase="waiting"] .runner { display:block; animation:kk-to-left 1.8s linear infinite; }
+.stick[data-phase="sending"] .runner { display:block; animation:kk-to-right 1.8s linear infinite; }
+@keyframes kk-to-left { from { left:calc(100% - 10px); } to { left:0; } }
+@keyframes kk-to-right { from { left:0; } to { left:calc(100% - 10px); } }
+@media (prefers-reduced-motion: reduce) {
+  .stick .runner { animation:none !important; left:calc(50% - 5px); }
+  .stick .onwire, .stick .ball, .stick .wire::before { transition:none; }
+}
+.stickopts { display:flex; gap:8px 20px; flex-wrap:wrap; }
+.stick .which[hidden], .stickopts[hidden] { display:none; }
+.stickopts .toggle { min-height:32px; }
+.stickbody { display:flex; flex-direction:column; gap:10px; }
+.stickcard .flip { align-self:flex-start; min-height:44px; margin:0; display:inline-flex; align-items:center; }
+.stickcard textarea.field { width:100%; min-height:88px; resize:vertical; border:1px solid var(--line); border-radius:10px; padding:10px 14px; background:var(--bg); color:var(--text); }
+.stickcard a#stickback { align-self:flex-start; font-weight:500; }
+@media (max-width:820px) { .stick { --end:104px; } }
+@media (max-width:420px) { .stick { --end:96px; } }

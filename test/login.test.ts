@@ -177,9 +177,9 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     assert.match((await page.textContent('#npub'))!, /^npub1/);
     assert.match((await page.textContent('.top'))!, /aaron · signed in with a password/);
     // Home: "Sign in to an app" first (under an alert, if there is one), and a status line only when no alert is up.
-    await page.waitForSelector('#signinapp');
-    assert.equal(await page.evaluate(() => { const m = document.querySelector('main')!; return Array.from(m.children).find((c) => !['pointeralert', 'pointernote', 'status'].includes(c.id))?.id; }), 'signinapp');
-    assert.equal(await page.textContent('#signinapp h2'), 'Sign in to an app');
+    await page.waitForSelector('#stick');
+    assert.equal(await page.evaluate(() => { const m = document.querySelector('main')!; return Array.from(m.children).find((c) => !['pointeralert', 'pointernote', 'status'].includes(c.id))?.id; }), 'stick');
+    assert.equal(await page.textContent('#sticktitle'), 'Connect a site to your account');
     await page.waitForFunction(() => !!document.querySelector('#pointeralert, #pointernote'));
     if (await page.locator('#pointeralert').count()) assert.equal(await page.locator('#statusline').count(), 0, 'no status line under an alert');
     else assert.match((await page.textContent('#statusline'))!, /^Everything looks fine\. 2 devices and 2 boxes can sign, nothing is blocked\.$/);
@@ -264,10 +264,11 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.click('button[aria-label="Revoke Amethyst"]');
     await page.waitForSelector('text=Amethyst is revoked.');
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);
-    // The card is on Home now, and the sites page links there.
-    assert.equal(await page.locator('#signinapp').count(), 0);
+    // The card is on Home, and the sites page links there. No site sent this page here, so it asks first: Make a link.
+    assert.equal(await page.locator('#stick').count(), 0);
     await page.click('text=Sign in to another app');
-    await page.click('text=Get a bunker link');
+    assert.equal(await page.textContent('#sticktitle'), 'Connect a site to your account');
+    await page.click('#makelink');
     assert.deepEqual(await answered(), ['gave a bunker link']);
     await page.waitForSelector('#bunkerlink.has');
     assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
@@ -383,7 +384,7 @@ test('the account page says at the top when sites cannot find you by name, and n
         const { page, errors } = await signIn(w, dark);
         await page.waitForSelector('#pointeralert');
         assert.equal(await page.textContent('#pointertitle'), 'Sites can’t find you by name yet');
-        assert.deepEqual(await page.evaluate(() => Array.from(document.querySelector('main')!.children).slice(0, 3).map((c) => c.id || c.className)), ['pointeralert', 'signinapp', 'hello']);
+        assert.deepEqual(await page.evaluate(() => Array.from(document.querySelector('main')!.children).slice(0, 3).map((c) => c.id || c.className)), ['pointeralert', 'stick', 'hello']);
         assert.equal(await page.locator('#statusline').count(), 0, 'no status line while an alert shows');
         assert.equal(await page.locator('#publishpointer').count(), 0, 'no signer after a password');
         assert.equal(await page.textContent('#pointerphone'), 'Publish it from my phone');
@@ -616,6 +617,133 @@ test('signing in to the account page the way any site does: a signed challenge, 
     assert.equal(me.held, true); assert.deepEqual(me.devices.map((d: any) => d.name), ['Pixel 9a', 'Box']);
     assert.ok(verifyEvent(await D.signEvent(phone, held, note(pub), open.send)));
   } finally { await open.close(); }
+});
+
+// Connect a site: one card, two ends. A link your end makes for the site, or a code the site made for you.
+test('connecting a site from the account page: a link or a code, and the site shows up connected', { skip: !exe && 'no Chromium found', timeout: 150_000 }, async () => {
+  const { chromium: pw } = await import('playwright-core');
+  const w = await world();
+  const browser = await pw.launch({ executablePath: exe!, args: ['--headless=new'] });
+  const shots = join(tmpdir(), 'keykin-shots'); mkdirSync(shots, { recursive: true });
+  try {
+    const phone = device('Pixel 9a');
+    const held = await D.createWithBox(phone, D.readQr(w.box.qr()!), w.send);
+    await D.passwordSet(phone, held, 'aaron', 'correct horse battery', w.send);
+    const away = { ...phone, fp: undefined };
+    const codes: string[] = [];
+    const answer = () => D.answerNotes(away, held, w.send, { addr: w.base, tap: async () => true, bunker: async () => 'bunker://abc123?relay=wss%3A%2F%2Frelay.example', connect: async (uri) => { codes.push(uri); return true; } });
+    const answered = async () => { for (let k = 0; k < 40; k++) { const did = await answer(); if (did.length) return did; await new Promise((r) => setTimeout(r, 150)); } return []; };
+
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await ctx.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e))); page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    // The person came here from a site on another origin, then signed in.
+    await page.goto(w.base + '/', { referer: 'http://www.iris.example/some/page' });
+    await page.waitForSelector('#username');
+    await page.fill('#username', 'aaron'); await page.fill('#password', 'correct horse battery');
+    await page.click('#pwgo');
+    await page.waitForSelector('text=Welcome, Aaron');
+    assert.equal(await page.textContent('#camefrom'), 'You came from iris.example');
+    assert.equal(await page.textContent('#sticktitle'), 'Connect iris.example to your account');
+    assert.equal(await page.textContent('#sitename'), 'iris.example');
+    assert.equal(await page.isVisible('#whichsite'), false);
+
+    // Link direction first: the site wants a link your end makes. Nothing is asked for until Make a link.
+    assert.equal(await page.getAttribute('#stickrow', 'data-dir'), 'link');
+    assert.equal(await page.textContent('#stickline'), 'iris.example asked for a link, so your end makes one. Paste it into iris.example\'s sign-in box.');
+    assert.equal(await page.textContent('#stickchip'), '← your link');
+    assert.equal((await D.notes(away, held, w.send)).length, 0);
+    await page.check('#stickdms');
+    await page.click('#makelink');
+    await page.waitForSelector('text=Your phone is making the link…');
+    // The site's name goes to the box as the link note's text.
+    assert.deepEqual((await D.notes(away, held, w.send)).map((n) => [n.kind, n.text]), [['bunker', 'iris.example']]);
+    assert.deepEqual(await answered(), ['gave a bunker link']);
+    await page.waitForSelector('#bunkerlink.has');
+    assert.equal(await page.textContent('#bunkerlink'), 'bunker://abc123?relay=wss%3A%2F%2Frelay.example');
+    await page.waitForSelector('text=Waiting for iris.example to use it. You can go back to iris.example now.');
+    assert.equal(await page.getAttribute('#stickrow', 'data-phase'), 'waiting');
+    assert.equal(await page.textContent('.stickopts'), 'Can read and send DMs');
+    await page.screenshot({ path: join(shots, 'connect-stick-link.png') });
+
+    // The site uses the link: the phone lets it in and tells the box, and the card says it is connected.
+    const iris = { ...D.newGrant('site', 'https://iris.example'), via: 'bunker' as const };
+    await D.reportGrants(phone, held, [iris], w.send);
+    await page.waitForSelector('text=iris.example is connected', { timeout: 15_000 });
+    assert.equal(await page.getAttribute('#stickrow', 'data-phase'), 'done');
+    assert.equal(await page.textContent('#stickchip'), '✓ connected');
+    assert.equal(await page.locator('#stickgrant button[aria-label="Revoke https://iris.example"]').count(), 1);
+    assert.equal(await page.getAttribute('#stickback', 'href'), 'http://www.iris.example/');
+    await page.screenshot({ path: join(shots, 'connect-stick-done.png') });
+    // Sites and apps lists it with the same row; the card itself stays on Home, in the same state.
+    await page.click('nav >> text=Sites and apps');
+    assert.equal(await page.locator('#stick').count(), 0);
+    assert.equal(await page.locator('button[aria-label="Revoke https://iris.example"]').count(), 1);
+    await page.click('nav >> text=Home');
+    assert.equal(await page.textContent('#sticktitle'), 'iris.example is connected');
+
+    // Connect another site, then the site showed a code instead.
+    await page.click('#stickagain');
+    await page.waitForSelector('#makelink');
+    await page.click('#flipcode');
+    assert.equal(await page.getAttribute('#stickrow', 'data-dir'), 'code');
+    assert.equal(await page.textContent('#stickchip'), 'iris.example\'s code →');
+    assert.equal(await page.textContent('#stickline'), 'iris.example made the code, so your end takes it. Paste it here.');
+    assert.equal(await page.locator('#makelink').count(), 0);
+    await page.click('#stickgo');
+    assert.equal(await page.textContent('#codeerr'), 'Paste the site\'s code first.');
+    await page.fill('#sitecode', 'bunker://abc123');
+    assert.equal(await page.textContent('#codeerr'), '');
+    await page.click('#stickgo');
+    assert.equal(await page.textContent('#codeerr'), 'That is a link for the site, not a code from it. Paste it in the site instead.');
+    await page.fill('#sitecode', 'hello');
+    await page.click('#stickgo');
+    assert.equal(await page.textContent('#codeerr'), 'The site\'s code starts with nostrconnect://');
+    // And back: the typed code is still there when the card flips again.
+    await page.click('#fliplink');
+    assert.equal(await page.getAttribute('#stickrow', 'data-dir'), 'link');
+    await page.waitForSelector('#makelink');
+    await page.click('#flipcode');
+    assert.equal(await page.inputValue('#sitecode'), 'hello');
+    const code = 'nostrconnect://' + 'b'.repeat(64) + '?relay=wss%3A%2F%2Frelay.example&secret=s3cret';
+    await page.fill('#sitecode', code);
+    await page.click('#stickgo');
+    await page.waitForSelector('text=Your phone is answering iris.example.');
+    assert.equal(await page.getAttribute('#stickrow', 'data-phase'), 'sending');
+    assert.deepEqual(await answered(), ['signed a site in']);
+    assert.deepEqual(codes, [code]);
+    await page.waitForSelector('text=iris.example is connected', { timeout: 15_000 });
+    // The phone tells the box about the site a moment later, and its row shows up in the card.
+    await D.reportGrants(phone, held, [iris, { ...D.newGrant('site', 'https://coracle.example'), via: 'paste' as const }], w.send);
+    await page.waitForSelector('#stickgrant >> text=coracle.example', { timeout: 15_000 });
+
+    // A tab no site sent here: the card asks which site, and the words follow what is typed.
+    const plain = await ctx.newPage();
+    plain.on('pageerror', (e) => errors.push(String(e)));
+    await plain.goto(w.base + '/');
+    await plain.waitForSelector('text=Welcome, Aaron');
+    assert.equal(await plain.locator('#camefrom').count(), 0);
+    assert.equal(await plain.textContent('#sticktitle'), 'Connect a site to your account');
+    assert.equal(await plain.textContent('#sitename'), 'A site');
+    assert.equal(await plain.textContent('#stickline'), 'The site asked for a link, so your end makes one. Paste it into the site\'s sign-in box.');
+    await plain.click('#whichsite');
+    await plain.keyboard.type('iris');
+    assert.equal(await plain.textContent('#sticktitle'), 'Connect iris to your account');
+    assert.equal(await plain.textContent('#sitename'), 'iris');
+    assert.equal(await plain.evaluate(() => document.activeElement?.id), 'whichsite');
+    await plain.click('nav >> text=Sites and apps');
+    await plain.click('nav >> text=Home');
+    assert.equal(await plain.inputValue('#whichsite'), 'iris');
+    assert.equal(await plain.textContent('#sticktitle'), 'Connect iris to your account');
+    await plain.setViewportSize({ width: 390, height: 800 });
+    for (const s of ['Sites and apps', 'Home']) {
+      await plain.click(`nav >> text=${s}`);
+      assert.ok(await plain.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no sideways scroll on a phone: ${s}`);
+    }
+    await plain.screenshot({ path: join(shots, 'connect-stick-phone.png'), fullPage: true });
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); await w.close(); }
 });
 
 // A site (Marble) sends the person here with its nostrconnect:// code in the fragment. They sign in,

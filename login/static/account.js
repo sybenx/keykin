@@ -78,6 +78,17 @@
   const senderOf = () => {
     try { const o = document.referrer ? new URL(document.referrer).origin : null; return o && /^https?:\/\//.test(o) ? o : null; } catch { return null; }
   };
+  // The site that sent this tab here, if it is not this page itself: kept for the tab, through a sign-in, for 30 minutes.
+  const CAME = 'kk-came-from';
+  function noteCameFrom() {
+    const o = senderOf();
+    if (o && o !== location.origin) store.set(CAME, JSON.stringify({ origin: o, at: Date.now() }));
+  }
+  function cameFrom() {
+    let o = null; try { o = JSON.parse(store.get(CAME) ?? 'null'); } catch {}
+    if (!o || typeof o.origin !== 'string' || !/^https?:\/\/[^\s/?#]+$/.test(o.origin) || !(Date.now() - o.at < 30 * 60 * 1000)) return null;
+    return { origin: o.origin, host: new URL(o.origin).host.replace(/^www\./, '') };
+  }
   function takeConnect() {
     const hash = location.hash.slice(1);
     const at = hash.startsWith('connect=') ? 0 : hash.indexOf('&connect=') + 1;
@@ -791,7 +802,7 @@
     me = r; checkPointer(); draw();
     every(15000, async () => {
       const n = await api('me').catch(() => null);
-      if (n && n.ok) { me = n; if (!document.querySelector('[data-busy]') && !document.querySelector('input:focus')) draw(); }
+      if (n && n.ok) { me = n; if (!document.querySelector('[data-busy]') && !document.querySelector('input:focus, textarea:focus')) draw(); }
       else if (n && n.error === 'login') showLogin(say('login'));
     });
   }
@@ -841,7 +852,7 @@
           others.length ? (others.length === 1 ? `another box (${others[0].name})` : `${others.length} more boxes`) : null].filter(Boolean);
         return [
           alert,
-          signInCard(),
+          stickCard(),
           el('div', { className: 'hello' }, el('div', { className: 'avatar', ariaHidden: 'true' }, (me.username ?? 'k').charAt(0).toUpperCase()),
             el('div', {}, el('h1', {}, me.username ? `Welcome, ${cap(me.username)}` : 'Welcome'), el('div', { className: 'mono dim', id: 'npub' }, me.npubText))),
           // With an alert up, the alert is the status: no line here that could say otherwise.
@@ -884,14 +895,7 @@
               : el('div', { className: 'with-note' }, el('button', { className: 'btn', disabled: true }, 'Nothing to remove'))))],
       sites: () => [
         head('Sites and apps', 'Everything that can sign as you. Revoking here stops it at the box, even if the device that let it in is off.'),
-        el('div', { className: 'card rows' }, me.grants.length ? me.grants.map((g) => el('div', { className: 'row' },
-          el('div', { className: 'grow' }, el('div', { className: 'name' }, g.name.replace(/^https?:\/\//, '')),
-            el('div', { className: 'detail' }, globalThis.KeykinRows.siteDetail(g))),
-          el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
-            el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
-              e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),
-          ...scopeSwitches(g),
-          el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${g.name.replace(/^https?:\/\//, '')} is revoked.`) } }, 'Revoke')))
+        el('div', { className: 'card rows' }, me.grants.length ? me.grants.map(siteRow)
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         link('Sign in to another app', 'home')],
       security: () => [
@@ -970,24 +974,190 @@
     box.append(...(input ? (o.stacked ? [input, controls] : [el('div', { className: 'inline' }, input, btn), line]) : [controls]));
     return box;
   }
-  // Job one on the page: another app signs in as you, by a bunker:// link from a device or a pasted nostrconnect:// code.
-  function signInCard() {
-    const c = card(el('h2', {}, 'Sign in to an app'), el('div', { className: 'sub' }, 'No extension needed. The app gets access of its own, which you can revoke under Sites and apps. It works while one of your devices can answer.'),
-      el('div', { className: 'grid2', style: 'gap:16px' },
-        el('div', { className: 'subcard' }, el('h3', {}, 'App asks for a bunker:// link'), el('div', { className: 'detail' }, 'One of your devices makes a link for you to paste into the app’s bunker or remote signer box.'),
-          bunkerBox()),
-        el('div', { className: 'subcard' }, el('h3', {}, 'App shows a nostrconnect:// code'), el('div', { className: 'detail' }, 'Paste its code here.'),
-          noteForm({ kind: 'nostrconnect', label: 'nostrconnect code', placeholder: 'nostrconnect://…', button: 'Sign in', plain: true, stacked: true, waiting: 'Waiting for one of your devices…',
-            check: (t) => t.trim().startsWith('nostrconnect://') ? null : 'That code should start with nostrconnect://', done: () => el('div', { className: 'sub' }, 'Done. Go back to the app: it is signed in.') }))));
-    c.id = 'signinapp';
-    return c;
+  // One row of Sites and apps: what it is, how it came in, Posts only, Revoke. The connect card shows the same row.
+  function siteRow(g) {
+    const host = g.name.replace(/^https?:\/\//, '');
+    return el('div', { className: 'row' },
+      el('div', { className: 'grow' }, el('div', { className: 'name' }, host),
+        el('div', { className: 'detail' }, globalThis.KeykinRows.siteDetail(g))),
+      el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
+        el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
+          e.currentTarget.checked ? `${host} can only post now.` : `${host} can do everything again.`) } }), 'Posts only'),
+      ...scopeSwitches(g),
+      el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${host} is revoked.`) } }, 'Revoke'));
   }
-  function bunkerBox() {
-    const slot = el('div', { className: 'dashed', id: 'bunkerlink' }, 'bunker://… appears here');
-    const copy = el('button', { className: 'btn', hidden: true, on: { click: async () => { await navigator.clipboard.writeText(slot.textContent); copy.textContent = 'Copied'; } } }, 'Copy');
-    const form = noteForm({ kind: 'bunker', keep: 900, button: 'Get a bunker link', waiting: 'Waiting for one of your devices…',
-      done: (result) => { slot.textContent = result; slot.classList.add('has'); copy.hidden = false; return copy; } });
-    return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, slot, form);
+
+  // ---- Connect a site: one connection, two ends -------------------------------------------------------
+  // A site either wants a link your end makes (bunker://, pasted into the site) or shows a code it made
+  // (nostrconnect://, pasted here). The card draws both as the two ends of one stick. Where it is lives here,
+  // per account, so the 15-second redraw and a section switch draw the same thing again. The link itself is
+  // kept 900 s in `kept`, as before.
+  const sticks = new Map(), WAIT_MS = 15 * 60 * 1000;
+  const freshStick = () => ({ dir: 'link', lp: 'idle', cp: 'idle', done: false, grant: null, before: [], since: 0, linkNote: null, codeNote: null,
+    code: '', name: '', lists: false, dms: false, err: '', codeErr: '', busy: false, tick: null });
+  const stickOf = () => { let s = sticks.get(me.npub); if (!s) sticks.set(me.npub, s = freshStick()); return s; };
+  const typing = () => document.querySelector('input:focus, textarea:focus');
+  const restick = () => { const n = document.getElementById('stick'); if (n) n.replaceWith(stickCard()); };
+  // Connected: the whole section is drawn again, so the new row shows in Sites and apps too.
+  const stickMoved = (full) => { if (full && !typing() && !document.querySelector('[data-busy]:not(#stick)')) draw(); else restick(); };
+  const newGrantOf = (s, grants) => {
+    const fresh = grants.filter((g) => !s.before.includes(g.id));
+    return fresh.find((g) => g.via === 'bunker') ?? fresh.find((g) => g.kind === 'site') ?? null;
+  };
+  // One timer per card state: waits for the device's answer, then for the site to show up as a grant.
+  function stickTick(s) {
+    if (s.tick && timers.includes(s.tick)) return;
+    const t = s.tick = every(3000, async () => {
+      const stop = () => { clearInterval(t); if (s.tick === t) s.tick = null; };
+      if (!me || s !== sticks.get(me.npub)) return stop();
+      const note = s.lp === 'making' ? s.linkNote : s.cp === 'sending' ? s.codeNote : null;
+      if (note) {
+        const g = await api('note_get', { note }).catch(() => null);
+        if (g && g.error === 'login') { stop(); return showLogin('A device said No, so this browser was signed out.'); }
+        if (!g || !g.ok || g.state === 'waiting') return;
+        if (note === s.linkNote && s.lp === 'making') {
+          if (g.state === 'done') { kept.set(me.npub + '/bunker', { result: { result: g.result, g }, until: Date.now() + 900 * 1000 }); s.lp = 'waiting'; s.since = Date.now(); }
+          else { s.lp = 'idle'; s.err = 'No device answered in time. Is one of them online?'; }
+        } else if (note === s.codeNote && s.cp === 'sending') {
+          if (g.state === 'done') { s.cp = 'idle'; s.code = ''; s.done = true; s.since = Date.now(); }     // its row shows up a few seconds later
+          else { s.cp = 'idle'; s.codeErr = 'No device answered in time. Is one of them online?'; }
+        }
+        return stickMoved(s.done);
+      }
+      const looking = !s.grant && (s.done || s.lp === 'waiting');
+      if (!looking) return stop();
+      if (Date.now() - s.since > WAIT_MS) {
+        stop();
+        if (!s.done) { s.lp = 'idle'; s.err = 'Nothing used the link in 15 minutes. Make a new one if you still need it.'; kept.delete(me.npub + '/bunker'); restick(); }
+        return;
+      }
+      const n = await api('me').catch(() => null);
+      if (!n || !n.ok || s !== sticks.get(n.npub)) return;
+      me = n;
+      const g = newGrantOf(s, n.grants);
+      if (!g) return;
+      stop(); s.grant = g.id; s.done = true; stickMoved(true);
+    });
+  }
+  async function makeLink(s, button) {
+    s.err = ''; s.busy = true; button.disabled = true; button.closest('#stick')?.setAttribute('data-busy', '1');
+    s.before = me.grants.map((g) => g.id);
+    // The name the site goes by, for its grant: the site that sent you here, or what was typed.
+    const name = (cameFrom()?.host ?? s.name.trim()).slice(0, 100);
+    const r = await api('note_put', { kind: 'bunker', text: name, ...(s.lists ? { lists: true } : {}), ...(s.dms ? { dms: true } : {}) }).catch(() => ({ error: 'no_box' }));
+    s.busy = false;
+    if (r.error === 'login') return showLogin(say('login'));
+    if (!r.ok) { s.err = say(r.error); return restick(); }
+    s.linkNote = r.note; s.lp = 'making'; restick(); stickTick(s);
+  }
+  async function sendCode(s, button, err) {
+    const t = s.code.trim();
+    const bad = !t ? 'Paste the site\'s code first.'
+      : t.startsWith('bunker://') ? 'That is a link for the site, not a code from it. Paste it in the site instead.'
+      : !t.startsWith('nostrconnect://') ? 'The site\'s code starts with nostrconnect://' : null;
+    if (bad) { s.codeErr = bad; err.textContent = bad; return; }
+    s.codeErr = ''; s.busy = true; button.disabled = true; button.closest('#stick')?.setAttribute('data-busy', '1');
+    s.before = me.grants.map((g) => g.id);
+    const r = await api('note_put', { kind: 'nostrconnect', text: t }).catch(() => ({ error: 'no_box' }));
+    s.busy = false;
+    if (r.error === 'login') return showLogin(say('login'));
+    if (!r.ok) { s.codeErr = say(r.error); return restick(); }
+    s.codeNote = r.note; s.cp = 'sending'; restick(); stickTick(s);
+  }
+  const globe = () => {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    for (const [k, v] of Object.entries({ width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' })) s.setAttribute(k, v);
+    for (const d of ['M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z', 'M3 12h18', 'M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z']) { const p = document.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', d); s.append(p); }
+    return s;
+  };
+  function stickCard() {
+    const s = stickOf(), came = cameFrom();
+    const link = keptOf('bunker')?.result ?? null;
+    if (s.lp === 'waiting' && !link) s.lp = 'idle';
+    const grant = s.grant ? me.grants.find((g) => g.id === s.grant) ?? null : null;
+    const site = () => came?.host ?? (s.name.trim() || (grant ? grant.name.replace(/^https?:\/\//, '') : null));
+    const Site = () => site() ?? 'The site', theSite = () => site() ?? 'the site';
+    const phase = () => s.done ? 'done' : s.dir === 'link' ? s.lp : s.cp;
+    // Words that follow the "Which site?" field as it is typed, without drawing the field again.
+    const words = [];
+    let bodyWords = [];
+    const live = (list) => (tag, props, f) => { const n = el(tag, props, f()); list.push(() => n.replaceChildren(f())); return n; };
+    const top = live(words);
+
+    const which = el('input', { className: 'field', id: 'whichsite', type: 'text', placeholder: 'e.g. iris', autocomplete: 'off', spellcheck: false, value: s.name,
+      on: { input: (e) => { s.name = e.currentTarget.value.slice(0, 100); [...words, ...bodyWords].forEach((f) => f()); } } });
+    const whichBox = el('div', { className: 'which' }, el('label', { htmlFor: 'whichsite' }, 'Which site?'), which);
+    const siteEnd = el('div', { className: 'end' },
+      top('div', { className: 'ball', ariaHidden: 'true' }, () => site() ? site().charAt(0).toUpperCase() : globe()),
+      top('div', { className: 'endname', id: 'sitename' }, () => site() ?? 'A site'), whichBox);
+    const youEnd = el('div', { className: 'end' },
+      el('div', { className: 'ball', ariaHidden: 'true' }, (me.username ?? 'k').charAt(0).toUpperCase()),
+      el('div', { className: 'endname' }, 'You'), el('div', { className: 'small dim' }, me.username ?? me.npubText.slice(0, 10) + '…'));
+    const chip = top('span', { className: 'onwire', id: 'stickchip' }, () => phase() === 'done' ? '✓ connected'
+      : s.dir === 'link' ? (s.lp === 'making' ? 'making…' : '← your link') : `${site() ?? 'site'}'s code →`);
+    const stick = el('div', { className: 'stick', id: 'stickrow' }, siteEnd, el('div', { className: 'wire' }, chip, el('span', { className: 'runner', ariaHidden: 'true' })), youEnd);
+    words.push(() => {
+      const p = phase();
+      stick.dataset.dir = s.dir; stick.dataset.phase = p;
+      siteEnd.classList.toggle('held', p === 'done' || s.dir === 'code');
+      youEnd.classList.toggle('held', p === 'done' || s.dir === 'link');
+    });
+    const title = top('h2', { id: 'sticktitle' }, () => s.done ? `${Site()} is connected` : site() ? `Connect ${site()} to your account` : 'Connect a site to your account');
+
+    // What the site may do besides signing, chosen before the link is made. Off unless switched on.
+    const opts = el('div', { className: 'stickopts' });
+    const toggle = (k, text) => el('label', { className: 'toggle' },
+      el('input', { type: 'checkbox', id: 'stick' + k, checked: s[k], on: { change: (e) => { s[k] = e.currentTarget.checked; } } }), text);
+
+    const body = el('div', { className: 'stickbody' });
+    const flipTo = (to, text) => (list) => live(list)('button', { className: 'go-link linkish small flip', id: to === 'code' ? 'flipcode' : 'fliplink', type: 'button',
+      on: { click: () => { s.dir = to; s.err = ''; s.codeErr = ''; paint(); } } }, text);
+    const linkBody = (w) => {
+      const say_ = live(w);
+      const slot = el('div', { className: 'dashed' + (link ? ' has' : ''), id: 'bunkerlink' }, link ?? (s.lp === 'making' ? 'Your phone is making the link…' : 'Your link shows up here.'));
+      const out = [say_('div', { className: 'sub', id: 'stickline' }, () => `${Site()} asked for a link, so your end makes one. Paste it into ${theSite()}'s sign-in box.`), slot];
+      if (s.lp === 'idle') out.push(el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'makelink', type: 'button', on: { click: (e) => makeLink(s, e.currentTarget) } }, 'Make a link')));
+      if (s.lp === 'waiting' && link) {
+        const copy = el('button', { className: 'btn go', id: 'copylink', type: 'button' }, 'Copy link');
+        copy.onclick = async () => { try { await navigator.clipboard.writeText(link); copy.textContent = 'Copied'; } catch { getSelection()?.selectAllChildren(slot); } };
+        out.push(el('div', { className: 'with-note' }, copy),
+          say_('div', { className: 'sub', id: 'stickwait', role: 'status' }, () => `Waiting for ${theSite()} to use it. You can go back to ${theSite()} now.`));
+      }
+      if (s.err) out.push(el('p', { className: 'err small', role: 'alert', id: 'stickerr' }, s.err));
+      out.push(flipTo('code', () => `${Site()} showed a code instead? Paste it here`)(w));
+      return out;
+    };
+    const codeBody = (w) => {
+      const err = el('p', { className: 'err small', role: 'alert', id: 'codeerr' }, s.codeErr);
+      const sending = s.cp === 'sending';
+      const ta = el('textarea', { className: 'field mono', id: 'sitecode', rows: 3, placeholder: 'nostrconnect://…', ariaLabel: 'The site\'s code', spellcheck: false, value: s.code, disabled: sending,
+        on: { input: (e) => { s.code = e.currentTarget.value; s.codeErr = ''; err.textContent = ''; } } });
+      const go = el('button', { className: 'btn go', id: 'stickgo', type: 'button', disabled: sending, on: { click: (e) => sendCode(s, e.currentTarget, err) } }, 'Connect');
+      return [live(w)('div', { className: 'sub', id: 'stickline', role: 'status' }, () => sending ? `Your phone is answering ${theSite()}.` : `${Site()} made the code, so your end takes it. Paste it here.`),
+        ta, el('div', { className: 'with-note' }, go), err, flipTo('link', () => `${Site()} wants a link instead? Make one`)(w)];
+    };
+    const doneBody = () => [
+      el('div', { className: 'sub', id: 'stickline' }, 'It signs as you now. It lives in Sites and apps, where you can limit or revoke it.'),
+      grant ? el('div', { className: 'rows', id: 'stickgrant' }, siteRow(grant)) : null,
+      came ? el('a', { href: came.origin + '/', id: 'stickback', rel: 'noopener' }, `Back to ${came.host}`) : null,
+      el('button', { className: 'go-link linkish small flip', id: 'stickagain', type: 'button',
+        on: { click: () => { sticks.set(me.npub, freshStick()); kept.delete(me.npub + '/bunker'); restick(); } } }, 'Connect another site')];
+    const paint = () => {
+      words.forEach((f) => f());
+      whichBox.hidden = !!came || s.done || (s.dir === 'link' && s.lp !== 'idle');
+      const fixed = [s.lists ? 'Can read private lists' : null, s.dms ? 'Can read and send DMs' : null].filter(Boolean);
+      opts.replaceChildren(...(s.done || s.dir !== 'link' ? [] : s.lp === 'idle' ? [toggle('lists', 'Read your private lists'), toggle('dms', 'Read and send DMs')]
+        : fixed.map((t) => el('span', { className: 'small dim' }, t))));
+      opts.hidden = !opts.childElementCount;
+      bodyWords = [];
+      body.replaceChildren(...(s.done ? doneBody() : s.dir === 'link' ? linkBody(bodyWords) : codeBody(bodyWords)));
+    };
+    const node = el('div', { className: 'card stickcard', id: 'stick' },
+      came ? el('div', { className: 'small dim', id: 'camefrom' }, `You came from ${came.host}`) : null, title, stick, opts, body);
+    if (s.busy || (!s.done && (s.lp === 'making' || s.cp === 'sending'))) node.dataset.busy = '1';
+    paint();
+    if (s.lp === 'making' || s.cp === 'sending' || (!s.grant && (s.done || s.lp === 'waiting'))) stickTick(s);
+    return node;
   }
   // ---- Signed-in browsers (SPEC 11.6) -----------------------------------------------------------------
   function browserOf(agent) {
@@ -1067,7 +1237,7 @@
       el('div', { className: 'with-note' }, save, line));
   }
 
-  takeConnect(); takeAdd();
+  noteCameFrom(); takeConnect(); takeAdd();
   // Come back to this tab from the app's page (the browser may restore it as it was, "Opening …"): show the six
   // digits kept for it, in case the way back failed.
   addEventListener('pageshow', (e) => { if (e.persisted && added() && document.getElementById('adddone')) showAdded(added()); });

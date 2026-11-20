@@ -3,7 +3,12 @@
 //
 //   keykin create '<QR text from the box page>' [name]   make an account with the box
 //   keykin import '<setup code>' <nsec> [name]           the same, with a key you already have (nsec1… or hex).
-//                                                        The whole key stays in this device's state file as a backup
+//                                                        The whole key stays in this device's state file as a backup.
+//                                                        Both ask for a username and a password (twice) for the
+//                                                        account page. Without a terminal: --username <u>
+//                                                        --password <p> [--password-again <p>], or KEYKIN_USERNAME
+//                                                        and KEYKIN_PASSWORD
+//   keykin password [--username <u> --password <p>]     change the account page's password (it can't be removed)
 //   keykin forget-key                                    forget that backup. Only you decide when
 //   keykin invite [name]                                 on a NEW device: print its invite
 //   keykin signin <relay url> [name]                     on a NEW device: show one code for a device in the account
@@ -47,6 +52,15 @@ import { hexToBytes } from '../src/bytes.ts';
 
 export async function main(argv: string[], out: (s: string) => void = console.log, home = process.env.KEYKIN_HOME ?? pathJoin(homedir(), '.keykin')) {
   const file = pathJoin(home, 'device.json');
+  // The username and password flags come out first, so they never shift the other arguments.
+  const pw: { username?: string, password?: string, again?: string } = {};
+  if (['create', 'import', 'password'].includes(argv[0])) {
+    argv = [...argv];
+    for (const [flag, key] of [['--username', 'username'], ['--password', 'password'], ['--password-again', 'again']] as const) {
+      const i = argv.indexOf(flag);
+      if (i > 0) { pw[key] = argv[i + 1] ?? ''; argv.splice(i, 2); }
+    }
+  }
   const [cmd, a, b] = argv;
   const s = load(file, cmd === 'create' ? b : cmd === 'invite' ? a : cmd === 'import' ? argv[3] : cmd === 'signin' ? b : undefined);
   const me = meOf(s);
@@ -71,19 +85,29 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
     case 'create': {
       if (s.held) fail('This device is already in an account.');
       const qr = D.readQr(a);
+      const login = await askPassword(pw);
       const held = await D.createWithBox(me, qr, sender(qr.addr));
       keep(s, held, qr.addr); save(file, s);
-      return out(`Account made. npub (hex): ${held.npub}`);
+      out(`Account made. npub (hex): ${held.npub}`);
+      return setPassword(me, held, login, sender(qr.addr), out);
     }
     case 'import': {
       if (s.held) fail('This device is already in an account.');
       const qr = D.readQr(a);
+      const login = await askPassword(pw);
       const raw = (b ?? '').trim();
       let hex: string;
       try { hex = raw.startsWith('nsec1') ? Buffer.from(nip19decode(raw).data as Uint8Array).toString('hex') : raw; } catch { hex = ''; }
       const held = await D.importWithBox(me, qr, hex, sender(qr.addr));
       keep(s, held, qr.addr); s.nsec = hex; save(file, s);
-      return out(`Account brought in. ${npubEncode(held.npub)}\nThis device still holds the whole key, as a backup. Run forget-key when you no longer want that.`);
+      out(`Account brought in. ${npubEncode(held.npub)}\nThis device still holds the whole key, as a backup. Run forget-key when you no longer want that.`);
+      return setPassword(me, held, login, sender(qr.addr), out);
+    }
+    case 'password': {
+      const held = heldOf(s);
+      const login = await askPassword(pw);
+      await D.passwordSet(me, held, login.username, login.password, box());
+      return out(`Password saved for ${login.username}.`);
     }
     case 'forget-key': {
       if (!s.nsec) return out('This device holds no whole key.');
@@ -177,6 +201,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`${npubEncode(list.npub)}`);
       out(`npub (hex): ${list.npub}`);
       for (const m of list.members) out(`  ${m.i}  ${m.name}${m.key === me.key ? ' (this device)' : ''}${m.kind === 'box' ? ' (box)' : ''}${m.blocked ? '  BLOCKED' : ''}`);
+      if (list.password === false) out(NO_PASSWORD);
       return;
     }
     case 'sign': {
@@ -290,10 +315,49 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${link ?? run.url}`);
       return run;
     }
-    default: out('Commands: create, import, forget-key, invite, signin, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;
+    default: out('Commands: create, import, password, forget-key, invite, signin, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }
+
+export const NO_PASSWORD = 'Your account has no password yet. Set one with `keykin password` so you can reach your account page from any browser.';
+
+/** What is wrong with a username and password typed at setup, or null (SPEC 11.3). */
+export function setupProblem(username: string, password: string, again: string): string | null {
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) return 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.';
+  if (password.length < 10) return 'Use a password of at least 10 characters.';
+  if (password !== again) return 'The two passwords do not match.';
+  return null;
+}
+
+/** The username and password, from the flags, the environment, or asked here (the password twice, not shown). */
+async function askPassword(given: { username?: string, password?: string, again?: string }) {
+  let username = given.username ?? process.env.KEYKIN_USERNAME, password = given.password ?? process.env.KEYKIN_PASSWORD, again = given.again ?? password;
+  if (username === undefined || password === undefined) {
+    if (!process.stdin.isTTY) fail('Setup needs a username and a password: give --username and --password (or KEYKIN_USERNAME and KEYKIN_PASSWORD).');
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    try {
+      username ??= await rl.question('Username for your account page: ');
+      const hidden = async (q: string) => {
+        process.stdout.write(q);
+        const w = (rl as any)._writeToOutput; (rl as any)._writeToOutput = () => {};
+        try { return await rl.question(''); } finally { (rl as any)._writeToOutput = w; process.stdout.write('\n'); }
+      };
+      password ??= await hidden('Password: ');
+      again = await hidden('Password again: ');
+    } finally { rl.close(); }
+  }
+  username = username.trim().toLowerCase();
+  const problem = setupProblem(username, password, again ?? '');
+  if (problem) fail(problem);
+  return { username, password };
+}
+
+/** Sends the password as the last step of setup. The account is made either way; if this fails, say how to finish. */
+async function setPassword(me: D.Me, held: D.Held, login: { username: string, password: string }, send: D.Send, out: (s: string) => void) {
+  try { await D.passwordSet(me, held, login.username, login.password, send); out(`Password saved for ${login.username}.`); }
+  catch (e: any) { out(`The password was not saved (${e?.code ?? e?.message}). ${NO_PASSWORD}`); }
+}
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main(process.argv.slice(2)).catch((e) => { console.error(String(e?.message ?? e)); process.exit(1); });

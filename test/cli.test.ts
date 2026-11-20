@@ -15,7 +15,11 @@ import * as nip19 from 'nostr-tools/nip19';
 
 const tmp = (n: string) => mkdtempSync(join(tmpdir(), n));
 const closeBox = (b: any) => new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); });
+// Setup always asks for a username and password; tests that are not about that give one of their own.
+let user = 0;
+const withPassword = (argv: string[]) => ['create', 'import'].includes(argv[0]) && !argv.includes('--password') ? [...argv, '--username', `user${++user}`, '--password', 'long enough pw'] : argv;
 async function cli(home: string, ...argv: string[]) {
+  argv = withPassword(argv);
   const lines: string[] = [];
   const r = await main(argv, (s) => lines.push(s), home);
   return { text: lines.join('\n'), run: r as any };
@@ -56,6 +60,48 @@ test('two command-line devices: create, invite, add, join, sign, block, nsec', a
     await assert.rejects(cli(mini, 'sign', '{}'), /unknown_member/);
     assert.ok(verifyEvent(JSON.parse((await cli(mac, 'sign', '{"content":"after the cycle"}')).text)));
   } finally { await closeBox(b); }
+});
+
+test('setup always sets a password: create and import ask for it, a mismatch makes nothing', async () => {
+  const dir = tmp('kk-box-');
+  const b = await startBox({ dir, port: 0, log: () => {} });
+  const run = async (home: string, ...argv: string[]) => { const l: string[] = []; await main(argv, (t) => l.push(t), home); return l.join('\n'); };
+  const env = { u: process.env.KEYKIN_USERNAME, p: process.env.KEYKIN_PASSWORD };
+  delete process.env.KEYKIN_USERNAME; delete process.env.KEYKIN_PASSWORD;
+  try {
+    // A mismatch, a short one or a bad username is refused before any account is made.
+    const home = tmp('kk-mac-');
+    await assert.rejects(run(home, 'create', b.qr()!, 'Mac', '--username', 'aaron', '--password', 'long enough pw', '--password-again', 'something else'), /do not match/);
+    await assert.rejects(run(home, 'create', b.qr()!, 'Mac', '--username', 'aaron', '--password', 'short'), /at least 10/);
+    await assert.rejects(run(home, 'create', b.qr()!, 'Mac', '--username', 'A', '--password', 'long enough pw'), /username/);
+    // With no terminal and no password given, setup stops and says how.
+    await assert.rejects(run(home, 'create', b.qr()!, 'Mac'), /needs a username and a password/);
+    assert.equal(b.box.accounts().length, 0);
+    // Create: the password is set as part of setup.
+    const made = await run(home, 'create', b.qr()!, 'Mac', '--username', 'Aaron', '--password', 'long enough pw', '--password-again', 'long enough pw');
+    assert.match(made, /Password saved for aaron/);
+    assert.equal(b.box.only()!.login?.username, 'aaron');
+    assert.doesNotMatch(await run(home, 'status'), /no password yet/);
+    // Changing it works.
+    const before = b.box.only()!.login!.check;
+    assert.match(await run(home, 'password', '--username', 'aaron', '--password', 'a newer password'), /Password saved/);
+    assert.notEqual(b.box.only()!.login!.check, before);
+    // Import: the same, here through the environment.
+    const dir2 = tmp('kk-box2-'), b2 = await startBox({ dir: dir2, port: 0, log: () => {} });
+    try {
+      await assert.rejects(run(tmp('kk-mac3-'), 'import', b2.qr()!, nip19.nsecEncode(generateSecretKey()), 'Other'), /needs a username and a password/);
+      assert.equal(b2.box.accounts().length, 0);
+      process.env.KEYKIN_USERNAME = 'imported'; process.env.KEYKIN_PASSWORD = 'from the env pw';
+      assert.match(await run(tmp('kk-mac2-'), 'import', b2.qr()!, nip19.nsecEncode(generateSecretKey()), 'Laptop'), /Password saved for imported/);
+      assert.equal(b2.box.only()!.login?.username, 'imported');
+    } finally { await closeBox(b2); }
+    // The box never had a password, only its check.
+    assert.doesNotMatch(JSON.stringify(b.box.state) + JSON.stringify(b2.box.state), /long enough pw|a newer password|from the env pw/);
+  } finally {
+    delete process.env.KEYKIN_USERNAME; delete process.env.KEYKIN_PASSWORD;
+    if (env.u !== undefined) process.env.KEYKIN_USERNAME = env.u; if (env.p !== undefined) process.env.KEYKIN_PASSWORD = env.p;
+    await closeBox(b);
+  }
 });
 
 test('importing a key keeps the whole key as a backup until the person forgets it', async () => {

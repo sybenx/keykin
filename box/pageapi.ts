@@ -160,7 +160,8 @@ export class PageApi {
           return { ok: true };
         }
         case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
-        case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
+        // A password is always required (SPEC 11.3): it can be changed, never removed.
+        case 'pw_clear': refuse('password_required');
         case 'logout': this.#end(hash); return { ok: true };
         case 'logout_all': for (const [h, s] of Object.entries(this.#all())) if (s.account === a.npub) this.#end(h); return { ok: true };
         case 'logout_browser': return this.#logoutBrowser(a.npub, hash, body.id, now);

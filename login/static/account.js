@@ -29,7 +29,7 @@
   const say = (code) => ({
     wrong: 'That username and password do not match.', slow_down: 'Too many tries. Wait a minute.', no_box: 'The box cannot be reached right now.',
     cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.', not_open: 'The owner of this server has to let you in first.', not_here: 'This server does not look after your account yet.', gone: 'That ran out. Try again.',
-    bad_username: 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.', username_taken: 'That username is taken on this box.',
+    bad_username: 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.', username_taken: 'That username is taken on this box.', password_required: 'Your account always keeps a password. You can change it.',
   }[code] ?? `That did not work (${code}).`);
   const HOW = { password: 'a password', passkey: 'a passkey', scan: 'a device' };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -38,6 +38,7 @@
   const every = (ms, f) => { const t = setInterval(f, ms); timers.push(t); return t; };
   const stopTimers = () => { timers.forEach(clearInterval); timers = []; };
   let me = null, section = 'home', flash = null, leave = () => {};
+  const NO_PASSWORD = 'Your account has no password yet. Set one so you can reach your account page from any browser.';
 
   async function verifier(password, saltHex) {
     if (!crypto.subtle) throw new Error('insecure');
@@ -852,7 +853,7 @@
             card(el('h2', {}, 'Sites and apps'), el('div', { className: 'sub' }, me.grants.length ? `${me.grants.length} ${me.grants.length === 1 ? 'is' : 'are'} signed in with your account. Revoke any of them here, from anywhere.` : 'Nothing is signed in with your account.'),
               sites.length ? el('div', { className: 'chips' }, sites.slice(0, 2).map((n) => el('span', { className: 'chip' }, n)), sites.length > 2 ? el('span', { className: 'chip' }, `+${sites.length - 2}`) : null) : null,
               link('See what is signed in', 'sites')),
-            card(el('h2', {}, 'Security'), el('div', { className: 'sub' }, me.username ? 'Password set. It signs you in here fully. Forming the whole key stays in the app.' : 'No password. You sign in here with a device.'), link('Password and sign-in', 'security')),
+            card(el('h2', {}, 'Security'), el('div', { className: 'sub' }, me.username ? 'Password set. It signs you in here fully. Forming the whole key stays in the app.' : 'No password yet.'), link('Password and sign-in', 'security')),
             card(el('h2', {}, 'Backup'), el('div', { className: 'sub', id: 'backupsub' }, backedUp
               ? `Backed up by ${backup.join(' and ')}. If one device is lost, the others still sign.`
               : 'No backup yet. If your only device is lost, your box alone cannot bring the account back.'), link(backedUp ? 'See your devices' : 'Set up a backup', backedUp ? 'devices' : 'backup'))),
@@ -895,7 +896,7 @@
         link('Sign in to another app', 'home')],
       security: () => [
         head('Security', 'How you get in to this page, and what still asks a device.'),
-        card(el('h2', {}, 'Password'), el('div', { className: 'sub' }, me.username ? ['Your username is ', el('strong', {}, me.username), '. Typing a new password here replaces the old one.'] : 'No password is set. Setting one lets you sign in here from any browser.'), passwordForm()),
+        card(el('h2', {}, 'Password'), el('div', { className: 'sub' }, me.username ? ['Your username is ', el('strong', {}, me.username), '. Typing a new password here replaces the old one. Your account always keeps one.'] : 'Choose a username and a password. Once set, it can be changed but not removed.'), passwordForm()),
         passkeysCard(),
         card(el('h2', {}, 'What asks for a Yes on a device'),
           el('div', { className: 'sub' }, 'Signing in here, with your password or a device, lets you do everything on this page. A few things are hard to undo, so a device of yours shows a Yes or No first. No signs that browser out.'),
@@ -918,7 +919,13 @@
           el('button', { className: 'go-link linkish', style: 'margin:0', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out'))),
       el('div', { className: 'shell' },
         el('nav', { ariaLabel: 'Sections' }, SECTIONS.map(([id, label]) => el('button', { ariaCurrent: section === id ? 'page' : 'false', on: { click: () => go(id) } }, label))),
-        el('main', {}, flash ? el('div', { className: 'notice', id: 'status', role: 'status' }, flash) : null, sections[section]())));
+        el('main', {}, flash ? el('div', { className: 'notice', id: 'status', role: 'status' }, flash) : null, noPassword(), sections[section]())));
+  }
+  // An account made before setup asked for a password has none: say so on every section until it is set (SPEC 11.3).
+  function noPassword() {
+    if (!me.held || me.username) return null;
+    return el('div', { className: 'notice', id: 'nopw', role: 'status' }, NO_PASSWORD, ' ',
+      section === 'security' ? null : el('button', { className: 'go-link linkish', style: 'margin:0', on: { click: () => go('security') } }, 'Set a password'));
   }
 
   const shield = (ok) => {
@@ -1041,10 +1048,12 @@
   function passwordForm() {
     const user = el('input', { className: 'field', type: 'text', id: 'newuser', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, value: me.username ?? '' });
     const pass = el('input', { className: 'field', type: 'password', id: 'newpass', autocomplete: 'new-password' });
+    const again = el('input', { className: 'field', type: 'password', id: 'newpass2', autocomplete: 'new-password' });
     const line = el('span', { className: 'small dim', role: 'status' });
     const save = el('button', { className: 'btn go', id: 'savepw' }, me.username ? 'Change password' : 'Set password');
     save.addEventListener('click', async () => {
       if (pass.value.length < 10) { line.textContent = 'Use at least 10 characters.'; return; }
+      if (pass.value !== again.value) { line.textContent = 'The two passwords do not match.'; return; }
       save.disabled = true; line.textContent = 'Saving…';
       try {
         const r = await savePassword(user.value, pass.value);
@@ -1053,9 +1062,9 @@
         flash = 'Password saved.'; await refresh(); draw();
       } catch (x) { line.textContent = x.message === 'insecure' ? 'This only works when the page is opened over https.' : say('no_box'); save.disabled = false; }
     });
-    const off = me.username ? el('button', { className: 'btn', on: { click: (e) => { if (confirm('Turn off password sign-in? You will sign in here with a device.')) act(e.currentTarget, 'pw_clear', {}, 'Password sign-in is off.'); } } }, 'Turn off password sign-in') : null;
     return el('div', { style: 'display:flex;flex-direction:column;gap:10px;max-width:420px' }, el('label', { htmlFor: 'newuser' }, 'Username'), user, el('label', { htmlFor: 'newpass' }, 'New password'), pass,
-      el('div', { className: 'with-note' }, save, off, line));
+      el('label', { htmlFor: 'newpass2' }, 'New password again'), again,
+      el('div', { className: 'with-note' }, save, line));
   }
 
   takeConnect(); takeAdd();

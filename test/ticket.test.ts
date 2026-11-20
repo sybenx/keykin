@@ -18,7 +18,7 @@ import { load, save } from '../cli/store.ts';
 const relayTool = process.env.QRST_REPO ? join(process.env.QRST_REPO, 'tools/test-relay.mjs') : join(homedir(), 'qr-secret-transfer/tools/test-relay.mjs');
 const tmp = (n: string) => mkdtempSync(join(tmpdir(), n));
 const closeBox = (b: any) => new Promise((done) => { b.server.close(done); b.server.closeAllConnections(); });
-async function cli(home: string, ...argv: string[]) { const lines: string[] = []; const r = await main(argv, (s) => lines.push(s), home); return { text: lines.join('\n'), run: r as any }; }
+async function cli(home: string, ...argv: string[]) { if (argv[0] === 'create') argv.push('--username', 'aaron', '--password', 'long enough pw'); const lines: string[] = []; const r = await main(argv, (s) => lines.push(s), home); return { text: lines.join('\n'), run: r as any }; }
 const waitFor = async <T>(get: () => T | undefined, ms = 15000): Promise<T> => { const end = Date.now() + ms; for (;;) { const v = get(); if (v !== undefined) return v; if (Date.now() > end) throw new Error('timed out waiting'); await new Promise((r) => setTimeout(r, 50)); } };
 
 test('the ticket format: what a site accepts and what it refuses', () => {

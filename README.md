@@ -11,6 +11,7 @@ My devices and my box. Any two pieces sign.
 - `android/`: the phone app.
 - `ext/`: the browser extension. `node ext/build.mjs`, then load `ext/dist` in Chrome with Load unpacked.
 - `site/`: sign-in by a scanned code for web pages (QRST signer-ticket). `node tools/build-site.mjs`.
+- `signin/`: name-first sign-in for web sites (Marble Web, Discover, Tube), the one shared copy. Plain browser modules; see `signin/README.md`. Sites take a copy with `node tools/signin-copy.mjs <folder>`.
 - `vendor/qrst.js`: the QRST library, bundled from the `qr-secret-transfer` repo by `node tools/build-qrst.mjs`.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 

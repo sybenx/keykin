@@ -6,7 +6,10 @@
 //                                                        The whole key stays in this device's state file as a backup
 //   keykin forget-key                                    forget that backup. Only you decide when
 //   keykin invite [name]                                 on a NEW device: print its invite
-//   keykin add '<invite>'                                on a device in the account: add it, print the join text
+//   keykin signin <relay url> [name]                     on a NEW device: show one code for a device in the account
+//                                                        to add (SPEC 8b), then collect this device's piece
+//   keykin add '<code or invite>' [--yes]                on a device in the account: add the device whose code or
+//                                                        invite this is (an invite prints the join text)
 //   keykin join '<join text>' [code]                     on the new device: collect its piece (the code: added from the account page)
 //   keykin status                                        the account and its devices
 //   keykin sign '<event json>' [label]                   sign one event, as the account or as the child key for a label
@@ -35,6 +38,7 @@ import { load, save, meOf, heldOf, keep, sender } from './store.ts';
 import { DeviceHelper } from '../src/helper.ts';
 import { newBunker, runBunker, signOut, bunkerUrl, syncGrants } from '../src/nip46.ts';
 import { readCode, answerCode, newTicket } from '../src/ticket.ts';
+import { readAddCode, answerAddCode, showAddCode } from '../src/adddevice.ts';
 import { getPublicKey } from 'nostr-tools/pure';
 import { createInterface } from 'node:readline/promises';
 import { nsecEncode, npubEncode, decode as nip19decode } from 'nostr-tools/nip19';
@@ -43,7 +47,7 @@ import { hexToBytes } from '../src/bytes.ts';
 export async function main(argv: string[], out: (s: string) => void = console.log, home = process.env.KEYKIN_HOME ?? pathJoin(homedir(), '.keykin')) {
   const file = pathJoin(home, 'device.json');
   const [cmd, a, b] = argv;
-  const s = load(file, cmd === 'create' ? b : cmd === 'invite' ? a : cmd === 'import' ? argv[3] : undefined);
+  const s = load(file, cmd === 'create' ? b : cmd === 'invite' ? a : cmd === 'import' ? argv[3] : cmd === 'signin' ? b : undefined);
   const me = meOf(s);
   // The box first; if it cannot be reached, other devices that listen (from the list last seen at the box).
   const box = () => D.withHelpers(sender(s.addr ?? fail('This device does not know a box yet.')),
@@ -90,7 +94,43 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       save(file, s);
       return out(JSON.stringify({ keykin: 2, invite: { key: me.key, name: me.name, chip: me.chip } }));
     }
+    case 'signin': {
+      if (s.held) fail('This device is already in an account.');
+      if (!a) fail('Give a relay address, for example wss://relay.example.com');
+      save(file, s);
+      let shown = false;
+      const run = showAddCode({ invite: JSON.stringify({ keykin: 2, invite: { key: me.key, name: me.name, chip: me.chip } }), relays: [a], baseUrl: 'https://marble.syb.lol/add',
+        onView: (v) => {
+          if (v.uri && !shown) { shown = true; out(`Add this device from a device in your account:\n${v.uri}`); }
+          if (v.digits) out(`Digits: ${v.digits}`);
+        } });
+      const gift = await run.done;
+      if (!('join' in gift)) { gift.nsec.fill(0); fail('That account has no box, and this device needs one.'); }
+      const j = gift.join;
+      const held = await D.join(me, j.boxKey, j.npub, sender(j.addr));
+      keep(s, held, j.addr); save(file, s);
+      return out(`Signed in. ${npubEncode(held.npub)}`);
+    }
     case 'add': {
+      if (!a?.trim().startsWith('{')) {
+        // One code from the new device (SPEC 8b). Pasted here, so the five digits are compared first.
+        const code = readAddCode(a ?? fail('Give the code the new device shows.'));
+        const held = heldOf(s);
+        const yes = argv.includes('--yes');
+        const ask = async (q: string) => { if (yes) return true; const rl = createInterface({ input: process.stdin, output: process.stdout }); try { return /^y/i.test(await rl.question(`${q} (y/n) `)); } finally { rl.close(); } };
+        await answerAddCode({
+          code, viaCamera: false,
+          consent: (inv) => ask(`Add ${inv.name}?`),
+          sameDigits: (digits) => { out(`Digits: ${digits}`); return ask(`Does the new device show ${digits}?`); },
+          gift: async (inv) => {
+            // This device always signs with a box, so the new device gets a piece of its own (SPEC 8b).
+            await D.addMember(me, held, { key: inv.key, name: inv.name, kind: 'device', ...(inv.chip ? { chip: inv.chip } : {}) }, box());
+            keep(s, held, s.addr!); save(file, s);
+            return { join: { addr: s.addr!, boxKey: held.boxKey, npub: held.npub } };
+          },
+        });
+        return out(`Added ${code.invite.name}.`);
+      }
       const inv = JSON.parse(a)?.invite ?? fail('That is not an invite.');
       const held = heldOf(s);
       await D.addMember(me, held, { key: inv.key, name: String(inv.name), kind: 'device', chip: inv.chip }, box());
@@ -246,7 +286,7 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       out(`Paste this into a site's "remote signer" or "bunker" sign-in:\n${run.url}`);
       return run;
     }
-    default: out('Commands: create, import, forget-key, invite, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;
+    default: out('Commands: create, import, forget-key, invite, signin, add, join, status, sign, block, unblock, cycle, serve, agent, bunker, scan, sites, signout, login, nsec, transfer, moved'); return;
   }
 }
 function fail(msg: string): never { throw new Error(msg); }

@@ -191,8 +191,12 @@ when the note carried a `challenge`:
 - Until then a gated member gets `not_approved` for every other op, so it cannot read or answer the
   account's notes, list the members, or sign.
 
-A member added on a device by the fingerprint (a phone scanning an invite, `keykin add`) has no gate:
-nothing changes for it.
+A member added on a device by the fingerprint (a phone scanning a new device's code or invite, `keykin add`)
+has no gate: nothing changes for it.
+
+**Marble on Android signs in this way too** when no device of the account is at hand ("Use my name"): it
+opens Marble Web with its invite, a PKCE challenge, a `state` and `return=https://marble.syb.lol/joined`,
+and collects its piece with the code and its verifier as the Mac does.
 
 ## 8. Falling back to the nsec
 
@@ -211,12 +215,39 @@ with.
 
 ## 8b. A new device learning where the box is
 
-Three short texts, shown as QRs or pasted:
+**One code** (Aaron, 2026-11-19). The new device shows one code; a device in the account scans it and
+decides what the newcomer gets, because only it knows how the account is set up. The code is the QRST
+profile `keykin-device` (`qr-secret-transfer/profiles/keykin-device.md`), Flow A (`mode=offer`, the new
+device is the Receiver), as an `https` link: Keykin's apps use `https://marble.syb.lol/add#…`, an App
+Link to Marble. It carries one extra fragment parameter, `invite`, the new device's invite below,
+base64url with no padding.
 
-1. The new device shows an **invite**: `{ keykin: 2, invite: { key, name, chip } }`.
-2. A device in the account adds it (section 7) and shows the **join text**:
-   `{ keykin: 2, join: { addr, boxKey, npub } }`.
-3. The new device reads that, collects its two halves from the box, and checks the npub.
+1. The new device shows the code and listens on its relays.
+2. A device in the account reads it and asks **"Add *name*?"** (Add, Not now). On Add, with the
+   fingerprint for an account change (section 4):
+   - **The account has a box:** it adds the newcomer (section 7) and releases the **join text**. The
+     newcomer collects its two halves from the box (`welcome`) and checks the npub.
+   - **The account has no box** (the whole key lives on the adding device): it releases the **whole
+     key**, and the newcomer keeps it as its own, the same as a QRST nsec transfer. The adding device
+     keeps its own copy: nothing is forgotten.
+   The rule is a box or not, never the person's choice and never the number of devices: a piece needs
+   the box, which is one of the two helpers that make it.
+3. The new device keeps what arrived with no second tap and is signed in, showing whose account it is.
+
+The digits of QRST are compared only when the code was not read by the adding device's own camera (a
+pasted link, the `qrst:` hand-off): then the adding device shows five digits and asks whether the new
+device shows the same, and nothing is added until they match. A camera scan has no digits. Where this
+departs from QRST section 9 (a short prompt, no second tap on the new device) is written in the profile.
+
+**The texts**, unchanged and still accepted by the apps and the command line:
+
+- An **invite**: `{ keykin: 2, invite: { key, name, chip } }`. `key` is the new device's member key.
+- The **join text**: `{ keykin: 2, join: { addr, boxKey, npub, loginPage } }`. It holds no secret.
+- The older way still works: the new device shows its invite, a device in the account adds it and shows
+  the join text, and the new device reads that.
+
+**Another app on the same phone** does not join. It signs through the app that is already in the
+account, by NIP-55 (section 8i).
 
 ## 8c. Signing in to sites (NIP-46)
 
@@ -243,7 +274,7 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 
 ## 8d. The command-line device
 
-`cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `add`,
+`cli/keykin.ts` makes a computer a device: `create`, `import`, `forget-key`, `invite`, `signin`, `add`,
 `join`, `status`, `sign`, `child`, `block`, `unblock`, `cycle`, `serve`, `agent`, `bunker`, `scan`, `sites`,
 `signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
 readable only by its owner. The piece in it is not encrypted.
@@ -818,10 +849,12 @@ a code for the phone's Add a device instead. The login page:
   the tab's `sessionStorage` (`kk-add`) through the scan, the passkey or the password;
 - checks the invite is a Keykin invite: JSON, `keykin: 2`, an `invite` with a 64-hex `key`. The `name` is
   shown (cut to 60 characters, "A new device" when there is none);
-- **sends approvals to this computer only.** `return` must be `http:` on `127.0.0.1` or `localhost`, with a
-  port, and no user, password or fragment. `challenge` must be 43 base64url characters and `state` 8 to
-  128. Anything else ("not a Keykin invite", "send the approval to <host>, which is not this computer",
-  "not complete") is said plainly and left alone: nothing is kept;
+- **sends approvals to this device only.** `return` must be `http:` on `127.0.0.1` or `localhost`, with a
+  port, and no user, password or fragment (RFC 8252 7.3), or exactly one of the phone apps' own App Link
+  addresses (RFC 8252 7.2): today only `https://marble.syb.lol/joined`, which Marble on Android claims.
+  `challenge` must be 43 base64url characters and `state` 8 to 128. Anything else ("not a Keykin invite",
+  "send the approval to <host>, which is not this device", "not complete") is said plainly and left alone:
+  nothing is kept;
 - **never leaves the note without a click.** After signing in, or straight away if the browser is signed
   in already, it shows a card: **"Add <name> to your account?"** with the account's name and picture, the
   device's name, and **Add** and **Not now**. A tab an app opens has no referrer, so the card says to say
@@ -831,7 +864,8 @@ a code for the phone's Add a device instead. The login page:
   When the device has answered, `note_get` gives the page that left the note, once, `approval: { code,
   short, until }`;
 - navigates to `return` with `code`, `state` and `join` (the join text, which is not secret) added to its
-  query. The app checks `state`, then asks for its welcome with `code` and `verifier`, joins, and its
+  query, or, for an App Link return, in its fragment, so that the web server behind it never sees them if
+  the app does not open. The app checks `state`, then asks for its welcome with `code` and `verifier`, joins, and its
   listener answers the tab ("Done. Marble on Mac is signed in."). The listener takes one approval, and
   closes after it or after 10 minutes;
 - **the fallback:** before leaving, the page keeps the six digits for this tab (`kk-add-done`, until they
@@ -1007,8 +1041,6 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - **The camera scan on a real phone.** The scanner is wired in but was only exercised through
   pasted and intent-fed codes on an emulator.
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
-- **The Android app answering the account page's notes, and reporting grants** (sections 11.5 and
-  11.6). The Kotlin core has the calls; the app does not use them yet.
 - **Screens for moving an account to another box.** Built in the device cores and on the command
   line only.
 - **Limits other than posting only, on the page.** The box also knows `dms` (posts and direct messages, section 11.6), but the page offers only posts only.

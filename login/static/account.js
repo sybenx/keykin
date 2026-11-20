@@ -794,6 +794,18 @@
     await refresh(); draw();
   }
 
+  // A site's two switches beside Posts only (SPEC 11.5), where the device that let it in has them. A change
+  // waits at the box until that device picks it up. Posts only already stops both, so they are off then.
+  const SWITCHES = [['lists', 'Private lists', 'Let it read your private lists', 'read your private lists'], ['dms', 'DMs', 'Let it read and send your direct messages', 'read and send DMs']];
+  function scopeSwitches(g) {
+    if (g.kind !== 'site') return [];
+    const site = g.name.replace(/^https?:\/\//, ''), posts = g.limit === 'posts';
+    return SWITCHES.filter(([k]) => typeof g[k] === 'boolean').map(([k, label, title, what]) =>
+      el('label', { className: 'toggle', title: posts ? 'Posts only is on, so it cannot read anything. Turn Posts only off first.' : title },
+        el('input', { type: 'checkbox', checked: globalThis.KeykinRows.scopeShown(g, k), disabled: posts, ariaLabel: `${label} for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'scopes', { grant: g.id, [k]: e.currentTarget.checked },
+          `${site} can ${e.currentTarget.checked ? '' : 'no longer '}${what} once ${g.deviceName} picks it up.`) } }), label));
+  }
+
   const card = (...kids) => el('div', { className: 'card' }, kids);
   const head = (title, sub) => el('div', { className: 'head' }, el('h1', {}, title), sub ? el('div', { className: 'dim' }, sub) : null);
   const link = (text, to) => el('button', { className: 'go-link linkish', on: { click: () => go(to) } }, text);
@@ -867,6 +879,7 @@
           el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
             el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
               e.currentTarget.checked ? `${g.name.replace(/^https?:\/\//, '')} can only post now.` : `${g.name.replace(/^https?:\/\//, '')} can do everything again.`) } }), 'Posts only'),
+          ...scopeSwitches(g),
           el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${g.name.replace(/^https?:\/\//, '')} is revoked.`) } }, 'Revoke')))
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         link('Sign in to another app', 'home')],

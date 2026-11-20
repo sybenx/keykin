@@ -252,12 +252,20 @@ export async function passwordClear(me: Me, h: Held, send: Send, t = now()) { aw
 
 // --- What this device has let in, and revoking (SPEC 11.5) -----------------------------------------
 
-/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in. */
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker' }
+/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in.
+ *  `lists` and `dms` are a site's own switches on this device (may it read the private lists, DMs); leave them out where it has none. */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker'; lists?: boolean; dms?: boolean }
+/** What the account page wants a site's switches to be, by grant id: set them, then report again. */
+export type Scopes = Record<string, { lists?: boolean; dms?: boolean }>;
 export const newGrant = (kind: 'site' | 'app', name: string, t = now()): Grant => ({ id: bytesToHex(randomBytes(16)), kind, name, since: t });
 /** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
 export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<string[]> {
-  return (await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t))).revoked;
+  return (await syncGrants(me, h, grants, send, t)).revoked;
+}
+/** The same report, with the switches the account page changed for this device's sites (`scopes`). */
+export async function syncGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<{ revoked: string[]; scopes: Scopes }> {
+  const r = await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t));
+  return { revoked: r.revoked, scopes: r.scopes ?? {} };
 }
 export async function revoke(me: Me, h: Held, grant: string, send: Send, t = now()) { await call(send, await seal({ op: 'revoke', account: h.npub, grant }, me.sk, t)); }
 /** Limits a grant to posting (`posts`): the box then signs only posts for it and gives it no message keys. `null` lifts the limit. */

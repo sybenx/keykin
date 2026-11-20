@@ -243,6 +243,24 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.uncheck('input[aria-label="Posts only for https://jumble.social"]');
     await page.waitForSelector('text=jumble.social can do everything again.');
     assert.ok(verifyEvent(await D.signEvent(work, wh, follows, w.send, undefined, jumble.id)));
+    // A site with the phone's two switches: DMs turned on here waits for the phone, which picks it up when it reports.
+    const chat: D.Grant = { ...D.newGrant('site', 'https://chat.nostr.com'), lists: false, dms: false, via: 'bunker' };
+    await D.reportGrants(phone, held, [amethyst, chat], w.send);
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Sites and apps');
+    const dms = 'input[aria-label="DMs for https://chat.nostr.com"]', lists = 'input[aria-label="Private lists for https://chat.nostr.com"]';
+    assert.equal(await page.locator('input[aria-label="DMs for https://jumble.social"]').count(), 0);
+    await page.check(dms);
+    await page.waitForSelector('text=chat.nostr.com can read and send DMs once Pixel 9a picks it up.');
+    assert.ok(await page.isChecked(dms)); assert.ok(!(await page.isChecked(lists)));
+    await page.waitForSelector('text=waiting for Pixel 9a');
+    await shot('sites-switches');
+    const got = await D.syncGrants(phone, held, [amethyst, chat], w.send);
+    assert.deepEqual(got.scopes, { [chat.id]: { dms: true } });
+    await D.reportGrants(phone, held, [amethyst, { ...chat, dms: true }], w.send);
+    await page.check('input[aria-label="Posts only for https://chat.nostr.com"]');
+    await page.waitForSelector('text=chat.nostr.com can only post now.');
+    assert.ok(await page.isDisabled(dms)); assert.ok(await page.isDisabled(lists));
+    assert.equal(await page.locator('text=waiting for Pixel 9a').count(), 0);
     await page.click('button[aria-label="Revoke Amethyst"]');
     await page.waitForSelector('text=Amethyst is revoked.');
     await assert.rejects(D.signEvent(phone, held, note(held.npub), w.send, undefined, amethyst.id), /revoked/);

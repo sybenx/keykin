@@ -249,6 +249,14 @@ departs from QRST section 9 (a short prompt, no second tap on the new device) is
 **Another app on the same phone** does not join. It signs through the app that is already in the
 account, by NIP-55 (section 8i).
 
+**Built (2026-11-19, branches `add-device`, not released):** the profile in qr-secret-transfer (spec, TypeScript,
+Kotlin, vectors); here `src/adddevice.ts`, `keykin signin <relay>` and `keykin add '<code>'`, and the account
+page's App Link return; Marble on Android (Welcome with Create your account and Sign in, the one code, Add with
+the box or no-box rule, digits for a pasted code, Use my name) and Marble Web (`/add`, `/joined`, the App Link
+return). Until qr-secret-transfer's main carries the profile, Keykin (`src/adddevice.ts`) and Marble
+(`keykin/core/AddDevice.kt`) keep copies, tested against its vectors. Marble on the Mac and the browser extension
+do not read the code yet.
+
 ## 8c. Signing in to sites (NIP-46)
 
 A device can run a remote signer ("bunker"). It has its own key for talking to sites, separate

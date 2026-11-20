@@ -115,8 +115,10 @@ test('the account page: password login, its limits, and what it may and may not 
   // Setting a password needs the fingerprint, and the box never gets the password.
   await assert.rejects(D.passwordSet({ ...phone, fp: undefined }, held, 'aaron', 'correct horse', send, NOW), /needs_fingerprint/);
   await assert.rejects(D.passwordSet(phone, held, 'A', 'x', send, NOW), /bad_username/);
+  assert.equal((await D.members(phone, send, NOW, held.npub)).password, false);   // devices can tell an account has none yet
   await D.passwordSet(phone, held, 'aaron', 'correct horse', send, NOW);
   assert.doesNotMatch(JSON.stringify(box.state), /correct horse/);
+  assert.equal((await D.members(phone, send, NOW, held.npub)).password, true);
 
   // Logging in: the page fetches the salt, makes the verifier itself, and sends that.
   const { salt } = call({ call: 'pw_salt', username: 'aaron' });
@@ -168,9 +170,10 @@ test('the account page: password login, its limits, and what it may and may not 
   assert.match(call({ call: 'pw_login', username: 'aaron', verifier: v2 }).session, /^[0-9a-f]{64}$/);
   assert.deepEqual(call({ call: 'pw_set', session: 'f'.repeat(64), username: 'aaron', salt: salt2, check: D.passwordCheck(v2) }), { error: 'login' });
   assert.ok(call({ call: 'me', session: s4 }).log.some((l: any) => /password was changed/.test(l.text)));
-  // Clearing the password ends that way in.
-  await D.passwordClear(phone, held, send, now());
-  assert.deepEqual(call({ call: 'pw_login', username: 'aaron', verifier: v2 }), { error: 'wrong' });
+  // A password is always required: neither a device nor the page can remove it, and it still works.
+  await assert.rejects(D.passwordClear(phone, held, send, now()), /password_required/);
+  assert.deepEqual(call({ call: 'pw_clear', session: s4 }), { error: 'password_required' });
+  assert.match(call({ call: 'pw_login', username: 'aaron', verifier: v2 }).session, /^[0-9a-f]{64}$/);
 });
 
 test('the account page: logging in by a device, per account', async () => {

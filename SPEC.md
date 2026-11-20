@@ -98,7 +98,7 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `create1`, `create2` | The first device, with the code from the QR | No | Makes the key with the device. Once only |
 | `sign` | An unblocked device | No | Answers a signing round for an event of this account, or of one of its child keys (section 8k) |
 | `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a), as the account or as a child key |
-| `members` | Any unblocked member | No | Returns the list, the epoch and the next unused index |
+| `members` | Any unblocked member | No | Returns the list, the epoch, the next unused index, and `password` (true when the account has a username and password, section 11.3) |
 | `cycle` | An unblocked device | **Yes** | Moves every piece to a new line and drops blocked members (section 8f) |
 | `caught_up` | Any unblocked member | No | Says it has applied the changes left for it |
 | `address` | Any unblocked member | No | Says where this device listens for other devices (section 8g) |
@@ -591,7 +591,11 @@ They live on the box, per account. The box never sees the password.
 - **Stored on the box:** the username, the salt, and `SHA-256("keykin2-pw" ‖ verifier)`.
 - **Setting or changing it** is an account change. A device sends
   `{ op: "password_set", account, username, salt, check }` with a fingerprint, where `check` is
-  the stored hash above, hex. `{ op: "password_clear", account }` with a fingerprint removes it.
+  the stored hash above, hex. A password can be changed but never removed: the box refuses
+  `{ op: "password_clear", account }` with `password_required`.
+- **Always set at setup:** every way of making or bringing in an account (`keykin create`,
+  `keykin import`, the app's create and import) asks for a username and the password, typed twice,
+  before setup is done, and sends `password_set` as its last step. Passkeys do not stand in for it.
 - **Logging in** is two calls from the page to the box (section 11.6):
   `pw_salt { username }` returns `{ salt }`, and `pw_login { username, verifier }` returns a page
   session. For a username that does not exist, `pw_salt` returns a salt made from the username
@@ -599,12 +603,17 @@ They live on the box, per account. The box never sees the password.
 - **Limits on guessing:** five wrong tries for one username lock it for 15 minutes, doubling each
   time up to 24 hours; a right password clears the count. Across all usernames the box takes at
   most 30 tries a minute.
-- **The page can set it too:** `pw_set { username, salt, check }` with a page session, and
-  `pw_clear`. The page's own script computes the verifier.
+- **The page can change it too:** `pw_set { username, salt, check }` with a page session. The page's
+  own script computes the verifier. `pw_clear` is refused with `password_required`.
+- **Accounts made before this rule** may have no password. `members` says so (`password: false`),
+  and the app and the account page show a plain prompt to set one until it is set.
 - **What a password is worth:** the whole account (section 11.6). The limits on guessing are
   what stands between a guesser and that.
 
-**Built:** the box, both device cores (`passwordSet`), and the account page's sign-in. No app has a screen for setting it yet.
+**Built:** the box (refusing removal, `password` in `members`), both device cores (`passwordSet`),
+the account page's sign-in, change form and no-password prompt, `keykin create`/`import` (asked at
+setup, or `--username`/`--password` and `KEYKIN_USERNAME`/`KEYKIN_PASSWORD` without a terminal) and
+`keykin password`, and Marble Android's create and import with its no-password prompt.
 
 **Passkeys (added 2026-11-18).** A passkey is another way into the page, worth the same as a
 password or a scan. They live on the box, per account, as WebAuthn credentials:
@@ -987,7 +996,7 @@ happen differently:
 | See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
 | Block and unblock a device | Become a site's signer (`nostrconnect` note) | Publish the sign-in-page pointer naming the box's login page (`pointer` note, section 11.1) |
 | Revoke a grant, or limit it to posting (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
-| Set, change or clear the password (`pw_set`, `pw_clear`) | | |
+| Set or change the password (`pw_set`; it is never removed, section 11.3) | | |
 | End its own session, or all page sessions | | |
 
 Forming the whole key is not offered on the page at all: it would put the key in a browser. It

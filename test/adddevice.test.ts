@@ -40,7 +40,7 @@ test('a new device signs in with one code: a box account gives it a piece', { sk
   try {
     const old = tmp('kk-old-'), fresh = tmp('kk-new-');
     const say = (l: string[]) => (t: string) => l.push(t);
-    await main(['create', b.qr()!, 'Laptop'], () => {}, old);
+    await main(['create', b.qr()!, 'Laptop', '--username', 'laptop', '--password', 'long enough pw'], () => {}, old);
     // The new device shows its code and waits.
     const signingIn = main(['signin', relay, 'Tablet'], say(lines), fresh);
     signingIn.catch(() => {});

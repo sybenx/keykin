@@ -280,7 +280,12 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
 
     // Security: change the password from the page; the new one signs in, the old one does not.
     await page.click('nav >> text=Security');
-    await page.fill('#newpass', 'a brand new password');
+    assert.equal(await page.locator('#nopw').count(), 0);                       // this account has a password
+    assert.equal(await page.locator('text=Turn off password sign-in').count(), 0);   // it can be changed, never removed
+    await page.fill('#newpass', 'a brand new password'); await page.fill('#newpass2', 'not the same password');
+    await page.click('#savepw');
+    await page.waitForSelector('text=The two passwords do not match.');
+    await page.fill('#newpass2', 'a brand new password');
     await page.click('#savepw');
     await page.waitForSelector('text=Password saved.');
     await shot('security');
@@ -635,7 +640,7 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
   const { main } = await import('../cli/keykin.ts');
   const { BunkerSigner, createNostrConnectURI } = await import('nostr-tools/nip46');
   const { generateSecretKey, getPublicKey } = await import('nostr-tools/pure');
-  const cli = async (home: string, ...argv: string[]) => { const lines: string[] = []; const r = await main(argv, (s) => lines.push(s), home); return { text: lines.join('\n'), run: r as any }; };
+  const cli = async (home: string, ...argv: string[]) => { if (argv[0] === 'create') argv.push('--username', 'macbook', '--password', 'long enough pw'); const lines: string[] = []; const r = await main(argv, (s) => lines.push(s), home); return { text: lines.join('\n'), run: r as any }; };
   const relay = await nakRelay();
   const port = await freePort(), base = `http://127.0.0.1:${port}`;
   const boxDir = mkdtempSync(join(tmpdir(), 'kk-box-'));
@@ -651,6 +656,7 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
   try {
     const home = mkdtempSync(join(tmpdir(), 'kk-mac-'));
     const npub = /([0-9a-f]{64})/.exec((await cli(home, 'create', box.qr()!, 'MacBook')).text)![1];
+    delete box.box.only()!.login;     // as an account made before setup asked for a password
     agent = (await cli(home, 'agent', relay.url)).run;
     const now = () => Math.floor(Date.now() / 1000);
     const publish = async (event: object) => {
@@ -817,10 +823,18 @@ test('a site sends you here with its code: scan, save a passkey, sign in with it
     await page.waitForSelector('#browsers');
     assert.match((await page.textContent('#browsers'))!, /This browser/);
     assert.match((await page.textContent('#browsers'))!, /passkey · signed in .* · last used today/);
+    // An account with no password yet says so, in plain words, until one is set.
+    assert.equal(await page.textContent('#nopw'), 'Your account has no password yet. Set one so you can reach your account page from any browser. ');
+    await page.click('nav >> text=Home');
+    assert.match((await page.textContent('#nopw'))!, /no password yet/);
+    await page.click('#nopw >> text=Set a password');
+    await page.waitForSelector('#newpass2');
     // A password is still a full way in: set one here.
-    await page.fill('#newuser', 'aaron'); await page.fill('#newpass', 'correct horse battery');
+    await page.fill('#newuser', 'aaron'); await page.fill('#newpass', 'correct horse battery'); await page.fill('#newpass2', 'correct horse battery');
     await page.click('#savepw');
     await page.waitForSelector('text=Password saved.');
+    assert.equal(await page.locator('#nopw').count(), 0);
+    assert.equal(await page.locator('text=Turn off password sign-in').count(), 0);
 
     // The account names this page in the old kind only (from before the move): read as a fallback, so the page offers nothing.
     await publish({ kind: 30078, created_at: now(), tags: [['d', 'keykin/login'], ['url', base]], content: '' });

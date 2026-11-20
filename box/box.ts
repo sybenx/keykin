@@ -279,7 +279,7 @@ export class Box {
         case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
         case 'sign': return this.#sign(s, from, body, now);
         case 'ecdh': return this.#ecdh(s, from, body, now);
-        case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, next: s.next, boxKey: this.state.key, members: s.members };
+        case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, next: s.next, boxKey: this.state.key, members: s.members, password: !!s.login };
         case 'block': return this.#block(s, body.key);
         case 'unblock': return this.#unblock(s, from, req, body.key);
         case 'add': return this.#add(s, from, req, body, now);
@@ -303,7 +303,8 @@ export class Box {
           this.#save();
           return { ok: true };
         }
-        case 'password_clear': this.#needFingerprint(from, req); delete s.login; this.#save(); return { ok: true };
+        // A password is always required (SPEC 11.3): it can be changed, never removed.
+        case 'password_clear': refuse('password_required');
         case 'grants': {
           const list = body.grants;
           if (!Array.isArray(list) || list.length > 200) refuse('bad_request');

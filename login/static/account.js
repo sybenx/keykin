@@ -444,7 +444,7 @@
       el('h2', { id: 'addtitle' }, `Add ${a.name} to your account?`),
       el('div', { className: 'hello small-hello' }, pic, el('div', {}, el('div', { className: 'name', id: 'addwho' }, who), me?.npubText ? el('div', { className: 'mono small dim' }, me.npubText.slice(0, 16) + '…' + me.npubText.slice(-6)) : null)),
       el('div', { className: 'small dim', id: 'adddevice' }, `New device: ${a.name}`),
-      el('div', { className: 'notice warn', id: 'addwarn' }, 'Only say yes if you just pressed Sign in on this computer. An app opened this page, so it cannot tell which one sent you. A device you add can sign as you, together with your box.'),
+      el('p', { className: 'small dim', id: 'addwarn' }, `Add it only if you just pressed Sign in on ${a.name}.`),
       el('div', { className: 'with-note' }, go, no));
     node.id = 'addcard';
     go.onclick = () => {
@@ -475,9 +475,14 @@
       if (!g.approval) { line.textContent = 'Done, but this page did not get the approval code. Go back to the app and try again.'; return; }
       const o = { name: a.name, short: g.approval.short, until: g.approval.until, ret: !!a.ret, join: a.ret ? null : g.result };
       store.set(ADDED, JSON.stringify(o));
-      box.replaceWith(addedCard(o));
+      // On the way back to the app the six digits stay out of sight: they show only if this tab is come back to
+      // (the way back failed), from what was just kept. Without a way back they are what the person needs now.
+      if (!a.ret) return void box.replaceWith(addedCard(o));
+      const going = card(el('h2', {}, `Opening ${a.name}`), el('p', { className: 'sub', id: 'addline', role: 'status' }, `Done. ${a.name} is signing in.`));
+      going.id = 'adddone';
+      box.replaceWith(going);
       // Back to the app on this computer, with the code (RFC 8252): only a loopback address gets here (returnOk).
-      if (a.ret) {
+      {
         const u = new URL(a.ret);
         u.searchParams.set('code', g.approval.code); u.searchParams.set('state', a.state); u.searchParams.set('join', g.result);
         location.assign(u.href);
@@ -892,5 +897,8 @@
   }
 
   takeConnect(); takeAdd();
+  // Come back to this tab from the app's page (the browser may restore it as it was, "Opening …"): show the six
+  // digits kept for it, in case the way back failed.
+  addEventListener('pageshow', (e) => { if (e.persisted && added() && document.getElementById('adddone')) showAdded(added()); });
   if (fromCamera()) showHandoff(); else if (pending() || pendingAdd()) afterSignIn(null); else if (added()) showAdded(added()); else showAccount();
 })();

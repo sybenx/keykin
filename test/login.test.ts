@@ -697,7 +697,11 @@ test('an app sends you here to add it as a device: #add=, a click, and the appro
     assert.equal(await page.textContent('#addwho'), who);
     if (w.hasRelay) assert.equal(await page.getAttribute('#addcard img.avatar', 'src'), 'https://pics.example/aaron.png');
     assert.equal(await page.textContent('#adddevice'), 'New device: Marble on Mac');
-    assert.match((await page.textContent('#addwarn'))!, /Only say yes if you just pressed Sign in on this computer/);
+    assert.match((await page.textContent('#addwarn'))!, /^Add it only if you just pressed Sign in on Marble on Mac\.$/);
+    // The six digits must not show on the way back to the app (they flashed before 0.1.14).
+    let sawCode = false;
+    await page.exposeFunction('kkSawCode', () => { sawCode = true; });
+    await page.evaluate(() => new MutationObserver(() => { if (document.getElementById('shortcode')) (window as any).kkSawCode(); }).observe(document.body, { childList: true, subtree: true }));
     assert.deepEqual([await page.textContent('#addgo'), await page.textContent('#addno')], ['Add', 'Not now']);
     await new Promise((r) => setTimeout(r, 1000));
     assert.deepEqual(puts(), [], 'nothing goes to a device before the click');
@@ -713,6 +717,7 @@ test('an app sends you here to add it as a device: #add=, a click, and the appro
     await assert.rejects(D.join(mac, held.boxKey, held.npub, w.send, undefined, { code: 'x'.repeat(24), verifier: mp.verifier }), /not_approved|wrong_code/);
     await page.waitForURL((u: URL) => u.href.startsWith(ret));
     assert.match((await page.textContent('body'))!, /Done/);
+    assert.equal(sawCode, false, 'no six digits on the way back');
     assert.equal(back.length, 1);
     const got = back[0];
     assert.equal(got.pathname, '/done'); assert.equal(got.searchParams.get('state'), 'st4te-mac00001');

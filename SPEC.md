@@ -279,6 +279,15 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Each answer goes back on the relay its request came in on.
 - Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
   forgets the site and answers `not_connected` from then on.
+- **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
+  the person may name the site when asking for the link ("Which site is it for?"). The link's secret
+  is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
+  A site with no origin and no name takes one from the first `sign_event` it asks for that has a
+  client tag (`["client", "<name>", ...]`, the second item). A name is cleaned (no control
+  characters, trimmed, at most 60 characters; empty means none) and, once set, stays: the person's
+  word wins over a client tag, and the first client tag over later ones. Devices name a site, here
+  and in its grant, by its origin, else its name, else "A site". `keykin bunker <relay> --name <site>`
+  prints such a link.
 
 ## 8d. The command-line device
 
@@ -526,6 +535,17 @@ it to find where to send someone (Aaron, 2026-11-19: kind 10046, replacing kind 
   - All of this runs on kind 10046, and on kind 30078 too during the move (above).
   - If no relay answers, it does nothing this time.
   The account page's "Publish it" button stays as the fallback, and publishes both kinds during the move.
+- **Asked for from the account page (a `pointer` note).** A page signed in with a password or a passkey
+  has no signer of its own, so it leaves a note (section 11.6): `note_put { kind: "pointer" }`. The box
+  fills in the note's text with its own login page address (the admin setting, or `KEYKIN_LOGIN_URL`),
+  never anything the page sent, and returns it as `url` next to `note`. With no address set it refuses
+  with `no_login_page`. A device shows "Make <host> your sign-in page?" with Yes and No. On Yes it signs a
+  new pointer naming that origin (both kinds during the move), publishes it, and answers `note_done`
+  with `ok`; on No it answers `note_done` with `declined`. A No here is not `note_refuse`: it does not
+  end the page's session. The page then asks the relays again and says what they show. `me` returns
+  the same address as `loginPage` (null when none is set), and the page treats a pointer naming it as
+  naming this page; only a box with no address set falls back to the page's own origin. Its own
+  "Publish it" and the copies it sends again use that address too.
 
 **Built (2026-11-19), kind 10046:** on the account page, with the rules in `login/static/pointer.js`
 (tested on their own and in the browser). The page asks its relays for both kinds at once, reads 10046
@@ -534,7 +554,10 @@ removed, and refuses a template as above (a refused one shows as a page that can
 Publish offered). When the pointer names this page, it sends the newest copy of each kind as it is to
 any of its relays that answered without it. "Publish it" signs both kinds (two signatures on the
 phone, no `relays` tag), and when the pointer names this page a "Remove it" button signs both
-removals. Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
+removals. After a password or a passkey, the alert's **Publish it from my phone** leaves a `pointer`
+note (built 2026-11-19 on the box and the page; `answerNotes` in `src/device.ts` answers it when given
+a `pointer` function, which the tests do but `keykin agent` does not yet; Marble on Android is being
+built against it in the Marble repo). Not built: the device's own check after joining and on `nostrconnect` sign-ins. The
 command-line device has none; Marble's lives in the Marble repo. Marble Web, Discover and Tube read
 the pointer in their own repos.
 
@@ -678,7 +701,9 @@ each device tells the box what it has let in.
 
 - A **grant** is `{ id, kind, name, since }`. `id` is 16 random bytes, hex, made by the device.
   `kind` is `site` (a site signed in through this device) or `app` (another app on the phone).
-  `name` is the site's origin or the app's name. `since` is unix seconds.
+  `name` is the site's origin or the app's name. A site with no origin is named as in section 8c:
+  the name the person typed, else its first client tag, else "A site". When a name comes later the
+  device sends its list again with the new name. `since` is unix seconds.
 - A device sends `{ op: "grants", account, grants: [...] }` with its whole list whenever it
   changes. The box keeps the list per device.
 - **Telling grants apart** (Aaron, 2026-11-19). A grant may also carry, all optional:
@@ -743,6 +768,39 @@ from that map, and Sites and apps shows it ("last used …"). Devices change not
 `browser` from the nostrconnect note, `lastKind`), the account page's detail line (`login/static/rows.js`),
 Marble (Android reports them, Marble Web sends `device=` and shows its key) and Tube (`device=` from the
 start request's User-Agent).
+
+**Turning on DMs and private lists from the account page.** (Aaron, 2026-11-19.) A device may keep two
+switches of its own for a site: may it read the private lists (a message key with the account's own
+key), and may it read and send DMs. Marble has them for each site it lets in, off at first, and checks
+them on the phone. The account page can turn them on or off; the box only carries the choice.
+
+1. In `grants`, a grant may carry `lists` and `dms`, booleans: the device's switches for that site
+   as they are now. Absent means the device has no such switch for it (apps, the command-line
+   signer). The box keeps them only when they are booleans.
+2. The page's call is `scopes { grant, lists?, dms? }`, each a boolean, at least one. The box answers
+   `gone` if the grant is not on the account's list, and `bad_request` if it is not a `site`, if its
+   device did not report the switch asked about, or if the body is wrong. It keeps what the page
+   wants in the account's `wants` map (by grant id, `{ lists?, dms? }`), merged with any want
+   already there, and writes a line like "chat.nostr.com may read and send DMs, from the account
+   page" or "chat.nostr.com may no longer read your private lists, from the account page". It
+   follows the sign-in strength rows of 11.6 as `limit` does: turning a switch on is `limit:none`,
+   turning one off is `limit:posts`.
+3. The answer to `grants` carries `scopes: { "<grant id>": { lists?, dms? } }` for that device's
+   grants with a want, and leaves the field out when there are none. The device sets its switches
+   and reports again; once a report shows a switch as wanted, that part of the want is done. A want
+   for a grant no device lists any more goes, and revoking a grant (from anywhere, or after 90 days
+   unused) drops its want.
+4. The page's `me` gives each grant `lists` and `dms` (as reported, or `null`) and `want` (or
+   `null`). Sites and apps shows "Private lists" and "DMs" switches beside Posts only for a site
+   that has them, showing the want while there is one, and adds "waiting for Pixel 9a" to the line
+   while the want and the device differ. With Posts only on, both are greyed out: that limit already
+   refuses every message key.
+
+**Built (2026-11-19), the switches:** on the box (`wants`, `scopes` in the `grants` answer), the page
+call and `me` (`box/pageapi.ts`, passed through by Keykin Login), the account page
+(`login/static/account.js`, the waiting text in `login/static/rows.js`), and the TS device core
+(`lists` and `dms` on `Grant`; `syncGrants` returns `{ revoked, scopes }`, and `reportGrants` still
+returns `revoked` alone). Marble is built against this format separately.
 
 ### 11.6 The account page's calls, and what needs a device
 
@@ -927,7 +985,7 @@ happen differently:
 | The box does it at once | A device does it, with no prompt | A device asks Yes or No first |
 |---|---|---|
 | See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
-| Block and unblock a device | Become a site's signer (`nostrconnect` note) | |
+| Block and unblock a device | Become a site's signer (`nostrconnect` note) | Publish the sign-in-page pointer naming the box's login page (`pointer` note, section 11.1) |
 | Revoke a grant, or limit it to posting (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
 | Set, change or clear the password (`pw_set`, `pw_clear`) | | |
 | End its own session, or all page sessions | | |
@@ -954,10 +1012,15 @@ Kotlin core are the test both sides use.
 - The page leaves a note: `note_put { kind, text }`, and for `nostrconnect` also `from` and `as`
   (the sender's origin or null, and `"main"` or `"site"`, above). A device that does not know `as`
   uses the main account, as before. `kind` is `invite` (the text is a new
-  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (no text) or
-  `cycle` (no text).
+  device's invite), `nostrconnect` (the text is a `nostrconnect://` code), `bunker` (the text is
+  an optional name for the site, section 8c, which the device cleans), `cycle` (no text) or `pointer`
+  (no text: the box puts in its own login page address, section 11.1, and refuses with `no_login_page`
+  when it has none). A `pointer` note needs no more than a `bunker` note does: any page session. A
+  `bunker` note may also carry `lists` and `dms`, the site's two switches ("Read your private lists",
+  "Read and send DMs"). Only `true` turns one on; other kinds ignore them.
 - `{ op: "notes", account }` from a device returns the waiting ones, each
-  `{ id, kind, text, at, tap }`. `tap` is true only for `cycle`.
+  `{ id, kind, text, at, tap }`, and for `bunker` also `lists` and `dms` (true or false). `tap` is
+  true for `cycle` and `pointer`. The device's link gives the site those switches when it connects.
 - `{ op: "notes_wait", account, wait, seen }` is the same call, held open. `wait` is whole seconds;
   the box holds at most 25. `seen` (optional, up to 50 note ids) lists notes this device already has,
   such as a `cycle` note waiting for the person's Yes or No. If a waiting note is not in `seen`, the
@@ -970,11 +1033,12 @@ Kotlin core are the test both sides use.
   the box (the page's calls get 20), so keep any proxy in front of it above that (60 seconds is
   usual). An older box answers `unknown_op`; a device then checks with `notes` on a timer.
 - The device does it and answers `{ op: "note_done", account, note, result }`. The result is
-  the join text for `invite`, the link for `bunker`, and `ok` for the others.
+  the join text for `invite`, the link for `bunker`, `ok` or `declined` for `pointer`, and `ok` for the others.
 - For `invite` and `cycle` the device sends the usual `add` or `cycle` with `"note": "<id>"`
   in place of the fingerprint. The box accepts that only while the note is waiting, and for
   `invite` only for the device the note names.
-- After a No, the device sends `{ op: "note_refuse", account, note }`.
+- After a No, the device sends `{ op: "note_refuse", account, note }`, which also ends the page session
+  that asked. For `pointer` a No is `note_done` with `declined` instead, and the session stays.
 - Notes last 10 minutes. If no device of the account is online, nothing happens: the public
   side has no piece and gets none.
 - A sign-in made this way is a grant (section 11.5) on the device that answered, and works

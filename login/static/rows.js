@@ -23,7 +23,15 @@
       : [who, ['signed in', when(g.since), VIA[g.via]].filter(Boolean).join(' '), g.deviceName ? `approved by ${g.deviceName}` : null];
     parts.push(g.last ? `last used ${ago(g.last, now)}${kind ? `, last posted ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}` : ''}` : 'not used yet');
     if (typeof g.client === 'string' && /^[0-9a-f]{4}/.test(g.client)) parts.push(`key ${g.client.slice(0, 4)}…`);
+    parts.push(scopeWaiting(g));
     return parts.filter(Boolean).join(' · ');
   }
-  globalThis.KeykinRows = { siteDetail, kindWord, when };
+  // A site's two switches (SPEC 11.5), `lists` and `dms`: what the device reported, or what the page asked
+  // for while the device has not picked it up yet.
+  const SCOPES = ['lists', 'dms'];
+  /** The value a switch shows: the page's want if there is one, else the device's own. */
+  const scopeShown = (g, k) => (typeof g.want?.[k] === 'boolean' ? g.want[k] : g[k] === true);
+  /** "waiting for Pixel 9a" while a want differs from what the device reported, else null. */
+  const scopeWaiting = (g) => (SCOPES.some((k) => typeof g.want?.[k] === 'boolean' && typeof g[k] === 'boolean' && g.want[k] !== g[k]) ? `waiting for ${g.deviceName}` : null);
+  globalThis.KeykinRows = { siteDetail, kindWord, when, scopeShown, scopeWaiting };
 })();

@@ -88,6 +88,31 @@ test('the admin page saves the address, setup codes carry it, a bad one is refus
   } finally { await a.b.close(); }
 });
 
+test('the admin page shows an alert at the top until the address is set, and none when KEYKIN_LOGIN_URL sets it', async () => {
+  const d = dir();
+  let a = await admin({ d });
+  try {
+    let page = await (await a.get('/')).text();
+    assert.match(page, /id="loginalert"/); assert.match(page, /Set your login page address/);
+    assert.match(page, /New invites need it, so sites can find this box's accounts by name/);
+    assert.ok(page.indexOf('id="loginalert"') < page.indexOf('class="cols"'), 'above everything else');
+    assert.match(page, /href="#loginpage">Set it below</);                 // nothing to suggest: a jump to the card
+    // With a suggestion, Save is right there, and pressing it sets the address.
+    page = await (await a.get('/', { 'x-forwarded-proto': 'https' })).text();
+    const sug = `https://127.0.0.1:${a.b.port}`;
+    const alert = /id="loginalert"[\s\S]*?<\/form>/.exec(page)![0];
+    assert.match(alert, new RegExp(`name="address" value="${sug}"`)); assert.match(alert, /value="save"/);
+    assert.match(await a.notice(await a.post('/admin/loginpage', { csrf: a.csrf, do: 'save', address: sug })), /New codes carry/);
+    page = await (await a.get('/')).text();
+    assert.doesNotMatch(page, /loginalert/); assert.doesNotMatch(page, /Set your login page address/);
+    // Cleared, it comes back.
+    await a.post('/admin/loginpage', { csrf: a.csrf, do: 'clear' });
+    assert.match(await (await a.get('/')).text(), /id="loginalert"/);
+  } finally { await a.b.close(); }
+  a = await admin({ d, login: 'https://env.example' });
+  try { assert.doesNotMatch(await (await a.get('/')).text(), /loginalert/); } finally { await a.b.close(); }
+});
+
 test('KEYKIN_LOGIN_URL overrides the setting and shows as fixed', async () => {
   const d = dir();
   let a = await admin({ d });

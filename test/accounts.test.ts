@@ -8,6 +8,8 @@ import { Box } from '../box/box.ts';
 import { PageApi } from '../box/pageapi.ts';
 import { eventId } from '../src/event.ts';
 import { hexToBytes, bytesToHex, randomBytes, sha } from '../src/bytes.ts';
+import { newBunker, bunkerTicket, answerRequest, syncGrants } from '../src/nip46.ts';
+import { getPublicKey } from 'nostr-tools/pure';
 const schnorrSha = (v: string) => sha(new TextEncoder().encode(v));
 
 const NOW = 1_800_000_000;
@@ -733,4 +735,141 @@ test('the Sites and apps detail line', async () => {
   assert.equal(siteDetail({ kind: 'app', since, deviceName: 'Pixel 9a', last: null }, since), 'App on Pixel 9a · added 19 Nov 06:14 · not used yet');
   assert.deepEqual([0, 1, 4, 6, 7, 99999].map(kindWord), ['profile', 'note', 'DM', 'repost', 'reaction', 'kind 99999 event']);
   for (const s of [siteDetail(g, since)]) assert.ok(!s.includes('—'));
+  // A site's switches: the page's want shows until the device reports the same, and the line says who it waits for.
+  const { scopeShown, scopeWaiting } = (globalThis as any).KeykinRows;
+  const s = { kind: 'site', since, deviceName: 'Pixel 9a', last: null, lists: false, dms: false, want: { dms: true } };
+  assert.equal(siteDetail(s, since), 'signed in 19 Nov 06:14 · approved by Pixel 9a · not used yet · waiting for Pixel 9a');
+  assert.deepEqual([scopeShown(s, 'dms'), scopeShown(s, 'lists')], [true, false]);
+  assert.equal(scopeWaiting({ ...s, dms: true }), null);
+  assert.equal(scopeWaiting({ ...s, want: null }), null);
+});
+
+test('a site\'s switches: the page turns DMs and private lists on or off, and the device that let it in picks it up', async () => {
+  const { box, send, call, tick, now } = world();
+  const phone = device('Pixel 9a'), laptop = device('Laptop');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.addMember(phone, held, { key: laptop.key, name: 'Laptop', kind: 'device', chip: laptop.chip }, send, NOW);
+  const lh = await D.join(laptop, held.boxKey, held.npub, send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const chat: D.Grant = { ...D.newGrant('site', 'https://chat.nostr.com', NOW), lists: false, dms: false, via: 'bunker' };
+  const plain = D.newGrant('site', 'https://jumble.social', NOW), app = D.newGrant('app', 'Amethyst', NOW);
+  const other: D.Grant = { ...D.newGrant('site', 'https://other.example', NOW), lists: true, dms: 'yes' as any };
+  // A reported grant keeps its switches; anything but a boolean is dropped.
+  assert.deepEqual(await D.syncGrants(phone, held, [chat, plain, app, other], send, NOW), { revoked: [], scopes: {} });
+  const rows = () => Object.fromEntries(call({ call: 'me', session }).grants.map((g: any) => [g.name, [g.lists, g.dms, g.want]]));
+  assert.deepEqual(rows(), { 'https://chat.nostr.com': [false, false, null], 'https://jumble.social': [null, null, null], Amethyst: [null, null, null], 'https://other.example': [true, null, null] });
+  assert.equal(box.only()!.grants![phone.key].find((g) => g.id === other.id)!.dms, undefined);
+
+  // The page turns DMs on: kept as a want, said in the activity list, and handed to that device only.
+  assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, dms: true }), { ok: true });
+  assert.deepEqual(rows()['https://chat.nostr.com'], [false, false, { dms: true }]);
+  assert.ok(call({ call: 'me', session }).log.some((l: any) => l.text === 'chat.nostr.com may read and send DMs, from the account page'));
+  assert.deepEqual(await D.syncGrants(laptop, lh, [], send, NOW), { revoked: [], scopes: {} });
+  assert.deepEqual(await D.syncGrants(phone, held, [chat, plain, app, other], send, NOW), { revoked: [], scopes: { [chat.id]: { dms: true } } });
+  // A second change merges with the first, and comes again until the device reports it.
+  assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, lists: true }), { ok: true });
+  assert.ok(call({ call: 'me', session }).log.some((l: any) => l.text === 'chat.nostr.com may read your private lists, from the account page'));
+  assert.deepEqual((await D.syncGrants(phone, held, [chat, plain, app, other], send, NOW)).scopes, { [chat.id]: { dms: true, lists: true } });
+  // The device reports DMs on: that part is done, the lists part still waits.
+  assert.deepEqual((await D.syncGrants(phone, held, [{ ...chat, dms: true }, plain, app, other], send, NOW)).scopes, { [chat.id]: { lists: true } });
+  assert.deepEqual((await D.syncGrants(phone, held, [{ ...chat, dms: true, lists: true }, plain, app, other], send, NOW)).scopes, {});
+  assert.deepEqual(rows()['https://chat.nostr.com'], [true, true, null]);
+  assert.equal(box.only()!.wants, undefined);
+  // Turning one off is said too.
+  call({ call: 'scopes', session, grant: chat.id, dms: false });
+  assert.ok(call({ call: 'me', session }).log.some((l: any) => l.text === 'chat.nostr.com may no longer read and send DMs, from the account page'));
+  assert.deepEqual(rows()['https://chat.nostr.com'], [true, true, { dms: false }]);
+
+  // Refused: a grant not on the list, an app, a site without switches, a switch it does not report, and bad bodies.
+  assert.deepEqual(call({ call: 'scopes', session, grant: 'f'.repeat(32), dms: true }), { error: 'gone' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: app.id, dms: true }), { error: 'bad_request' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: plain.id, lists: true }), { error: 'bad_request' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: other.id, dms: true }), { error: 'bad_request' });
+  for (const bad of [{}, { dms: 'yes' }, { lists: 1 }, { dms: null }])
+    assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, ...bad }), { error: 'bad_request' }, JSON.stringify(bad));
+  assert.deepEqual(box.only()!.wants, { [chat.id]: { dms: false } });
+
+  // Revoking takes the want with it, and so does ending after 90 days unused.
+  call({ call: 'revoke', session, grant: chat.id });
+  assert.equal(box.only()!.wants, undefined);
+  assert.deepEqual(call({ call: 'scopes', session, grant: other.id, lists: false }), { ok: true });
+  tick(91 * 86400);
+  assert.deepEqual(call({ call: 'me', session: call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session }).grants, []);
+  assert.deepEqual(box.only()!.wants ?? {}, {});
+  assert.deepEqual(await D.reportGrants(phone, held, [other], send, now()), [other.id]);
+});
+
+test('a site\'s switches follow the limit gate: a weak page session may turn one off but not on', async () => {
+  const box = new Box();
+  const page = new PageApi(box, () => 'https://account.example', () => false, { calls: { 'limit:none': 'strong' } });
+  const send: D.Send = async (r) => box.handle(JSON.parse(JSON.stringify(r)), NOW);
+  const call = (body: object) => page.call(JSON.parse(JSON.stringify(body)), NOW);
+  const phone = device('Pixel 9a');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  const chat: D.Grant = { ...D.newGrant('site', 'https://chat.nostr.com', NOW), lists: true, dms: false };
+  await D.reportGrants(phone, held, [chat], send, NOW);
+  assert.deepEqual(call({ call: 'limit', session, grant: chat.id, to: null }), { error: 'need_strong' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, dms: true }), { error: 'need_strong' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, lists: false, dms: true }), { error: 'need_strong' });
+  assert.deepEqual(call({ call: 'scopes', session, grant: chat.id, lists: false }), { ok: true });
+  assert.deepEqual(call({ call: 'me', session }).grants[0].want, { lists: false });
+});
+
+test('a bunker link names its site: the name typed on the page, else the site\'s first client tag; the box lists it', async () => {
+  const { box, send, call, tick } = world();
+  const phone = device('Phone');
+  const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
+  await D.passwordSet(phone, held, 'aaron', 'pw pw pw', send, NOW);
+  const session = call({ call: 'pw_login', username: 'aaron', verifier: await D.passwordVerifier('pw pw pw', call({ call: 'pw_salt', username: 'aaron' }).salt) }).session;
+  tick(Math.floor(Date.now() / 1000) - NOW);           // a bunker signs at the real time
+  const T = Math.floor(Date.now() / 1000);
+  const b = newBunker(), bunkerKey = getPublicKey(hexToBytes(b.sk));
+  let changes = 0; const changed = () => { changes++; };
+  const ask = (client: string, method: string, params: string[]) => answerRequest(b, phone, held, send, client, method, params, changed);
+  const post = (client: string, tags: string[][]) => ask(client, 'sign_event', [JSON.stringify({ kind: 1, created_at: T, tags, content: 'hi' })]);
+  const names = async () => { await syncGrants(b, phone, held, send); return call({ call: 'me', session }).grants.map((g: any) => g.name).sort(); };
+  const secretOf = (link: string) => new URL(link.replace('bunker://', 'https://')).searchParams.get('secret')!;
+  let asked: any;
+  const can = { addr: 'https://account.example', tap: async () => false, bunker: async (o: any) => { asked = o; return bunkerTicket(b, 'wss://r', o); } };
+
+  // The page asks for a link with a name and both switches. The note carries them; the device cleans the name.
+  const { note } = call({ call: 'note_put', session, kind: 'bunker', text: ' \u0007Jumble\n', lists: true, dms: true });
+  const [n] = await D.notes(phone, held, send, T);
+  assert.deepEqual([n.text, n.lists, n.dms], [' \u0007Jumble\n', true, true]);
+  assert.deepEqual(await D.answerNotes(phone, held, send, can, T), ['gave a bunker link']);
+  assert.deepEqual(asked, { name: 'Jumble', lists: true, dms: true });
+  const jumble = bytesToHex(randomBytes(32));
+  await ask(jumble, 'connect', [bunkerKey, secretOf(call({ call: 'note_get', session, note }).result)]);
+  assert.deepEqual(b.scopes?.[jumble], { lists: true, dms: true });
+  assert.deepEqual(await names(), ['Jumble']);
+  // The typed name wins over the site's own client tag.
+  changes = 0;
+  assert.ok(valid(JSON.parse(await post(jumble, [['client', 'Other app']]))));
+  assert.equal(b.grants![jumble].name, 'Jumble'); assert.equal(changes, 0);
+
+  // A site in by the plain link, with no name: "A site" until a post carries a client tag. The first tag names it, once.
+  const plain = bytesToHex(randomBytes(32));
+  await ask(plain, 'connect', [bunkerKey, b.secret]);
+  assert.match((await names())[0], /^A site \(/);
+  await post(plain, [['t', 'keykin']]);
+  assert.equal(changes, 1);                                // only the connect
+  await post(plain, [['client', ''], ['client', '  Coracle  ', '31990:abc:def', 'wss://r']]);
+  assert.equal(b.grants![plain].name, 'Coracle'); assert.equal(changes, 2);
+  assert.deepEqual(await names(), ['Coracle', 'Jumble']); // the box takes the renamed grant
+  await post(plain, [['client', 'Snort']]);
+  assert.equal(b.grants![plain].name, 'Coracle'); assert.equal(changes, 2);
+  assert.equal(b.scopes?.[plain], undefined);
+
+  // With nothing typed and the switches left off, the note says so and the site has no name yet.
+  call({ call: 'note_put', session, kind: 'bunker', text: '   ' });
+  const [n2] = await D.notes(phone, held, send, T);
+  assert.deepEqual([n2.lists, n2.dms], [false, false]);
+  await D.answerNotes(phone, held, send, can, T);
+  assert.deepEqual(asked, { name: undefined, lists: false, dms: false });
+  // Other kinds of note carry no switches.
+  call({ call: 'note_put', session, kind: 'nostrconnect', text: 'nostrconnect://x', lists: true });
+  assert.equal((await D.notes(phone, held, send, T)).find((x) => x.kind === 'nostrconnect')!.lists, undefined);
 });

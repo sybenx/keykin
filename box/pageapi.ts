@@ -2,7 +2,7 @@
 // and no list: it passes these calls through, and the box decides. Nothing here can sign, add a device,
 // unblock one or form the key. Those need a device's fingerprint and go through /keykin.
 
-import { Box, type Limit, type Account, type Note, type Passkey, type PageSession, USERNAME } from './box.ts';
+import { Box, SCOPES, type Limit, type Account, type Note, type Passkey, type PageSession, USERNAME } from './box.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha } from '../src/bytes.ts';
 import { timingSafeEqual, createHash } from 'node:crypto';
@@ -148,13 +148,28 @@ export class PageApi {
           this.box.happened(a.npub, body.to === 'posts' ? `${g.name} was limited to posting from the account page` : body.to === 'dms' ? `${g.name} was limited to posts and direct messages from the account page` : `${g.name} may do everything again, from the account page`, now);
           return { ok: true };
         }
+        case 'scopes': {
+          // A site's two switches on the device that let it in (SPEC 11.5): the box keeps what the page wants,
+          // and hands it to that device the next time it reports its grants.
+          const g = Object.values(a.grants ?? {}).flat().find((x) => x.id === body.grant) ?? refuse('gone');
+          const asked = SCOPES.filter((k) => body[k] !== undefined);
+          if (!asked.length || asked.some((k) => typeof body[k] !== 'boolean' || typeof g[k] !== 'boolean') || g.kind !== 'site') refuse('bad_request');
+          this.box.wantScopes(a.npub, g.id, { lists: body.lists, dms: body.dms });
+          const site = g.name.replace(/^https?:\/\//, ''), what = { lists: 'read your private lists', dms: 'read and send DMs' };
+          for (const k of asked) this.box.happened(a.npub, `${site} may ${body[k] ? '' : 'no longer '}${what[k]}, from the account page`, now);
+          return { ok: true };
+        }
         case 'pw_set': this.box.setLogin(a.npub, body.username, body.salt, body.check); this.box.happened(a.npub, 'The password was changed from the account page', now); return { ok: true };
         case 'pw_clear': delete a.login; this.box.touch(); this.box.happened(a.npub, 'Password sign-in was turned off from the account page', now); return { ok: true };
         case 'logout': this.#end(hash); return { ok: true };
         case 'logout_all': for (const [h, s] of Object.entries(this.#all())) if (s.account === a.npub) this.#end(h); return { ok: true };
         case 'logout_browser': return this.#logoutBrowser(a.npub, hash, body.id, now);
         case 'note_put': {
-          if (!['nostrconnect', 'invite', 'bunker', 'cycle'].includes(body.kind) || typeof body.text !== 'string' || body.text.length > 4000) refuse('bad_request');
+          if (!['nostrconnect', 'invite', 'bunker', 'cycle', 'pointer'].includes(body.kind) || (body.kind !== 'pointer' && typeof body.text !== 'string') || String(body.text ?? '').length > 4000) refuse('bad_request');
+          // `pointer` (SPEC 11.1): a device publishes the sign-in-page pointer naming the box's own login page
+          // address. The text is that address, never anything from the request, so a page (or whoever got a
+          // session) cannot point the account somewhere else.
+          const text = body.kind === 'pointer' ? this.box.login ?? refuse('no_login_page') : body.text as string;
           // Where the request came from, as the login page saw it, and which key the person chose (SPEC 11.6).
           const from = body.from ?? null, as = body.as ?? 'main';
           if (body.kind === 'nostrconnect' && ((from !== null && (typeof from !== 'string' || from.length > 200 || !/^https?:\/\/[^\s/?#]+$/.test(from))) || (as !== 'main' && as !== 'site'))) refuse('bad_request');
@@ -163,14 +178,15 @@ export class PageApi {
           if (challenge !== null && (body.kind !== 'invite' || typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge))) refuse('bad_request');
           const list = this.#notes.get(a.npub) ?? [];
           if (list.length >= 10) refuse('too_many');
-          // Only the hard-to-undo one asks the person on a device. The rest a device just does.
-          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text: body.text, at: now, tap: body.kind === 'cycle', ...(body.kind === 'nostrconnect' ? { from, as } : {}), ...(body.kind === 'invite' ? { challenge } : {}),
+          // The hard-to-undo one, and the one that changes where sites send the person, ask on a device. The rest a device just does.
+          const note: Note = { id: bytesToHex(randomBytes(16)), kind: body.kind, text, at: now, tap: body.kind === 'cycle' || body.kind === 'pointer', ...(body.kind === 'nostrconnect' ? { from, as } : {}), ...(body.kind === 'invite' ? { challenge } : {}),
+            ...(body.kind === 'bunker' ? { lists: body.lists === true, dms: body.dms === true } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
           this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now
           if (body.kind === 'nostrconnect') this.box.rememberConnect(a, body.text, this.#all()[hash]?.agent, now);
-          this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page' }[body.kind as Note['kind']], now);
-          return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}) };
+          this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page', pointer: 'Publishing the sign-in page was asked for from the account page' }[body.kind as Note['kind']], now);
+          return { ok: true, note: note.id, ...(note.weak ? { limit: this.weakSiteLimit } : {}), ...(note.kind === 'pointer' ? { url: text } : {}) };
         }
         case 'note_get': {
           const n = (this.#notes.get(a.npub) ?? []).find((x) => x.id === body.note);
@@ -199,8 +215,11 @@ export class PageApi {
     catch (e) { if (e instanceof KeykinError) return { error: e.code }; return { error: 'wrong' }; }
   }
   #needs(body: any): Need {
-    const row = body.call === 'note_put' ? `note_put:${body.kind}` : body.call === 'limit' ? `limit:${body.to ?? 'none'}` : body.call;
-    return this.policy[row] ?? this.policy[body.call] ?? 'any';
+    // A site's switches (`scopes`) follow the limit rows: turning one on gives the site more, like lifting a
+    // limit (`limit:none`); turning one off takes some away, like adding one (`limit:posts`).
+    const on = body.call === 'scopes' && (body.lists === true || body.dms === true), call = body.call === 'scopes' ? 'limit' : body.call;
+    const row = body.call === 'note_put' ? `note_put:${body.kind}` : body.call === 'limit' ? `limit:${body.to ?? 'none'}` : body.call === 'scopes' ? `limit:${on ? 'none' : 'posts'}` : body.call;
+    return this.policy[row] ?? this.policy[call] ?? 'any';
   }
   #place(body: any) {
     // A box that knows its login page uses that, not whatever host the request came in by: a lookalike
@@ -363,11 +382,12 @@ export class PageApi {
     this.box.expireGrants(a, now);
     const name = (key: string) => a.members.find((m) => m.key === key)?.name ?? 'A device that was removed';
     return {
-      npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key,
+      npub: a.npub, username: a.login?.username ?? null, boxKey: this.box.state.key, loginPage: this.box.login ?? null,
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
-      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null }))),
+      grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null,
+        lists: typeof g.lists === 'boolean' ? g.lists : null, dms: typeof g.dms === 'boolean' ? g.dms : null, want: a.wants?.[g.id] ?? null }))),
     };
   }
 }

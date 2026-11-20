@@ -252,12 +252,20 @@ export async function passwordClear(me: Me, h: Held, send: Send, t = now()) { aw
 
 // --- What this device has let in, and revoking (SPEC 11.5) -----------------------------------------
 
-/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in. */
-export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker' }
+/** `client`, `device` and `via` are optional (SPEC 11.5): the site's NIP-46 key, its own label, and how it came in.
+ *  `lists` and `dms` are a site's own switches on this device (may it read the private lists, DMs); leave them out where it has none. */
+export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; client?: string; device?: string; via?: 'login' | 'scan' | 'paste' | 'bunker'; lists?: boolean; dms?: boolean }
+/** What the account page wants a site's switches to be, by grant id: set them, then report again. */
+export type Scopes = Record<string, { lists?: boolean; dms?: boolean }>;
 export const newGrant = (kind: 'site' | 'app', name: string, t = now()): Grant => ({ id: bytesToHex(randomBytes(16)), kind, name, since: t });
 /** Tells the box this device's whole list. Returns the ids that were revoked, to drop from the list. */
 export async function reportGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<string[]> {
-  return (await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t))).revoked;
+  return (await syncGrants(me, h, grants, send, t)).revoked;
+}
+/** The same report, with the switches the account page changed for this device's sites (`scopes`). */
+export async function syncGrants(me: Me, h: Held, grants: Grant[], send: Send, t = now()): Promise<{ revoked: string[]; scopes: Scopes }> {
+  const r = await call(send, await seal({ op: 'grants', account: h.npub, grants }, me.sk, t));
+  return { revoked: r.revoked, scopes: r.scopes ?? {} };
 }
 export async function revoke(me: Me, h: Held, grant: string, send: Send, t = now()) { await call(send, await seal({ op: 'revoke', account: h.npub, grant }, me.sk, t)); }
 /** Limits a grant to posting (`posts`): the box then signs only posts for it and gives it no message keys. `null` lifts the limit. */
@@ -268,7 +276,10 @@ export async function limit(me: Me, h: Held, grant: string, to: 'posts' | null, 
 /** `tap` is true when the device must ask the person Yes or No before doing it. */
 /** For `nostrconnect`: `from` is the origin that sent the person to the login page (null if it could not tell),
  *  and `as` the key they chose, `main` or `site` (SPEC 11.6). A device that does not know `as` uses the main account. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site' }
+/** For `bunker`: `text` is an optional name for the site, and `lists` and `dms` the site's two switches (SPEC 11.6). */
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; from?: string | null; as?: 'main' | 'site'; lists?: boolean; dms?: boolean }
+/** A site's name as a person or the site gave it: no control characters, trimmed, at most 60 characters. Undefined when empty. */
+export const siteName = (s: unknown): string | undefined => typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60) || undefined : undefined;
 export async function notes(me: Me, h: Held, send: Send, t = now()): Promise<Note[]> { return (await call(send, await seal({ op: 'notes', account: h.npub }, me.sk, t))).notes; }
 /** Like `notes`, but the box holds the answer up to `wait` seconds (at most 25) until a note comes. Notes in `seen` alone do not answer at once. */
 export async function notesWait(me: Me, h: Held, send: Send, wait: number, seen: string[] = [], t = now()): Promise<Note[]> {
@@ -283,11 +294,14 @@ export async function noteRefuse(me: Me, h: Held, note: string, send: Send, t = 
  * the person's authority, so a device just does these; only a note marked `tap` asks first.
  *   `addr`         where the new device will reach the box, for the join text it is handed.
  *   `tap(text)`    asks the person Yes or No. Called only for hard-to-undo notes.
- *   `bunker()`     makes a bunker:// link, or null if this device runs no remote signer.
+ *   `bunker(o)`    makes a bunker:// link, or null if this device runs no remote signer. `o.name` is the
+ *                  site's name if the person gave one, and `o.lists`, `o.dms` the site's two switches.
  *   `connect(uri)` becomes the signer for a nostrconnect:// code, or false if this device cannot.
+ *   `pointer(origin)` signs and publishes the sign-in-page pointer (both kinds, SPEC 11.1) naming `origin`,
+ *                  true once a relay took it. Asked first with `tap`; No answers `declined`, not `note_refuse`.
  * Returns what it did, for the device to show or log.
  */
-export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: () => Promise<string | null>; connect?: (uri: string) => Promise<boolean> }, t = now()): Promise<string[]> {
+export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: string; tap: (text: string) => Promise<boolean>; bunker?: (o: { name?: string; lists: boolean; dms: boolean }) => Promise<string | null>; connect?: (uri: string) => Promise<boolean>; pointer?: (origin: string) => Promise<boolean> }, t = now()): Promise<string[]> {
   const did: string[] = [];
   for (const n of await notes(me, h, send, t)) {
     try {
@@ -297,10 +311,14 @@ export async function answerNotes(me: Me, h: Held, send: Send, can: { addr: stri
         await noteDone(me, h, n.id, JSON.stringify({ keykin: 2, join: { addr: can.addr, boxKey: h.boxKey, npub: h.npub } }), send, t);
         did.push(`added ${inv.name}`);
       } else if (n.kind === 'bunker') {
-        const link = await can.bunker?.();
+        const link = await can.bunker?.({ name: siteName(n.text), lists: n.lists === true, dms: n.dms === true });
         if (link) { await noteDone(me, h, n.id, link, send, t); did.push('gave a bunker link'); }
       } else if (n.kind === 'nostrconnect') {
         if (await can.connect?.(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push('signed a site in'); }
+      } else if (n.kind === 'pointer') {
+        if (!can.pointer || !/^https?:\/\/[^\s/?#]+$/.test(n.text)) continue;
+        if (!(await can.tap(`Make ${new URL(n.text).host} your sign-in page?`))) { await noteDone(me, h, n.id, 'declined', send, t); did.push('said No to the sign-in page'); }
+        else if (await can.pointer(n.text)) { await noteDone(me, h, n.id, 'ok', send, t); did.push(`published ${n.text} as the sign-in page`); }
       } else if (n.kind === 'cycle') {
         if (await can.tap('Remove blocked devices for good? Their pieces stop working. This cannot be undone.')) { await cycle(me, h, send, t, n.id); await noteDone(me, h, n.id, 'ok', send, t); did.push('removed blocked devices'); }
         else { await noteRefuse(me, h, n.id, send, t); did.push('said No to removing blocked devices'); }

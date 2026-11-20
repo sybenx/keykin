@@ -12,6 +12,12 @@ import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src
 import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, xOnly, type Commitment } from '../src/curve.ts';
 import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha, jcsBytes } from '../src/bytes.ts';
+import { randomInt, timingSafeEqual } from 'node:crypto';
+
+/** How long an approval code lasts, and how many wrong tries a member gets (SPEC 11.6). */
+const GATE_SECONDS = 600, GATE_TRIES = 5;
+const b64url = (b: Uint8Array) => Buffer.from(b).toString('base64url');
+const same = (h: Uint8Array, hex: string) => { const o = hexToBytes(hex); return o.length === h.length && timingSafeEqual(h, o); };
 import { schnorr } from '@noble/curves/secp256k1.js';
 
 /** `addr` is where a device that can listen answers other devices when the box is off. */
@@ -20,6 +26,12 @@ export interface Member { key: string; i: number; name: string; kind: 'device' |
   last?: number; blockedAt?: number }
 /** What waits for a newly added member: the two values its piece is built from. */
 export interface Welcome { by: string; box: string; device?: string; fetched?: boolean }
+/**
+ * A member added through an account-page note (SPEC 11.6, `add=` and Devices, Add a device): its welcome is held
+ * until it shows the approval code the page was given, and the PKCE verifier when the note carried a challenge.
+ * Codes are kept as SHA-256 only. `until` and `tries` bound the guessing; the member goes when they run out.
+ */
+export interface Gate { note: string; at: number; challenge: string | null; code?: string; short?: string; until?: number; tries: number }
 /** A change of piece waiting for a member that was not there when the keys were cycled. */
 export interface Catchup { from: string; sealed: string }
 export interface Passkey { id: string; key: string; counter: number; rpId: string; origin: string; added: number; last?: number }
@@ -32,6 +44,8 @@ export interface Account {
   members: Member[];
   welcomes: Record<string, Welcome>;
   catchups: Record<string, Catchup[]>;
+  /** Members added through a page note, waiting for their approval code, by member key (SPEC 11.6). */
+  gates?: Record<string, Gate>;
   /** Username and password for the account page (SPEC 11.3). The box never has the password. */
   login?: { username: string; salt: string; check: string; fails?: number; lockedUntil?: number };
   /** Passkeys that sign in to the account page (SPEC 11.3): WebAuthn credentials, each bound to the page's host. */
@@ -73,7 +87,7 @@ export function clientOf(code: string): string | null {
 /** `tap` is true for the hard-to-undo ones: a device asks the person Yes or No before doing it. */
 /** For `nostrconnect`, `from` is the origin that sent the person to the login page (or null), and `as` is the key the person chose.
  *  For `pointer`, `text` is the box's own login page address, never anything the page sent. */
-export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site' }
+export interface Note { id: string; kind: 'nostrconnect' | 'invite' | 'bunker' | 'cycle' | 'pointer'; text: string; at: number; tap: boolean; result?: string; weak?: boolean; from?: string | null; as?: 'main' | 'site'; challenge?: string | null }
 /** A signed-in account page (SPEC 11.6), kept by SHA-256 of its token, never the token. Unix seconds. */
 export interface PageSession { account: string; how: 'password' | 'passkey' | 'scan'; made: number; last: number; agent: string }
 /** One line of an account's recent activity. */
@@ -232,9 +246,13 @@ export class Box {
       if (body.op === 'import') return this.#import(body, req.key, now);
       if (body.op === 'transfer1') return this.#transfer1(body, req.key, now);
       if (body.op === 'transfer2') return this.#transfer2(body, req, now);
-      const s = this.#accountOf(body);
+      // A member added through a page note may not know its account yet: the typed code (SPEC 11.6) names only the box.
+      const s = body.op === 'welcome' && body.account === undefined ? this.#gatedAccount(req.key) : this.#accountOf(body);
+      this.#sweepGates(s, now);
       const from = s.members.find((m) => m.key === req.key) ?? refuse('unknown_member');
       if (from.blocked) refuse('blocked');
+      // Until it shows its approval code, a member added through a page note can do nothing but ask for its welcome.
+      if (s.gates?.[from.key] && body.op !== 'welcome') refuse('not_approved');
       // A device still on the old pieces is told so, and handed what it needs to catch up.
       if (EPOCH_OPS.has(body.op) && body.epoch !== s.epoch) {
         return { error: 'stale', epoch: s.epoch, commitment: s.commitment, catchups: s.catchups[from.key] ?? [] };
@@ -258,7 +276,7 @@ export class Box {
         case 'unblock': return this.#unblock(s, from, req, body.key);
         case 'add': return this.#add(s, from, req, body, now);
         case 'welcome_put': return this.#welcomePut(s, from, body);
-        case 'welcome': return this.#welcome(s, from);
+        case 'welcome': return this.#welcome(s, from, body, now);
         case 'reveal': return this.#reveal(s, from, req);
         case 'address': {
           // A device that can listen says where; the others use it when the box is off.
@@ -695,12 +713,14 @@ export class Box {
   // waits here, sealed to the new member; the device's half arrives with `welcome_put`.
   #add(s: Account, from: Member, req: Signed, body: any, now: number) {
     const m = body.member;
+    let gate: Gate | null = null;
     // Either the person asked on this device (fingerprint), or a signed-in account page asked (its note).
     if (body.note !== undefined) {
       const n = this.onNotes(s.npub).find((x) => x.id === body.note && x.kind === 'invite' && x.result === undefined) ?? refuse('gone');
       let inv: any; try { inv = JSON.parse(n.text).invite; } catch { inv = null; }
       if (!inv || inv.key !== m?.key) refuse('bad_member');
       if (from.kind !== 'device') refuse('devices_only');
+      gate = { note: n.id, at: now, challenge: n.challenge ?? null, tries: 0 };
     } else this.#needFingerprint(from, req);
     if (!m || !HEX64.test(m.key) || !Number.isInteger(m.i) || m.i < 1) refuse('bad_member');
     if (m.kind !== 'device' && m.kind !== 'box') refuse('bad_member');
@@ -712,6 +732,7 @@ export class Box {
     const sigma = F.repairSigma([mine.get(s.i)!, openFrom(this.state.sk, from.key, 'repair-delta', body.delta)]);
     s.members.push({ key: m.key, i: m.i, name: String(m.name ?? 'Device'), kind: m.kind, chip: m.chip, blocked: false, added: now });
     s.welcomes[m.key] = { by: from.key, box: sealTo(this.state.sk, m.key, 'repair-sigma', sigma) };
+    if (gate) (s.gates ??= {})[m.key] = gate;
     this.#save();
     return { ok: true, delta: sealTo(this.state.sk, from.key, 'repair-delta', mine.get(from.i)!) };
   }
@@ -725,11 +746,63 @@ export class Box {
     return { ok: true };
   }
 
-  #welcome(s: Account, from: Member) {
+  #welcome(s: Account, from: Member, body: any, now: number) {
     const w = s.welcomes[from.key] ?? refuse('no_welcome');
     if (!w.device) refuse('not_ready');
-    if (!w.fetched) { w.fetched = true; this.#save(); }
-    return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, i: from.i, box: w.box, from: w.by, device: w.device };
+    const g = s.gates?.[from.key];
+    if (g) {
+      // Added through a page note: the approval code the page was given, and the verifier when the note carried
+      // a challenge (SPEC 11.6). A wrong try counts; after GATE_TRIES the member goes.
+      if (!g.code || !g.short) refuse('not_approved');
+      const code = typeof body.code === 'string' ? body.code : '';
+      const codeOk = /^\d{6}$/.test(code) ? same(sha(new TextEncoder().encode('short:' + code)), g.short!) : code.length >= 16 && code.length <= 100 && same(sha(new TextEncoder().encode(code)), g.code!);
+      const verifierOk = g.challenge === null || (typeof body.verifier === 'string' && /^[A-Za-z0-9_-]{43,128}$/.test(body.verifier) && b64url(sha(new TextEncoder().encode(body.verifier))) === g.challenge);
+      if (!codeOk || !verifierOk) {
+        g.tries++;
+        if (g.tries >= GATE_TRIES) this.#dropGated(s, from.key);
+        this.#save();
+        refuse('wrong_code');
+      }
+      delete s.gates![from.key];                 // one use
+    }
+    if (!w.fetched) w.fetched = true;
+    this.#save();
+    return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, i: from.i, box: w.box, from: w.by, device: w.device, boxKey: this.state.key };
+  }
+
+  /**
+   * The page that left the note gets its approval codes once, when a device has added the member (SPEC 11.6): a
+   * long one (128 bits) for the app to redeem through the browser, and six digits to type. Null if there is no
+   * member for the note, or the codes were given already.
+   */
+  approve(npub: string, note: string, now: number): { code: string; short: string; until: number } | null {
+    const s = this.state.accounts[npub];
+    const entry = s && Object.entries(s.gates ?? {}).find(([, g]) => g.note === note);
+    if (!entry || entry[1].code) return null;
+    const g = entry[1];
+    const code = b64url(randomBytes(18)), short = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    g.code = bytesToHex(sha(new TextEncoder().encode(code)));
+    g.short = bytesToHex(sha(new TextEncoder().encode('short:' + short)));
+    g.until = now + GATE_SECONDS; g.tries = 0;
+    this.#save();
+    return { code, short, until: g.until };
+  }
+  /** The account a member waiting for its approval code is in. */
+  #gatedAccount(key: string): Account {
+    return this.accounts().find((a) => a.gates?.[key]) ?? refuse('no_welcome');
+  }
+  /** Members whose approval ran out (10 minutes after the codes, or never approved) go, as if never added. */
+  #sweepGates(s: Account, now: number) {
+    let changed = false;
+    for (const [key, g] of Object.entries(s.gates ?? {})) {
+      if (g.until !== undefined ? now > g.until : now - g.at > 2 * GATE_SECONDS) { this.#dropGated(s, key); changed = true; }
+    }
+    if (changed) this.#save();
+  }
+  #dropGated(s: Account, key: string) {
+    s.members = s.members.filter((m) => m.key !== key);
+    delete s.welcomes[key];
+    delete s.gates![key];
   }
 
   // --- Cycling the keys --------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 //   keykin forget-key                                    forget that backup. Only you decide when
 //   keykin invite [name]                                 on a NEW device: print its invite
 //   keykin add '<invite>'                                on a device in the account: add it, print the join text
-//   keykin join '<join text>'                            on the new device: collect its piece
+//   keykin join '<join text>' [code]                     on the new device: collect its piece (the code: added from the account page)
 //   keykin status                                        the account and its devices
 //   keykin sign '<event json>' [label]                   sign one event, as the account or as the child key for a label
 //   keykin child [label]                                 make the child key for a label and print its npub, or list them
@@ -100,7 +100,8 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
     case 'join': {
       if (s.held) fail('This device is already in an account.');
       const j = JSON.parse(a)?.join ?? fail('That is not a join text.');
-      const held = await D.join(me, j.boxKey, j.npub, sender(j.addr));
+      // Added from the account page: the code it shows goes too (SPEC 11.6).
+      const held = await D.join(me, j.boxKey, j.npub, sender(j.addr), undefined, b ? { code: b.replace(/\s/g, '') } : undefined);
       keep(s, held, j.addr); save(file, s);
       return out(`Joined. npub (hex): ${held.npub}`);
     }

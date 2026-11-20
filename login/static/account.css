@@ -106,3 +106,4 @@ ul.plain { margin:0; padding-left:18px; font-size:14px; line-height:1.6; }
 .kk button.kk-copy { border:0; background:none; color:var(--dim); font-weight:400; font-size:13px; text-decoration:underline; height:auto; padding:0; }
 a.linkbtn { display:inline-flex; align-items:center; justify-content:center; height:46px; padding:0 22px; border-radius:10px; text-decoration:none; background:var(--accent); color:var(--on); font:600 15px Inter, system-ui, sans-serif; }
 a.linkbtn:hover { color:var(--on); }
+.shortcode { font-size:34px; font-weight:700; letter-spacing:.08em; margin:4px 0; user-select:all; }

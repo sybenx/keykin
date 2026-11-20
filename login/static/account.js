@@ -119,6 +119,92 @@
       el('button', { className: 'linkish small', id: 'notnow', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(PENDING, null); document.getElementById('asking')?.remove(); } } }, 'Do not sign in there'));
   }
 
+  // ---- An app sent you here to add it as a device: #challenge=…&return=…&state=…&add=<its Keykin invite> ------
+  // Marble on a Mac signs in through Marble Web, which sends you here with the Mac's invite, the way an app signs
+  // in with OAuth (RFC 8252 with PKCE). The same rules as `connect=`: `add=` is the last fragment parameter,
+  // URL-decoded once, taken out of the address bar at once (with the parameters before it), kept in this tab's
+  // sessionStorage through the sign-in, and never acted on without a click. After Add the box holds the new
+  // device's piece until it shows the approval code this page gets, with the verifier its `challenge` was made
+  // from. The code goes back only to a `return` address on this same computer (127.0.0.1 or localhost), and as
+  // six digits to type (SPEC 11.6). An app opening a browser sends no referrer, so the card says when to say yes.
+  const ADDING = 'kk-add', ADDED = 'kk-add-done';
+  let badAdd = null;
+  function readInvite(text) {
+    const t = (text ?? '').trim();
+    if (!t.startsWith('{') || t.length > 4000) return null;
+    let v; try { v = JSON.parse(t); } catch { return null; }
+    const inv = v && v.keykin === 2 && v.invite && typeof v.invite === 'object' ? v.invite : null;
+    if (!inv || typeof inv.key !== 'string' || !/^[0-9a-f]{64}$/i.test(inv.key)) return null;
+    const name = (typeof inv.name === 'string' ? inv.name.trim().slice(0, 60) : '') || 'A new device';
+    return { text: t, key: inv.key.toLowerCase(), name };
+  }
+  const challengeOk = (c) => typeof c === 'string' && /^[A-Za-z0-9_-]{43}$/.test(c) ? c : null;
+  const stateOk = (x) => typeof x === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(x) ? x : null;
+  /** A return address on this computer only: http, 127.0.0.1 or localhost, a port, nothing else (RFC 8252 7.3). */
+  function returnOk(r) {
+    let u; try { u = new URL(r); } catch { return null; }
+    return typeof r === 'string' && r.length < 300 && u.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(u.hostname) && u.port && !u.username && !u.password && !u.hash ? u.href : null;
+  }
+  function takeAdd() {
+    const hash = location.hash.slice(1);
+    const at = hash.startsWith('add=') ? 0 : hash.indexOf('&add=') + 1;
+    if (at === 0 && !hash.startsWith('add=')) return;
+    const raw = hash.slice(at + 'add='.length);
+    const before = hash.slice(0, Math.max(0, at - 1)).split('&').filter(Boolean);
+    const param = (k) => { const p = before.find((x) => x.startsWith(k + '=')); try { return p ? decodeURIComponent(p.slice(k.length + 1)) : null; } catch { return ''; } };
+    const rest = before.filter((x) => !/^(challenge|return|state)=/.test(x));
+    history.replaceState(null, '', location.pathname + location.search + (rest.length ? '#' + rest.join('&') : ''));
+    let text = ''; try { text = decodeURIComponent(raw); } catch {}
+    const a = readInvite(text);
+    if (!a) { badAdd = 'Something sent you here to add a device, but what it sent is not a Keykin invite, so it was left alone. Go back to the app and try again.'; return; }
+    const r = param('return'), c = param('challenge'), st = param('state');
+    if (r !== null || c !== null || st !== null) {
+      // An app's return: all three, and the address must be this computer. Anything else is left alone.
+      const ret = r !== null ? returnOk(r) : null;
+      if (r !== null && !ret) { let h = 'somewhere else'; try { h = new URL(r).host || h; } catch {} badAdd = `Something sent you here to add a device and send the approval to ${h}, which is not this computer, so it was left alone.`; return; }
+      if (!ret || !challengeOk(c) || !stateOk(st)) { badAdd = 'Something sent you here to add a device, but what it sent is not complete, so it was left alone. Go back to the app and try again.'; return; }
+      store.set(ADDING, JSON.stringify({ invite: a.text, challenge: c, ret, state: st }));
+    } else store.set(ADDING, JSON.stringify({ invite: a.text }));
+  }
+  function pendingAdd() {
+    let o = null; try { o = JSON.parse(store.get(ADDING) ?? 'null'); } catch {}
+    const a = o && readInvite(o.invite);
+    if (!a) return null;
+    const ret = o.ret ? returnOk(o.ret) : null;
+    return { ...a, challenge: ret ? challengeOk(o.challenge) : null, ret, state: ret ? stateOk(o.state) : null };
+  }
+  // Above the sign-in, while the person signs in: what is waiting, and that nothing happens yet.
+  function addAsking() {
+    if (badAdd) return el('div', { className: 'notice', id: 'addasking', role: 'alert' }, badAdd);
+    const a = pendingAdd();
+    if (!a) return null;
+    return el('div', { className: 'card', id: 'addasking' },
+      el('div', { className: 'small dim' }, 'A device is asking to be added to your account'),
+      el('div', {}, el('strong', { id: 'addname' }, a.name)),
+      el('div', { className: 'small dim' }, 'Sign in below. You are asked once more before it is added.'),
+      el('button', { className: 'linkish small', id: 'addnotnow', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(ADDING, null); document.getElementById('addasking')?.remove(); } } }, 'Do not add it'));
+  }
+  const spaced = (d) => `${d.slice(0, 3)} ${d.slice(3)}`;
+  // The six digits, kept for this tab until they run out, so they are still here if the way back to the app fails.
+  function addedCard(o) {
+    return card(el('h2', {}, `${o.name} was added`),
+      el('p', { className: 'sub', id: 'addline' }, o.ret ? `Done. ${o.name} is signing in.` : 'Done.'),
+      el('div', { className: 'small dim' }, o.ret ? `If ${o.name} did not sign in, type this only into ${o.name} on this computer:` : `Type this only into ${o.name}, with its join code below:`),
+      el('div', { className: 'shortcode mono', id: 'shortcode' }, spaced(o.short)),
+      el('div', { className: 'small dim', id: 'shortwhere' }, `Your account page: ${location.host}. The code works once, for 10 minutes.`),
+      o.join ? el('details', { className: 'small', id: 'addcode' }, el('summary', { className: 'dim' }, 'Its join code'), el('p', { className: 'mono small', id: 'joincode' }, o.join)) : null);
+  }
+  function showAdded(o) {
+    app.replaceChildren(el('div', { className: 'signin' },
+      el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Your account'), el('div', { className: 'dim' }, location.host)),
+      addedCard(o),
+      el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => { store.set(ADDED, null); showAccount(); } } }, 'Go to your account')));
+  }
+  function added() {
+    let o = null; try { o = JSON.parse(store.get(ADDED) ?? 'null'); } catch {}
+    return o && o.until > Date.now() / 1000 && /^\d{6}$/.test(o.short ?? '') ? o : null;
+  }
+
   // ---- The login-page pointer (section 11.1): does the account name a login page yet? ----------------
   // The page asks its own relays for both kinds (10046, and 30078 during the move); KeykinPointer holds the
   // rules. It does not check the signature: the answer only decides what to offer, and a reader such as
@@ -354,12 +440,12 @@
     boxLogin = r.loginPage ?? null;
     me = r;
     if (r.how === 'scan' && passkeysHere() && !(r.passkeys ?? []).some((p) => p.host === location.hostname) && store.get(NOPK) !== '1') await askPasskey();
-    const c = pending();
-    const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c ? findProfile(r.npub, r.relays ?? []) : null]);
+    const c = pending(), a = pendingAdd();
+    const [found, profile] = await Promise.all([findPointer(r.npub, r.relays ?? []), c || a ? findProfile(r.npub, r.relays ?? []) : null]);
     // The account page says, at the top, what is left to do about the sign-in page, and keeps the signer for it.
     holdPointer(r.npub, found, signer, r.relays ?? []);
-    if (!c) return showAccount();
-    showFinish(c, found, signer, r.relays ?? [], profile);
+    if (!c && !a) return showAccount();
+    showFinish(c, found, signer, r.relays ?? [], profile, a);
   }
 
   async function savePassword(username, password) {
@@ -409,7 +495,7 @@
         } catch (x) { line.textContent = pkError(x); }
         save.disabled = false;
       };
-      app.replaceChildren(el('div', { className: 'signin' }, asking(),
+      app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
         el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'You are signed in'), el('div', { className: 'dim' }, location.host)),
         el('div', { className: 'panel' }, el('div', { className: 'half' },
           el('h2', {}, 'Save a passkey so next time it’s one tap'),
@@ -418,8 +504,9 @@
     });
   }
 
-  function showFinish(c, found, signer, relays, profile) {
+  function showFinish(c, found, signer, relays, profile, a = null) {
     const parts = [];
+    if (a) parts.push(addCard(a, profile));
     if (c) parts.push(connectCard(c, profile));
     if (found.state !== 'found' || signer) parts.push(pointerCard(found, signer, relays));
     parts.push(el('button', { className: 'btn', id: 'toaccount', type: 'button', style: 'align-self:flex-start', on: { click: () => showAccount() } }, 'Go to your account'));
@@ -460,6 +547,66 @@
     own.onclick = () => yes('site');
     no.onclick = () => { store.set(PENDING, null); node.replaceWith(el('p', { className: 'small dim', id: 'notsigned' }, `Nothing was sent to ${host ?? 'the site'}.`)); };
     return node;
+  }
+
+  // "Add <device> to your account?" for an app that sent its invite here (#add=). Nothing goes to a device
+  // until Add, even when this browser was signed in already. On Add it leaves the same `invite` note as Devices,
+  // Add a device, and hands the join code back to Marble by a marble://join link.
+  function addCard(a, profile) {
+    const who = profile?.name ?? me?.username ?? (me?.npubText ? me.npubText.slice(0, 12) + '…' : 'your account');
+    const pic = profile?.picture
+      ? el('img', { className: 'avatar small', src: profile.picture, alt: '', referrerPolicy: 'no-referrer' })
+      : el('div', { className: 'avatar small', ariaHidden: 'true' }, who.charAt(0).toUpperCase());
+    const go = el('button', { className: 'btn go', type: 'button', id: 'addgo' }, 'Add');
+    const no = el('button', { className: 'btn', type: 'button', id: 'addno' }, 'Not now');
+    const node = card(
+      el('h2', { id: 'addtitle' }, `Add ${a.name} to your account?`),
+      el('div', { className: 'hello small-hello' }, pic, el('div', {}, el('div', { className: 'name', id: 'addwho' }, who), me?.npubText ? el('div', { className: 'mono small dim' }, me.npubText.slice(0, 16) + '…' + me.npubText.slice(-6)) : null)),
+      el('div', { className: 'small dim', id: 'adddevice' }, `New device: ${a.name}`),
+      el('p', { className: 'small dim', id: 'addwarn' }, `Add it only if you just pressed Sign in on ${a.name}.`),
+      el('div', { className: 'with-note' }, go, no));
+    node.id = 'addcard';
+    go.onclick = () => {
+      const line = el('p', { className: 'sub', id: 'addline', role: 'status' }, 'Waiting for one of your devices…');
+      const slow = el('p', { className: 'small dim', id: 'addslow', hidden: true }, 'No device has answered yet. One of your devices needs to be online with an up-to-date Marble. This page keeps waiting for a few more minutes.');
+      const next = card(el('h2', {}, `Adding ${a.name}`), line, slow);
+      next.id = 'adddone'; next.style.alignSelf = 'stretch';
+      node.replaceWith(next);
+      addHandOff(a, next, line, slow);
+    };
+    no.onclick = () => { store.set(ADDING, null); node.replaceWith(el('p', { className: 'small dim', id: 'notadded' }, `${a.name} was not added.`)); };
+    return node;
+  }
+
+  async function addHandOff(a, box, line, slow) {
+    const r = await api('note_put', { kind: 'invite', text: a.text, ...(a.challenge ? { challenge: a.challenge } : {}) }).catch(() => ({ error: 'no_box' }));
+    if (r.error === 'login') return showLogin(say('login'));
+    if (!r.ok) { line.textContent = say(r.error); return; }
+    store.set(ADDING, null);                     // the box holds it now; a reload must not add it twice
+    const started = Date.now();
+    const t = every(2000, async () => {
+      if (Date.now() - started > 60000) slow.hidden = false;
+      const g = await api('note_get', { note: r.note }).catch(() => null);
+      if (g && g.error === 'login') { clearInterval(t); return showLogin('A device said No, so this browser was signed out.'); }
+      if (!g || !g.ok || g.state === 'waiting') return;
+      clearInterval(t); slow.hidden = true;
+      if (g.state !== 'done') { line.textContent = `No device answered in time. One of your devices needs to be online with an up-to-date Marble. Go back to ${a.name} and try again.`; return; }
+      if (!g.approval) { line.textContent = 'Done, but this page did not get the approval code. Go back to the app and try again.'; return; }
+      const o = { name: a.name, short: g.approval.short, until: g.approval.until, ret: !!a.ret, join: a.ret ? null : g.result };
+      store.set(ADDED, JSON.stringify(o));
+      // On the way back to the app the six digits stay out of sight: they show only if this tab is come back to
+      // (the way back failed), from what was just kept. Without a way back they are what the person needs now.
+      if (!a.ret) return void box.replaceWith(addedCard(o));
+      const going = card(el('h2', {}, `Opening ${a.name}`), el('p', { className: 'sub', id: 'addline', role: 'status' }, `Done. ${a.name} is signing in.`));
+      going.id = 'adddone';
+      box.replaceWith(going);
+      // Back to the app on this computer, with the code (RFC 8252): only a loopback address gets here (returnOk).
+      {
+        const u = new URL(a.ret);
+        u.searchParams.set('code', g.approval.code); u.searchParams.set('state', a.state); u.searchParams.set('join', g.result);
+        location.assign(u.href);
+      }
+    });
   }
 
   async function handOff(c, line, slow, as) {
@@ -534,7 +681,7 @@
       } catch (x) { pkErr.textContent = pkError(x); }
       pkErr.hidden = false; pk.disabled = false;
     } } }, 'Sign in with a passkey') : null;
-    app.replaceChildren(el('div', { className: 'signin' }, asking(),
+    app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Sign in'), el('div', { className: 'dim' }, location.host)),
       pk ? el('div', { className: 'card', id: 'pkcard' }, pk, pkErr) : null,
       el('div', { className: 'panel' },
@@ -611,12 +758,12 @@
         r.open ? go : null, note);
     };
     start();
-    app.replaceChildren(el('div', { className: 'signin' }, asking(),
+    app.replaceChildren(el('div', { className: 'signin' }, asking(), addAsking(),
       el('div', { className: 'title' }, el('h1', { style: 'font-size:26px' }, 'Your account'), el('div', { className: 'dim' }, location.host)),
       el('div', { className: 'panel' }, body), out));
     every(3000, async () => {
       const n = await api('me').catch(() => null);
-      if (n && n.ok && n.held !== false) { if (pending()) afterSignIn(null); else showAccount(); }
+      if (n && n.ok && n.held !== false) { if (pending() || pendingAdd()) afterSignIn(null); else showAccount(); }
       else if (n && n.error === 'login') showLogin(say('login'));
     });
   }
@@ -705,7 +852,9 @@
         el('div', { className: 'grid2' },
           card(el('h2', {}, 'Add a device'), el('div', { className: 'sub' }, 'Paste the new device’s invite here. One of your devices adds it.'),
             noteForm({ kind: 'invite', keep: 600, label: 'Invite from the new device', placeholder: 'Paste the invite', button: 'Send to phone', waiting: 'Waiting for one of your devices…',
-              done: (result) => el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, el('div', { className: 'sub' }, 'Added. Give the new device this join code:'), el('div', { className: 'dashed has', id: 'joincode' }, result)) })),
+              // A pasted invite has no verifier behind it, so these six digits alone let it in (SPEC 11.6): give them only to it.
+              done: (result, g) => el('div', { style: 'display:flex;flex-direction:column;gap:8px' }, el('div', { className: 'sub' }, 'Added. Give the new device this join code:'), el('div', { className: 'dashed has', id: 'joincode' }, result),
+                g?.approval ? el('div', { className: 'sub', id: 'pastecode' }, 'Then type this only into the new device, once, within 10 minutes: ', el('strong', { className: 'mono' }, spaced(g.approval.short))) : null) })),
           card(el('h2', {}, 'Remove blocked devices for good'), el('div', { className: 'sub' }, 'A blocked device still holds its old piece. Removing makes that piece useless. Your npub does not change.'),
             blocked.length ? noteForm({ kind: 'cycle', button: `Remove ${blocked.length} ${blocked.length === 1 ? 'device' : 'devices'}`, plain: true, needs: 'Asks for a Yes on one of your devices', waiting: 'Waiting for a Yes on one of your devices…',
               done: () => { flash = 'Blocked devices are removed for good.'; refresh().then(draw); return el('div', { className: 'sub' }, 'Removed.'); } })
@@ -764,7 +913,7 @@
   function noteForm(o) {
     const box = el('div', { style: 'display:flex;flex-direction:column;gap:10px' });
     const had = o.keep ? keptOf(o.kind) : null;
-    if (had !== null) { box.append(o.done(had)); return box; }
+    if (had !== null) { box.append(o.done(had.result, had.g)); return box; }
     const input = o.label ? el('input', { className: 'field', type: 'text', ariaLabel: o.label, placeholder: o.placeholder ?? '' }) : null;
     const btn = el('button', { className: o.plain ? 'btn' : 'btn go' }, o.button);
     const line = el('span', { className: 'small dim', role: 'status' }, o.needs ?? '');
@@ -782,8 +931,8 @@
         if (g && g.error === 'login') { clearInterval(t); return showLogin('A device said No, so this browser was signed out.'); }
         if (!g || !g.ok || g.state === 'waiting') return;
         clearInterval(t); delete box.dataset.busy;
-        if (g.state === 'done' && o.keep) kept.set(me.npub + '/' + o.kind, { result: g.result, until: Date.now() + o.keep * 1000 });
-        if (g.state === 'done') { const old = document.getElementById('status'); if (old) old.remove(); flash = null; box.replaceChildren(o.done(g.result)); }
+        if (g.state === 'done' && o.keep) kept.set(me.npub + '/' + o.kind, { result: { result: g.result, g }, until: Date.now() + o.keep * 1000 });
+        if (g.state === 'done') { const old = document.getElementById('status'); if (old) old.remove(); flash = null; box.replaceChildren(o.done(g.result, g)); }
         else { line.textContent = 'No device answered in time. Is one of them online?'; btn.disabled = false; }
       });
     });
@@ -886,6 +1035,9 @@
       el('div', { className: 'with-note' }, save, off, line));
   }
 
-  takeConnect();
-  if (fromCamera()) showHandoff(); else if (pending()) afterSignIn(null); else showAccount();
+  takeConnect(); takeAdd();
+  // Come back to this tab from the app's page (the browser may restore it as it was, "Opening …"): show the six
+  // digits kept for it, in case the way back failed.
+  addEventListener('pageshow', (e) => { if (e.persisted && added() && document.getElementById('adddone')) showAdded(added()); });
+  if (fromCamera()) showHandoff(); else if (pending() || pendingAdd()) afterSignIn(null); else if (added()) showAdded(added()); else showAccount();
 })();

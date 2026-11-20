@@ -4,7 +4,8 @@
 * { box-sizing:border-box; }
 html { -webkit-text-size-adjust:100%; }
 body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
-a, button.linkish { color:var(--accent); } a:hover, button.linkish:hover { color:var(--accent-dark); }
+a, button.linkish { color:var(--accent); }
+button.linkish { background:none; border:0; padding:0; font-family:inherit; cursor:pointer; text-decoration:underline; text-align:left; } a:hover, button.linkish:hover { color:var(--accent-dark); }
 p { margin:0; }
 .dim { color:var(--dim); } .small { font-size:13px; } .center { text-align:center; padding:48px 16px; }
 .err { color:var(--danger); }

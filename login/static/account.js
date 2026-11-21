@@ -28,7 +28,7 @@
   const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
   const say = (code) => ({
     wrong: 'That username and password do not match.', slow_down: 'Too many tries. Wait a minute.', no_box: 'The box cannot be reached right now.',
-    cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.', not_open: 'The owner of this server has to let you in first.', not_here: 'This server does not look after your account yet.', gone: 'That ran out. Try again.',
+    cannot_block_box: 'The box itself cannot be blocked.', too_many: 'Too many things are waiting. Try again in a few minutes.', login: 'You were signed out. Sign in again.', not_open: 'The owner of this server has to let you in first.', box_full: 'This server holds as many accounts as its owner lets in. Ask the owner to make room.', not_here: 'This server does not look after your account yet.', gone: 'That ran out. Try again.',
     bad_username: 'A username is 3 to 32 letters, numbers, dots, dashes or underscores, in lower case.', username_taken: 'That username is taken on this box.', password_required: 'Your account always keeps a password. You can change it.',
   }[code] ?? `That did not work (${code}).`);
   const HOW = { password: 'a password', passkey: 'a passkey', scan: 'a device' };

@@ -115,6 +115,8 @@ export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: 
   loginPage?: string
   /** How many named sets the list store keeps per account (box/lists.ts), set on the admin page. KEYKIN_KEPT_SETS overrides it. */
   keptSets?: number
+  /** How many accounts an open box lets in from the account page ([OPEN_ACCOUNTS]), set on the admin page. KEYKIN_OPEN_ACCOUNTS overrides it. */
+  openAccounts?: number
   /** The account page's sessions, by SHA-256(token) in hex. */
   sessions?: Record<string, PageSession> }
 
@@ -129,6 +131,31 @@ const HEX64 = /^[0-9a-f]{64}$/, CHIP = /^0[23][0-9a-f]{64}$/;
 const DEVICE_I = 1, BOX_I = 2;         // the first device and the box, at creation
 const EPOCH_OPS = new Set(['sign', 'ecdh', 'add', 'reveal', 'cycle']);
 const MAX_WAITING = 50, ASK_DAYS = 7, APPROVED_HOURS = 24;
+
+// How much the box keeps (SPEC 6). A box is run for people its admin knows, so these guard against bugs and
+// accidents, not strangers: far above real use, the oldest going first where something can go, and none of
+// them ever refuses a signature. The state file is rewritten whole on every change, so nothing in it may grow
+// without end.
+/**
+ * Devices and boxes in one account, blocked ones included: a person has a handful. Past it `add` is refused
+ * (`too_many_members`). Nothing is dropped to make room: a blocked member's entry is what keeps it refused,
+ * here and at a device that helps while the box is off (SPEC 8g), until a cycle leaves its piece useless.
+ * Removing blocked devices (the cycle) makes room.
+ */
+export const MAX_MEMBERS = 50;
+/**
+ * Setup codes approved in advance and not used yet, in all: the admin's "Make a setup code" and the account
+ * page's `protect`. Each lasts 24 hours anyway; 50 in a day is far more than anyone makes. Past it the oldest
+ * goes. Asks the admin approved are not counted: there are at most 50 waiting, and each is the admin's own yes.
+ */
+export const MAX_CODES = 50;
+/**
+ * The accounts an open box (KEYKIN_OPEN=1) lets in from the account page: it stops once it holds this many,
+ * counting every account. Set on the admin page; KEYKIN_OPEN_ACCOUNTS overrides it. Past it `protect` is
+ * refused (`box_full`): nothing older can go, since each account is someone's piece. The admin's own codes
+ * and approvals still work.
+ */
+export const OPEN_ACCOUNTS = 500;
 /** `notes_wait` (SPEC 11.6): the longest a device's request is held, in seconds, and how many may be held at once for one account. */
 export const WAIT_MOST = 25, WAITS_PER_ACCOUNT = 4;
 /** On a `notes_wait` answer with nothing new yet: the server holds the reply and asks [Box.heldNotes] again later. JSON leaves it out. */
@@ -157,6 +184,8 @@ export function keptSetsOf(v: unknown): number | null {
   const n = typeof v === 'number' ? v : /^\s*[0-9]{1,6}\s*$/.test(String(v ?? '')) ? Number(v) : NaN;
   return Number.isInteger(n) && n >= 0 && n <= 100000 ? n : null;
 }
+/** The open box's account cap as the admin page and KEYKIN_OPEN_ACCOUNTS take it: the same rule, a whole number from 0 to 100000. */
+export const openAccountsOf = keptSetsOf;
 const SET_NAMES: Record<string, string> = { 30000: 'follow set', 30001: 'list', 30002: 'relay set', 30003: 'bookmark set', 30004: 'curation set', 30015: 'interest set', 30030: 'emoji set' };
 /** "bookmark set "reading"", for the activity list. */
 function setName(key: string) {
@@ -185,6 +214,21 @@ export class Box {
     if (!s.accounts) { s.accounts = s.account ? { [s.account.npub]: s.account } : {}; delete s.account; }
     s.requests ??= {};
     this.state = s;
+    // A state file from before the growth limits: bookkeeping they now keep tidy is tidied once, here. Nothing
+    // a person would miss goes, and nothing over a cap that is refused rather than pruned (members, accounts).
+    for (const a of Object.values(this.state.accounts)) this.#forgetRemoved(a);
+  }
+
+  /**
+   * What stays of a member after it left the list (a cycle dropped it): its grants, and the last kind of any
+   * grant whose use is no longer kept. Neither can sign anything: the member is gone, and a grant is refused
+   * by `revoked` and `limits`, which stay as they are. Nothing is added to `revoked`, so no older revoke is
+   * pushed out of its 2000.
+   */
+  #forgetRemoved(a: Account) {
+    const here = new Set(a.members.map((m) => m.key));
+    for (const k of Object.keys(a.grants ?? {})) if (!here.has(k)) delete a.grants![k];
+    for (const id of Object.keys(a.kinds ?? {})) if (a.used?.[id] === undefined) delete a.kinds![id];
   }
 
   /** The accounts, oldest first. */
@@ -217,10 +261,32 @@ export class Box {
     else this.state.keptSets = keptSetsOf(n) ?? refuse('bad_number');
     this.#save();
   }
+  /** The open-door account cap set by KEYKIN_OPEN_ACCOUNTS. When set it wins over the admin setting. */
+  fixedOpenAccounts: number | undefined;
+  /** How many accounts the box may hold and still let one in from the account page ([OPEN_ACCOUNTS]). */
+  get openAccounts(): number { return this.fixedOpenAccounts ?? this.state.openAccounts ?? OPEN_ACCOUNTS; }
+  /** The admin sets the cap, or goes back to the default (null). */
+  setOpenAccounts(n: number | null) {
+    if (n === null) delete this.state.openAccounts;
+    else this.state.openAccounts = openAccountsOf(n) ?? refuse('bad_number');
+    this.#save();
+  }
+  /** Refuses (`box_full`) when the box holds as many accounts as it lets in from the account page. */
+  roomFromPage() {
+    const n = this.accounts().length;
+    if (n >= this.openAccounts) refuseWhy('box_full', `This box holds ${n} account${n === 1 ? '' : 's'}, as many as its admin lets in from the account page. Ask the admin to make room.`);
+  }
   qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode, ...this.#login() }); }
 
-  /** The admin makes room for one more account: a request approved in advance, as a setup code. */
+  /**
+   * The admin makes room for one more account: a request approved in advance, as a setup code. `only` is the
+   * account page's `protect`: a new code for an account replaces its earlier one. Past MAX_CODES unused codes
+   * the oldest goes. A state from before the cap is brought under it here, all at once.
+   */
   newSetupCode(addr: string, now: number, only?: string): string {
+    if (only) for (const r of Object.values(this.state.requests)) if (r.only === only) this.#dropRequest(r.id);
+    const codes = Object.values(this.state.requests).filter((r) => r.state === 'approved' && !r.key).sort((x, y) => (x.decided ?? x.asked) - (y.decided ?? y.asked));
+    for (const r of codes.slice(0, Math.max(0, codes.length - MAX_CODES + 1))) this.#dropRequest(r.id);
     const id = bytesToHex(randomBytes(16));
     this.state.requests[id] = { id, what: 'make', asked: now, state: 'approved', decided: now, ...(only ? { only } : {}) };
     this.#save();
@@ -246,8 +312,14 @@ export class Box {
       const dead = r.state === 'approved' ? now - (r.decided ?? r.asked) > APPROVED_HOURS * 3600 : now - r.asked > ASK_DAYS * 86400;
       if (dead) { delete this.state.requests[r.id]; this.#pending.delete(r.id); changed = true; }
     }
+    // A move started with a code that is gone (ran out, used, taken back) can never finish.
+    for (const id of this.#moving.keys()) if (!this.state.requests[id]) this.#moving.delete(id);
     if (changed) this.#save();
   }
+  /** A request goes, and anything begun with it. The caller saves. */
+  #dropRequest(id: string) { delete this.state.requests[id]; this.#pending.delete(id); this.#moving.delete(id); }
+  /** How many moves (`transfer1`) are open, for tests. */
+  get movesOpen() { return this.#moving.size; }
   /** The request a `create` or `transfer` names, if it may be used by this device now. */
   #usable(id: unknown, device: string, what: 'make' | 'transfer', bringing?: '*'): string {
     if (typeof id !== 'string') refuse('bad_code');
@@ -567,7 +639,8 @@ export class Box {
     from.last = t;
     if (typeof grant === 'string' && /^[0-9a-f]{32}$/.test(grant)) {
       const u = (s.used ??= {}); u[grant] = t;
-      const ids = Object.keys(u); if (ids.length > 2000) delete u[ids[0]];
+      // The grant's last kind goes with its use, so `kinds` stays within the same 2000.
+      const ids = Object.keys(u); if (ids.length > 2000) { delete u[ids[0]]; if (s.kinds) delete s.kinds[ids[0]]; }
     }
     if (t - this.#lastSave >= 60) { this.#lastSave = t; this.#save(); }
   }
@@ -634,6 +707,8 @@ export class Box {
     if (commitmentHex(C)[0].slice(0, 2) !== '02') refuse('bad_piece');          // the key in its even-y form, as BIP-340 wants
     if (this.state.accounts[npub]) refuse('already_here');
     if (this.state.requests[id]?.only && this.state.requests[id].only !== npub) refuse('bad_code');
+    // A code from the account page made before the box filled up waits (it lasts 24 hours) until there is room.
+    if (this.state.requests[id]?.only) this.roomFromPage();
     delete this.state.requests[id];
     this.state.accounts[npub] = {
       commitment: commitmentHex(C), npub, i: BOX_I, share: scalarHex(share),
@@ -670,6 +745,8 @@ export class Box {
     if (!m || m.device !== device) refuse('no_transfer');
     const w = body.welcome;
     if (!w || w.npub !== m!.account || !HEX64.test(body.oldBox ?? '')) refuse('bad_request');
+    // The list comes from the device. The old box is in it and this box takes its place, so its length is the account's.
+    if (Array.isArray(body.members) && body.members.length > MAX_MEMBERS) this.#tooMany();
     let C: Commitment, share: bigint;
     try {
       C = commitmentFrom(w.commitment);
@@ -811,6 +888,7 @@ export class Box {
     if (m.kind !== 'device' && m.kind !== 'box') refuse('bad_member');
     if (m.chip !== undefined && !CHIP.test(m.chip)) refuse('bad_chip_key');
     if (m.i !== s.next || s.members.some((x) => x.key === m.key)) refuse('already_listed');   // indices are never reused
+    if (s.members.length >= MAX_MEMBERS) this.#tooMany();      // before the index is used up
     s.next++;
     const helpers = [from.i, s.i].sort((a, b) => a - b);
     const mine = F.repairDeltas(this.#C(s), helpers, s.i, BigInt('0x' + s.share), m.i);
@@ -821,6 +899,8 @@ export class Box {
     this.#save();
     return { ok: true, delta: sealTo(this.state.sk, from.key, 'repair-delta', mine.get(from.i)!) };
   }
+
+  #tooMany(): never { return refuseWhy('too_many_members', `An account has at most ${MAX_MEMBERS} devices and boxes, blocked ones included. Removing blocked devices makes room.`); }
 
   #welcomePut(s: Account, from: Member, body: any) {
     const w = s.welcomes[body.key] ?? refuse('no_welcome');
@@ -917,6 +997,9 @@ export class Box {
     s.epoch++;
     s.members = s.members.filter((m) => !m.blocked);
     for (const k of Object.keys(s.catchups)) if (!s.members.some((m) => m.key === k)) delete s.catchups[k];
+    this.#forgetRemoved(s);                  // the sign-ins of the devices just dropped go with them
+    // No cap on these (SPEC 8f): a member that stays away needs every change since, sealed to it so the box cannot
+    // add them up, and missing one leaves its piece useless for good. Each one is a cycle a person asked for.
     for (const m of others) (s.catchups[m.key] ??= []).push({ from: from.key, sealed: given[m.key] });
     this.#save();
     return { ok: true, epoch: s.epoch, commitment: s.commitment };

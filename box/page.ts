@@ -128,9 +128,12 @@ export function codePage(o: { qrText: string; csrf: string; nonce: string; logou
 export interface LoginPageSetting { addr?: string; fixed: boolean; suggest?: { addr: string; from: 'here' | 'login' } }
 /** How many named sets the box compares per account, and whether KEYKIN_KEPT_SETS fixed it. */
 export interface KeptSetsSetting { n: number; fixed: boolean }
+/** On an open box: how many accounts it may hold and still let one in from the account page, whether
+ *  KEYKIN_OPEN_ACCOUNTS fixed it, and how many it holds now. */
+export interface OpenAccountsSetting { n: number; fixed: boolean; held: number }
 
 /** `door`: the public address if one is set, and when Keykin Login last reached the box (0 if never). */
-export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number; loginPage?: LoginPageSetting; keptSets?: KeptSetsSetting }) {
+export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number; loginPage?: LoginPageSetting; keptSets?: KeptSetsSetting; openAccounts?: OpenAccountsSetting }) {
   const waiting = o.requests.filter((r) => r.state === 'waiting');
   const asks = `<div class="card"><h2>Waiting for your answer</h2>
   <p class="sub">${waiting.length ? 'Nothing is made until you approve.' : 'Nobody is asking for an account.'}</p>
@@ -169,6 +172,17 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
     <input id="ks" name="sets" type="text" inputmode="numeric" autocomplete="off" value="${ks.n}" style="margin-bottom:0">
     <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button></div></form>`}</div>`;
 
+  // Only on an open box (KEYKIN_OPEN=1): past this the account page is told the box is full. Nothing is refused to the admin.
+  const oa = o.openAccounts;
+  const openCard = !oa ? '' : `<div class="card" id="openaccounts"><h2>Accounts from the account page</h2>
+  <p class="sub">This box is open: anyone who signs in on the account page can bring their account here. Once it holds this many accounts, it tells them it is full. Codes you make and asks you approve still work.</p>
+  <div class="kv"><span>Holds now</span><span>${oa.held}</span></div>
+  ${oa.fixed ? `<div class="kv"><span>Lets in up to</span><span>${oa.n}</span></div>
+  <p class="sub small">Set by KEYKIN_OPEN_ACCOUNTS on this box. Change it there.</p>` : `<form method="post" action="/admin/openaccounts">${hidden(o.csrf)}
+    <label class="small dim" for="oa">Lets in up to</label>
+    <input id="oa" name="accounts" type="text" inputmode="numeric" autocomplete="off" value="${oa.n}" style="margin-bottom:0">
+    <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button></div></form>`}</div>`;
+
   // Until the address is set (and KEYKIN_LOGIN_URL does not set it), the page says so above everything else.
   const alert = lp.fixed || lp.addr ? '' : `<div class="alerts"><div class="alert" id="loginalert" role="alert"><h2>Set your login page address</h2>
   <p class="sub">New invites need it, so sites can find this box's accounts by name.</p>
@@ -203,5 +217,6 @@ ${asks}
 ${door}
 ${loginCard}
 ${keptCard}
+${openCard}
 </div><div class="col">${accounts || '<div class="card"><h2>No accounts yet</h2></div>'}</div></div>`);
 }

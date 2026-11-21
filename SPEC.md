@@ -145,6 +145,31 @@ keeps the 200 most recently changed sets") and lists it under `uncompared` in
 refuses a signature: that set is simply not compared until it is signed again, when it is kept as
 the newest. Replaceable lists are a fixed handful of kinds and have no cap.
 
+**How much the box keeps** (2026-11-20). The box rewrites the whole state file on every change, so
+nothing in it may grow without end. The people using a box are ones its admin knows, so the limits
+guard against bugs and accidents, not strangers: they sit far above real use, the oldest goes first
+where something can go, and none of them ever refuses a signature. The numbers are a first try.
+
+| What | At most | Past it | Where |
+|---|---|---|---|
+| Devices and boxes in an account, blocked ones included | 50 (`MAX_MEMBERS`) | `add` is refused, `too_many_members`. Nothing is dropped | Section 7 |
+| Accounts on an open box, from the account page | 500, set on the admin page or by `KEYKIN_OPEN_ACCOUNTS` | `protect` is refused, `box_full` | Section 11.6 |
+| Setup codes made in advance and not used yet | 50 in all (`MAX_CODES`), one per account from `protect` | The oldest goes; a new `protect` code replaces that account's last | Section 11.4 |
+| Waiting asks | 50 | `ask` is refused, `too_many` | Section 11.4 |
+| Page sessions of one account | 100 | The least recently used is signed out, and the activity says so | Section 11.6 |
+| Page sessions of accounts this box does not hold | 1000 in all (`MAX_UNHELD_SESSIONS`) | The least recently used goes | Section 11.6 |
+| Passkeys of an account | 20 | `pk_add_start` is refused, `too_many` | Section 11.3 |
+| Revoked grants, grants' last use, limits | 2000 each | The oldest goes; a grant's last kind goes with its last use | Section 11.5 |
+| Browsers remembered for nostrconnect codes | 20, for 30 days | The oldest goes | Section 11.5 |
+| Activity lines | 60 | The oldest goes | |
+| Named sets the list store compares | 200, set on the admin page or by `KEYKIN_KEPT_SETS` | Not compared, never refused | The soft cap, above |
+
+What a device that was removed left behind goes at the cycle that removed it (section 8f). The
+changes waiting for a member that stays away (`catchups`) have no cap (section 8f). A state file from
+before these limits loads as it is: what is pruned is brought under its limit the next time one is
+added (a code, a session), a removed device's grants and stray last kinds go at load, and members and
+accounts over their limit all stay, with nothing more taken in until there is room.
+
 **Removing a box.** An account can hold a second box, as a backup. Any member can block it like a
 device, and cycling the keys afterwards (section 8f) drops it for good. The box answering a request
 cannot be blocked through it (`cannot_block_box`), whoever asks: the admin, the account page or a
@@ -175,6 +200,9 @@ It is never on the public side.
 - **Make a setup code** for one new account: a request approved in advance, good for 24 hours.
 - **Lists the box compares:** how many named sets the list store keeps per account (section 6,
   The soft cap). Shown, not editable, when `KEYKIN_KEPT_SETS` sets it.
+- **Accounts from the account page**, on an open box only (`KEYKIN_OPEN=1`): how many accounts it may
+  hold and still let one in by `protect` (section 11.6), 500 by default, and how many it holds now.
+  Shown, not editable, when `KEYKIN_OPEN_ACCOUNTS` sets it.
 - Every button carries a per-session token.
 
 ## 6b. Keykin Login and the side door
@@ -206,6 +234,13 @@ FROST's share repair, each computes a half of the piece for the new index. The b
 waits at the box, sealed to the newcomer. The device's half follows with `welcome_put`. The
 newcomer opens both, adds them, and checks the result against the commitment and against the
 npub it was told. The halves are dropped once the newcomer has signed.
+
+**At most 50 members** (2026-11-20), devices and boxes, blocked ones and ones waiting for their approval
+included. One more `add` is refused with `too_many_members` and the reason ("An account has at most 50
+devices and boxes, blocked ones included. Removing blocked devices makes room."), before its index is
+used. Nothing is dropped to make room: a blocked member's entry is what keeps it refused, at the box and
+at a device that helps while the box is off (section 8g), until a cycle leaves its piece useless.
+Cycling (section 8f) removes blocked members and makes room. A state file already over 50 keeps them all.
 
 **A member added through the account page waits for its approval** (Aaron, 2026-11-19, after a red-team
 finding: anyone could put their own invite in an `add=` link, and a person signed in to their page might
@@ -383,6 +418,14 @@ ends that. It needs the fingerprint.
 A blocked member gets no change, so its old piece no longer fits with anyone's. A newcomer that
 has not collected its piece yet holds up a cycle (`pending_welcome`), so it is never stranded.
 Whoever picks `b1` learns nothing about the key from it.
+
+A dropped member's grants (section 11.5) go with it at the cycle. Nothing is added to `revoked` for
+them, so no older revoke is pushed out; their `limits` stay until they age out as before.
+
+The changes left for a member (`catchups`) have no cap. One that stays away needs every change since,
+each sealed to it so the box cannot add them up, and missing one would leave its piece useless for
+good. Refusing the cycle instead would leave a blocked piece working. Each change is a cycle a person
+asked for, so they grow only as fast as people cycle.
 
 ## 8g. When the box is off
 
@@ -713,6 +756,11 @@ transfer), when it was asked, and the first 8 characters of the device's member 
 Approve and Refuse. The admin can also make an approved request with no device asking; its id
 is the `code` in the setup code the admin page shows.
 
+**At most 50 unused codes** (2026-11-20): requests approved in advance, from the admin page and from the
+account page's `protect` (section 11.6), in all. Making one more drops the oldest. A new `protect` code
+replaces that account's earlier one, so an account has at most one. Asks the admin approved are not
+counted. A move started with a code that is gone (`transfer1`, below) is forgotten with it.
+
 **Making.** With an approved request the device runs section 2, sending `"request": "<id>"`
 with `create1` and `create2` in place of the old `code`. The first device is index 1 and the box
 is index 2, as before.
@@ -729,7 +777,8 @@ being whole. The account keeps its npub and its devices.
    where `welcome` is the old box's answer from step 3, `oldBox` the old box's member key, and
    `members` and `next` the list as the old box gives it. The new box builds its piece, checks it
    against the commitment, and stores the account with the old box left out of the list and itself
-   in its place. The device must be an unblocked device on that list.
+   in its place. The device must be an unblocked device on that list. A list of more than 50 is
+   refused with `too_many_members` (section 7), and the account stays on the old box.
 5. The device cycles the keys on the new box (section 8f). The old box gets no change, so its
    piece stops fitting. Other devices are told the new address with a join text,
    `{ keykin: 2, join: { addr, boxKey, npub } }` naming the new box, and switch to it ("moved"):
@@ -771,7 +820,7 @@ each device tells the box what it has let in.
 
   A nostrconnect code may carry `device=<label>`; sites we control send it, and the device keeps it
   with the site and reports it. The box also keeps the last event kind signed for each grant (from a
-  `sign` naming it). The page's `me` gives each grant `client`, `device`, `via`, `browser` and
+  `sign` naming it), for as long as it keeps that grant's last use (at most 2000 grants). The page's `me` gives each grant `client`, `device`, `via`, `browser` and
   `lastKind`, with `deviceKey` and `deviceName` for the device that let it in. Sites and apps shows the
   name and then a line like "Chrome on Windows · signed in 19 Nov 06:14 through your login page ·
   approved by Pixel 9a · last used 2 h ago, last posted a reaction · key ab12…", leaving out what is
@@ -908,7 +957,13 @@ other calls are `logout` and `protect`. `protect` returns a setup code made for 
 (a request approved in advance, with `only: <npub>`): the phone scans it and brings the account
 in (`import`), keeping the whole key as its backup. The code is refused for any other account
 and for making a new one. `protect` works only on an open box (`KEYKIN_OPEN=1`); otherwise it
-answers `not_open` and the account needs a code from the admin page.
+answers `not_open` and the account needs a code from the admin page. An open box lets accounts in this
+way while it holds fewer than 500 (set on the admin page, section 6a, or by `KEYKIN_OPEN_ACCOUNTS`,
+which wins), counting every account. Past that, `protect` answers `box_full` with the reason as `why`
+("This box holds 500 accounts, as many as its admin lets in from the account page. Ask the admin to
+make room."), and so does `import` with a `protect` code made before the box filled; that code stays
+good for its 24 hours, for when there is room. The admin's own codes still work. A new `protect`
+replaces the account's earlier code (section 11.4).
 
 **A site can send the person here to sign in.** A link to the page may carry a site's NIP-46
 code in the fragment: `https://<login page>/#connect=<encodeURIComponent(nostrconnect://…)>`.
@@ -1209,7 +1264,10 @@ with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kin
 account page. Sessions live in the state file under `sessions`, keyed by the SHA-256 of the token's hex
 text; the token itself is only in the browser's cookie. A passkey session's `last` is saved at most
 once a minute, so a crash can cost a sliding session up to a minute. An account keeps at most 100
-sessions, the least recently used going first. Keykin Login sends `agent` only on the calls that make a
+sessions, the least recently used going first, and the activity says so ("A browser was signed out to
+make room: an account keeps at most 100 signed in"). Sessions of accounts the box does not hold (made by
+`signin`, which takes any key) are at most 1000 in all, the least recently used going first; there is
+no activity to tell. A state file over either is brought under it at the next new session. Keykin Login sends `agent` only on the calls that make a
 session (`pw_login`, `pk_login`, `signin`, `login_wait`), drops any `agent` the page sends, gives a
 passkey session's cookie 90 days and renews it on each `me`, and clears the cookie when
 `logout_browser` ends the browser asking (the box answers `{ ok, this }`). A session for an account the
@@ -1275,8 +1333,9 @@ check also keeps the device list and grants fresh, and is all it does with an ol
   so signing through a helper they ask nothing.
 - The box compares a list only with the last version it signed. A version signed while the box was
   off (section 8g), or by another signer, is not known to it, so it may compare with an older one.
-- Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and
-  keep a username locked by guessing wrong. None of that reaches a key, but it can be a nuisance.
+- Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes,
+  sign in with keys of their own (up to 1000 sessions for keys the box does not hold, pushing out older
+  ones), and keep a username locked by guessing wrong. None of that reaches a key, but it can be a nuisance.
 - The side port and, behind another login, the admin page trust the network they are on. On an Umbrel,
   another app on the same machine could reach them.
 - Logging in to the account page by scanning trusts the person to scan only their own page.

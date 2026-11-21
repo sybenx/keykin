@@ -228,6 +228,9 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     assert.equal(taps.length, 1);
     await page.waitForSelector('text=Nothing to remove');
     assert.equal(await page.locator('text=MacBook').count(), 0);
+    // Its sign-ins went with it (SPEC 8f). The Work PC lets the same site in again.
+    assert.ok(!Object.values(w.box.box.only()!.grants ?? {}).flat().some((g) => g.id === jumble.id));
+    await D.reportGrants(work, wh, [jumble], w.send);
 
     // Sites and apps: what is signed in, revoke, and a bunker link from the phone.
     await page.click('nav >> text=Sites and apps');

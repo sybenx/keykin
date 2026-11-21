@@ -12,7 +12,14 @@ import { eventId } from '../src/event.ts';
 // How long a page session lasts (SPEC 11.6): a passkey's 90 days start again with each call; a password's
 // or a scan's 12 hours run from sign-in.
 export const PASSKEY_SECONDS = 90 * 86400, SESSION_SECONDS = 12 * 3600;
-const MAX_SESSIONS = 100;          // per account; the least recently used goes first
+/** Page sessions per account, the least recently used going first. The account's activity says so. */
+export const MAX_SESSIONS = 100;
+/**
+ * Page sessions for accounts this box does not hold, in all (SPEC 11.6). `signin` takes any key, so without
+ * this they would only be bounded by how fast sign-ins come. The least recently used goes first. There is no
+ * activity to tell: the box holds no such account.
+ */
+export const MAX_UNHELD_SESSIONS = 1000;
 const LOGIN_SECONDS = 180, NOTE_SECONDS = 600, CHALLENGE_SECONDS = 900, PROOF_SKEW = 600;
 /** The kind of the event that proves who is signing in: a login event (NIP-42's kind), which signers sign without asking. */
 export const PROOF_KIND = 22242;
@@ -125,6 +132,7 @@ export class PageApi {
           case 'me': return { ok: true, how: ses.how, npub: ses.account, held: false, open: this.open(), browsers: this.#browsers(ses.account, hash) };
           case 'protect': {
             if (!this.open()) refuse('not_open');
+            this.box.roomFromPage();
             return { ok: true, text: this.box.newSetupCode(this.addr(), now, ses.account) };
           }
           case 'logout': case 'logout_all': this.#end(hash); return { ok: true };
@@ -201,7 +209,7 @@ export class PageApi {
         default: return refuse('unknown_call');
       }
     } catch (e) {
-      if (e instanceof KeykinError) return { error: e.code };
+      if (e instanceof KeykinError) return { error: e.code, ...(e.why ? { why: e.why } : {}) };
       throw e;
     }
   }
@@ -213,7 +221,7 @@ export class PageApi {
   async request(body: any, now: number): Promise<any> {
     if (typeof body?.call !== 'string' || !body.call.startsWith('pk_')) return this.call(body, now);
     try { this.#tidy(now); this.lastCall = now; return await this.#passkey(body, now); }
-    catch (e) { if (e instanceof KeykinError) return { error: e.code }; return { error: 'wrong' }; }
+    catch (e) { if (e instanceof KeykinError) return { error: e.code, ...(e.why ? { why: e.why } : {}) }; return { error: 'wrong' }; }
   }
   #needs(body: any): Need {
     // A site's switches (`scopes`) follow the limit rows: turning one on gives the site more, like lifting a
@@ -328,8 +336,12 @@ export class PageApi {
     const all = this.#all();
     // Confirming with a passkey or a scan replaces a weaker session of the same account (an upgrade in place).
     if (typeof old === 'string' && HEX64.test(old) && all[hashOf(old)]?.account === account) delete all[hashOf(old)];
-    const mine = Object.entries(all).filter(([, s]) => s.account === account).sort((x, y) => x[1].last - y[1].last);
-    for (const [h] of mine.slice(0, Math.max(0, mine.length - MAX_SESSIONS + 1))) delete all[h];
+    const lru = (list: [string, PageSession][], most: number) => list.sort((x, y) => x[1].last - y[1].last).slice(0, Math.max(0, list.length - most + 1));
+    const ended = lru(Object.entries(all).filter(([, s]) => s.account === account), MAX_SESSIONS);
+    for (const [h] of ended) delete all[h];
+    if (ended.length) this.box.happened(account, `A browser was signed out to make room: an account keeps at most ${MAX_SESSIONS} signed in`, now);
+    // An old state over the cap is brought under it here, all at once.
+    if (!this.box.state.accounts[account]) for (const [h] of lru(Object.entries(all).filter(([, s]) => !this.box.state.accounts[s.account]), MAX_UNHELD_SESSIONS)) delete all[h];
     const token = bytesToHex(randomBytes(32));
     all[hashOf(token)] = { account, how, made: now, last: now, agent: typeof agent === 'string' ? agent.slice(0, 200) : '' };
     this.box.touch();

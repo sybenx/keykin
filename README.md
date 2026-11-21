@@ -13,6 +13,7 @@ My devices and my box. Any two pieces sign.
 - `site/`: sign-in by a scanned code for web pages (QRST signer-ticket). `node tools/build-site.mjs`.
 - `signin/`: name-first sign-in for web sites (Marble Web, Discover, Tube), the one shared copy. Plain browser modules; see `signin/README.md`. Sites take a copy with `node tools/signin-copy.mjs <folder>`.
 - `vendor/qrst.js`: the QRST library, bundled from the `qr-secret-transfer` repo by `node tools/build-qrst.mjs`.
+- `device-rs/`: the device side in Rust (lifted from Marble on Mac) and `keykin`, a signer for Terminal whose piece is sealed by the Secure Enclave. See "Signing from Terminal" below.
 - `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
 
 ```bash
@@ -48,6 +49,35 @@ Sign in to a site: run this, then paste the link it prints into the site's remot
 ```bash
 npm run keykin -- bunker wss://your.relay
 ```
+
+## Signing from Terminal
+
+`device-rs` builds `keykin`, which makes this Mac a device of your account the way your phone is. Its piece is
+sealed by the Mac's Secure Enclave, and every signature asks for Touch ID. There's no nsec, no bunker link and
+nothing in a plain file that can sign. It needs Xcode's command line tools (`swiftc`) to build.
+
+```bash
+cd device-rs && cargo build --release && mkdir -p ~/.local/bin && cp target/release/keykin ~/.local/bin/
+```
+
+```bash
+keykin join
+```
+
+Marble on the web opens in your browser and finds your account page. Press **Add** there and this Mac joins as
+"<this Mac's name> (Terminal)". If the browser can't come back, type the six digits your account page shows,
+with its address, where `keykin join` waits.
+
+```bash
+keykin sign '{"kind":1,"content":"hello"}' | nak event wss://relay.example
+```
+
+The Touch ID prompt says what is signed ("sign a note (kind 1): “hello” as you"). Your box still decides what is
+hard to undo. keykin never says Yes for you: what the box asks about is signed in Marble or on your phone, and
+what is never done by accident only on your phone. `keykin status` shows who this Mac signs as, and
+`keykin forget` deletes its sealed piece (block it on your phone too).
+
+Linux and Windows aren't done yet: `keykin join` says so rather than keeping a piece in a plain file.
 
 ## The Android app
 

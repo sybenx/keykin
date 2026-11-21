@@ -1,0 +1,36 @@
+[package]
+name = "keykin-device"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Being a Keykin device from Rust: the device core, and `keykin`, a signer for Terminal whose piece is sealed by the Secure Enclave"
+
+[lib]
+name = "keykin_device"
+
+[[bin]]
+name = "keykin"
+path = "src/main.rs"
+
+[dependencies]
+keykin-frost = { path = "../frost" }
+k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+sha2 = "0.10"
+hex = "0.4"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+zeroize = "1"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt", "time"] }
+base64 = "0.22"
+bech32 = "0.11"
+rand_core = { version = "0.6", features = ["getrandom"] }
+url = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true

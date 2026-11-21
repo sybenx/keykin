@@ -88,7 +88,8 @@ test('the extension: set up with the box, a site signs in, signs and encrypts, t
     assert.equal(await tryIt({ sign: follows }), onlyPosts);
     assert.equal(await tryIt({ encrypt: friend }), onlyPosts);
     b.page.call({ call: 'limit', session, grant: grants()[0].id, to: null }, now());
-    assert.equal(await tryIt({ sign: follows }), 'ok');
+    // Lifted: the follow list now reaches the box, which has no earlier version to compare it with, so it is asked about.
+    assert.match(await tryIt({ sign: follows }), /Replace your follow list: there is no earlier version here to compare it with/);
     // Revoked on the account page: the next signature fails, and after that the extension asks again.
     const first = grants()[0].id;
     b.page.call({ call: 'revoke', session, grant: first }, now());

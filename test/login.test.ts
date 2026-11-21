@@ -241,6 +241,8 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.waitForSelector('text=jumble.social can only post now.');
     assert.ok(await page.isChecked('input[aria-label="Posts only for https://jumble.social"]'));
     const follows = { pubkey: held.npub, created_at: 1700000000, kind: 3, tags: [['p', 'a'.repeat(64)]], content: '' };
+    // (The person's own follow list first: a site's write of a list the box has no version of is asked about.)
+    await D.signEvent(work, wh, { ...follows, created_at: 1699999999 }, w.send);
     await assert.rejects(D.signEvent(work, wh, follows, w.send, undefined, jumble.id), /not_allowed/);
     assert.ok(verifyEvent(await D.signEvent(work, wh, note(held.npub), w.send, undefined, jumble.id)));
     await page.uncheck('input[aria-label="Posts only for https://jumble.social"]');

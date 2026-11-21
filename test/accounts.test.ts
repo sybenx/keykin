@@ -549,6 +549,8 @@ test('per-site limits: a grant limited to posting signs posts only and gets no m
   for (const k of [0, 3, 4, 5, 9735, 10002, 30023]) await assert.rejects(D.signEvent(laptop, lh, ev(k, [['p', 'a'.repeat(64)]], '{"name":"x"}'), send, NOW, site.id), /not_allowed/, `kind ${k}`);
   await assert.rejects(D.nip44Encrypt(laptop, lh, held.npub, 'can it read?', send, NOW, site.id), /not_allowed/);
   // Only that grant: another one, and the person's own use, are untouched, on any device.
+  // (The person's own profile first: an app's write of a list the box has no version of is asked about.)
+  await D.signEvent(phone, held, { ...ev(0, [], '{"name":"Aaron"}'), created_at: NOW - 1 }, send, NOW);
   assert.ok(valid(await D.signEvent(phone, held, ev(0, [], '{"name":"Aaron"}'), send, NOW, app.id)));
   assert.ok(valid(await D.signEvent(laptop, lh, ev(3, [['p', 'a'.repeat(64)]]), send, NOW)));
   await D.nip44Encrypt(laptop, lh, held.npub, 'mine', send, NOW);

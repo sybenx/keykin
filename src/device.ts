@@ -93,11 +93,12 @@ const pieceFor = (h: Held, child?: Child): Piece => (child ? childPiece(h.piece,
  * `fp`: the fingerprint, for an event that is never done by accident (level 2, SPEC 11.6): the box answers such an
  * event `needs_fingerprint` with its words, and `tapped` alone never signs it. Only the phone passes it; the
  * command line and the bunker never do, so they can never sign one.
+ * `prev`: the newest signed version of this list the device knows (SPEC 11.6), compared with when it is newer than the box's.
  */
-export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean, child?: Child, fp?: Fingerprint) {
+export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean, child?: Child, fp?: Fingerprint, prev?: object) {
   const id = eventId(ev);
   let mine = ask(pieceFor(h, child), id);
-  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(pieceFor(h, child), id)).commit, grant, tapped, child: child?.t }), fp);
+  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(pieceFor(h, child), id)).commit, grant, tapped, child: child?.t, prev }), fp);
   if (r.id !== id) refuse('wrong_id');
   return { ...ev, id, sig: finish(pieceFor(h, child), id, mine, { commit: r.commit, z: r.z }) };
 }

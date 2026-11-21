@@ -87,6 +87,13 @@
     const o = senderOf();
     if (o && o !== location.origin) store.set(CAME, JSON.stringify({ origin: o, at: Date.now() }));
   }
+  // A visit the person started themselves (typed, bookmarked, a new tab) with nothing in the fragment: what this tab
+  // kept from an earlier visit (the site that sent it, a device's six digits) belongs to that visit, not this one.
+  function freshVisit() {
+    let nav = null; try { nav = performance.getEntriesByType('navigation')[0]?.type ?? null; } catch {}
+    if (nav !== 'navigate' || senderOf() || /(^|[#&])(connect|add|p)=/.test(location.hash)) return;
+    store.set(CAME, null); store.set(ADDED, null);
+  }
   function cameFrom() {
     let o = null; try { o = JSON.parse(store.get(CAME) ?? 'null'); } catch {}
     if (!o || typeof o.origin !== 'string' || !/^https?:\/\/[^\s/?#]+$/.test(o.origin) || !(Date.now() - o.at < 30 * 60 * 1000)) return null;
@@ -178,6 +185,7 @@
     const rest = before.filter((x) => !/^(challenge|return|state)=/.test(x));
     history.replaceState(null, '', location.pathname + location.search + (rest.length ? '#' + rest.join('&') : ''));
     let text = ''; try { text = decodeURIComponent(raw); } catch {}
+    store.set(CAME, null);                       // what sent this is an app adding a device, not a site to connect
     const a = readInvite(text);
     if (!a) { badAdd = 'Something sent you here to add a device, but what it sent is not a Keykin invite, so it was left alone. Go back to the app and try again.'; return; }
     const r = param('return'), c = param('challenge'), st = param('state');
@@ -903,7 +911,7 @@
               : el('div', { className: 'with-note' }, el('button', { className: 'btn', disabled: true }, 'Nothing to remove'))))],
       sites: () => [
         head('Sites and apps', 'Everything that can sign as you. Revoking here stops it at the box, even if the device that let it in is off.'),
-        el('div', { className: 'card rows' }, me.grants.length ? me.grants.map(siteRow)
+        el('div', { className: 'card rows' }, me.grants.length ? globalThis.KeykinRows.grantOrder(me.grants).map(siteRow)
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         link('Sign in to another app', 'home')],
       security: () => [
@@ -1070,7 +1078,7 @@
     s.busy = false;
     if (r.error === 'login') return showLogin(say('login'));
     if (!r.ok) { s.codeErr = say(r.error); return restick(); }
-    s.codeNote = r.note; s.cp = 'sending'; restick(); stickTick(s);
+    s.codeNote = r.note; s.dir = 'code'; s.cp = 'sending'; restick(); stickTick(s);
   }
   const globe = () => {
     const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1124,7 +1132,9 @@
       const say_ = live(w);
       const slot = el('div', { className: 'dashed' + (link ? ' has' : ''), id: 'bunkerlink' }, link ?? (s.lp === 'making' ? 'Your phone is making the link…' : 'Your link shows up here.'));
       const out = [say_('div', { className: 'sub', id: 'stickline' }, () => `${Site()} asked for a link, so your end makes one. Paste it into ${theSite()}'s sign-in box.`), slot];
-      if (s.lp === 'idle') out.push(el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'makelink', type: 'button', on: { click: (e) => makeLink(s, e.currentTarget) } }, 'Make a link')));
+      if (s.lp === 'idle') out.push(el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'makelink', type: 'button', on: { click: (e) => makeLink(s, e.currentTarget) } }, 'Make a link')),
+        // Most sites show a nostrconnect:// code instead: the box for it is right here, not behind a switch.
+        live(w)('div', { className: 'sub', id: 'orcode' }, () => `Or, if ${theSite()} shows a nostrconnect:// code, paste it here.`), ...pasteBox(false));
       if (s.lp === 'waiting' && link) {
         const copy = el('button', { className: 'btn go', id: 'copylink', type: 'button' }, 'Copy link');
         copy.onclick = async () => { try { await navigator.clipboard.writeText(link); copy.textContent = 'Copied'; } catch { getSelection()?.selectAllChildren(slot); } };
@@ -1132,17 +1142,21 @@
           say_('div', { className: 'sub', id: 'stickwait', role: 'status' }, () => `Waiting for ${theSite()} to use it. You can go back to ${theSite()} now.`));
       }
       if (s.err) out.push(el('p', { className: 'err small', role: 'alert', id: 'stickerr' }, s.err));
-      out.push(flipTo('code', () => `${Site()} showed a code instead? Paste it here`)(w));
+      if (s.lp !== 'idle') out.push(flipTo('code', () => `${Site()} showed a code instead? Paste it here`)(w));
       return out;
     };
-    const codeBody = (w) => {
+    // The site's nostrconnect:// code and Connect: on the link side before a link is made, and on the code side.
+    const pasteBox = (sending) => {
       const err = el('p', { className: 'err small', role: 'alert', id: 'codeerr' }, s.codeErr);
-      const sending = s.cp === 'sending';
       const ta = el('textarea', { className: 'field mono', id: 'sitecode', rows: 3, placeholder: 'nostrconnect://…', ariaLabel: 'The site\'s code', spellcheck: false, value: s.code, disabled: sending,
         on: { input: (e) => { s.code = e.currentTarget.value; s.codeErr = ''; err.textContent = ''; } } });
       const go = el('button', { className: 'btn go', id: 'stickgo', type: 'button', disabled: sending, on: { click: (e) => sendCode(s, e.currentTarget, err) } }, 'Connect');
+      return [ta, el('div', { className: 'with-note' }, go), err];
+    };
+    const codeBody = (w) => {
+      const sending = s.cp === 'sending';
       return [live(w)('div', { className: 'sub', id: 'stickline', role: 'status' }, () => sending ? `Your phone is answering ${theSite()}.` : `${Site()} made the code, so your end takes it. Paste it here.`),
-        ta, el('div', { className: 'with-note' }, go), err, flipTo('link', () => `${Site()} wants a link instead? Make one`)(w)];
+        ...pasteBox(sending), flipTo('link', () => `${Site()} wants a link instead? Make one`)(w)];
     };
     const doneBody = () => [
       el('div', { className: 'sub', id: 'stickline' }, 'It signs as you now. It lives in Sites and apps, where you can limit or revoke it.'),
@@ -1245,7 +1259,7 @@
       el('div', { className: 'with-note' }, save, line));
   }
 
-  noteCameFrom(); takeConnect(); takeAdd();
+  freshVisit(); noteCameFrom(); takeConnect(); takeAdd();
   // Come back to this tab from the app's page (the browser may restore it as it was, "Opening …"): show the six
   // digits kept for it, in case the way back failed.
   addEventListener('pageshow', (e) => { if (e.persisted && added() && document.getElementById('adddone')) showAdded(added()); });

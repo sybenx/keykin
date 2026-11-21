@@ -688,14 +688,12 @@ test('connecting a site from the account page: a link or a code, and the site sh
     await page.click('nav >> text=Home');
     assert.equal(await page.textContent('#sticktitle'), 'iris.example is connected');
 
-    // Connect another site, then the site showed a code instead.
+    // Connect another site: the site showed a code instead, and the box for it is on the card from the start.
     await page.click('#stickagain');
     await page.waitForSelector('#makelink');
-    await page.click('#flipcode');
-    assert.equal(await page.getAttribute('#stickrow', 'data-dir'), 'code');
-    assert.equal(await page.textContent('#stickchip'), 'iris.example\'s code →');
-    assert.equal(await page.textContent('#stickline'), 'iris.example made the code, so your end takes it. Paste it here.');
-    assert.equal(await page.locator('#makelink').count(), 0);
+    assert.equal(await page.locator('#flipcode').count(), 0);
+    assert.equal(await page.textContent('#orcode'), 'Or, if iris.example shows a nostrconnect:// code, paste it here.');
+    assert.equal(await page.isVisible('#sitecode'), true);
     await page.click('#stickgo');
     assert.equal(await page.textContent('#codeerr'), 'Paste the site\'s code first.');
     await page.fill('#sitecode', 'bunker://abc123');
@@ -705,12 +703,6 @@ test('connecting a site from the account page: a link or a code, and the site sh
     await page.fill('#sitecode', 'hello');
     await page.click('#stickgo');
     assert.equal(await page.textContent('#codeerr'), 'The site\'s code starts with nostrconnect://');
-    // And back: the typed code is still there when the card flips again.
-    await page.click('#fliplink');
-    assert.equal(await page.getAttribute('#stickrow', 'data-dir'), 'link');
-    await page.waitForSelector('#makelink');
-    await page.click('#flipcode');
-    assert.equal(await page.inputValue('#sitecode'), 'hello');
     const code = 'nostrconnect://' + 'b'.repeat(64) + '?relay=wss%3A%2F%2Frelay.example&secret=s3cret';
     await page.fill('#sitecode', code);
     await page.click('#stickgo');
@@ -722,6 +714,12 @@ test('connecting a site from the account page: a link or a code, and the site sh
     // The phone tells the box about the site a moment later, and its row shows up in the card.
     await D.reportGrants(phone, held, [iris, { ...D.newGrant('site', 'https://coracle.example'), via: 'paste' as const }], w.send);
     await page.waitForSelector('#stickgrant >> text=coracle.example', { timeout: 15_000 });
+
+    // The same tab, the address typed in: what the tab kept from iris.example's visit is gone.
+    await page.goto(w.base + '/');
+    await page.waitForSelector('text=Welcome, Aaron');
+    assert.equal(await page.locator('#camefrom').count(), 0);
+    assert.equal(await page.isVisible('#whichsite'), true);
 
     // A tab no site sent here: the card asks which site, and the words follow what is typed.
     const plain = await ctx.newPage();

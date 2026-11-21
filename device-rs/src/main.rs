@@ -189,7 +189,11 @@ fn event_of(text: &str, npub_hex: &str) -> Result<Value, String> {
     let bad = |w: &str| format!("That isn’t an event keykin can sign: {w}.");
     let v: Value = serde_json::from_str(text.trim()).map_err(|e| bad(&e.to_string()))?;
     let o = v.as_object().ok_or_else(|| bad("give a JSON object"))?;
-    if let Some(p) = o.get("pubkey") {
+    // Already signed by another key (`nak event -k 1 -c hi` signs with nak's default key): re-signed here as this
+    // account, so `nak event … | keykin sign | nak event <relays>` works. Only an unsigned event naming another
+    // pubkey is refused, as that looks like a mistake.
+    let resign = o.contains_key("sig");
+    if let (false, Some(p)) = (resign, o.get("pubkey")) {
         if p.as_str() != Some(npub_hex) {
             return Err(bad("its pubkey isn’t this account’s"));
         }
@@ -313,6 +317,9 @@ mod tests {
         assert!(event_of(r#"{"tags":[["p",1]]}"#, &n).is_err());
         assert!(event_of(r#"{"kind":-1}"#, &n).is_err());
         assert!(event_of("[1]", &n).is_err());
+        // nak's output, signed by its own key: taken, and its id, pubkey and sig left behind.
+        let e = event_of(&format!(r#"{{"kind":1,"id":"{0}","pubkey":"{1}","created_at":7,"tags":[],"content":"hi","sig":"{0}{0}"}}"#, "ee".repeat(32), "cd".repeat(32)), &n).unwrap();
+        assert_eq!(e, json!({ "created_at": 7, "kind": 1, "tags": [], "content": "hi" }));
     }
 
     #[test]

@@ -1010,7 +1010,7 @@
   // kept 900 s in `kept`, as before.
   const sticks = new Map(), WAIT_MS = 15 * 60 * 1000;
   const freshStick = () => ({ dir: 'link', lp: 'idle', cp: 'idle', done: false, grant: null, before: [], since: 0, linkNote: null, codeNote: null,
-    code: '', name: '', lists: false, dms: false, err: '', codeErr: '', busy: false, tick: null });
+    code: '', name: '', codeSite: null, lists: false, dms: false, err: '', codeErr: '', busy: false, tick: null });
   const stickOf = () => { let s = sticks.get(me.npub); if (!s) sticks.set(me.npub, s = freshStick()); return s; };
   const typing = () => document.querySelector('input:focus, textarea:focus');
   const restick = () => { const n = document.getElementById('stick'); if (n) n.replaceWith(stickCard()); };
@@ -1078,6 +1078,7 @@
     s.busy = false;
     if (r.error === 'login') return showLogin(say('login'));
     if (!r.ok) { s.codeErr = say(r.error); return restick(); }
+    const c = readConnect(t); s.codeSite = c ? (c.name ?? c.host) : null;
     s.codeNote = r.note; s.dir = 'code'; s.cp = 'sending'; restick(); stickTick(s);
   }
   const globe = () => {
@@ -1091,7 +1092,8 @@
     const link = keptOf('bunker')?.result ?? null;
     if (s.lp === 'waiting' && !link) s.lp = 'idle';
     const grant = s.grant ? me.grants.find((g) => g.id === s.grant) ?? null : null;
-    const site = () => came?.host ?? (s.name.trim() || (grant ? grant.name.replace(/^https?:\/\//, '') : null));
+    // The name a pasted code gives itself counts too, so the card says Jumble at once, not "The site" until its row comes.
+    const site = () => came?.host ?? (s.name.trim() || s.codeSite || (grant ? grant.name.replace(/^https?:\/\//, '') : null));
     const Site = () => site() ?? 'The site', theSite = () => site() ?? 'the site';
     const phase = () => s.done ? 'done' : s.dir === 'link' ? s.lp : s.cp;
     // Words that follow the "Which site?" field as it is typed, without drawing the field again.
@@ -1172,7 +1174,7 @@
         : fixed.map((t) => el('span', { className: 'small dim' }, t))));
       opts.hidden = !opts.childElementCount;
       bodyWords = [];
-      body.replaceChildren(...(s.done ? doneBody() : s.dir === 'link' ? linkBody(bodyWords) : codeBody(bodyWords)));
+      body.replaceChildren(...(s.done ? doneBody() : s.dir === 'link' ? linkBody(bodyWords) : codeBody(bodyWords)).filter(Boolean));   // a missing part is left out, not drawn as "null"
     };
     const node = el('div', { className: 'card stickcard', id: 'stick' },
       came ? el('div', { className: 'small dim', id: 'camefrom' }, `You came from ${came.host}`) : null, title, stick, opts, body);

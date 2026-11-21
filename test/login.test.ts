@@ -711,6 +711,8 @@ test('connecting a site from the account page: a link or a code, and the site sh
     assert.deepEqual(await answered(), ['signed a site in']);
     assert.deepEqual(codes, [code]);
     await page.waitForSelector('text=iris.example is connected', { timeout: 15_000 });
+    // Before the site's row comes, nothing missing is drawn as "null".
+    assert.ok(!(await page.textContent('#stick'))!.includes('null'), await page.textContent('#stick') ?? '');
     // The phone tells the box about the site a moment later, and its row shows up in the card.
     await D.reportGrants(phone, held, [iris, { ...D.newGrant('site', 'https://coracle.example'), via: 'paste' as const }], w.send);
     await page.waitForSelector('#stickgrant >> text=coracle.example', { timeout: 15_000 });

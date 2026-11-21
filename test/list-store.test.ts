@@ -196,11 +196,11 @@ test('needs_tap, needs_fingerprint and dated_ahead carry the reason as why, the 
   const viaBunker = (e: object) => answerRequest(b, a.phone, a.held, (async (r) => box.handle(JSON.parse(JSON.stringify(r)), real())) as D.Send, 'cd'.repeat(32), 'sign_event',
     [JSON.stringify({ created_at: real(), content: '', ...e })], () => {}).then(() => 'signed', errorText);
   assert.equal(await viaBunker({ kind: 5, tags: five.tags }), 'needs_tap: Delete 5 of your events');
-  assert.equal(await viaBunker({ kind: 3, tags: [] }), 'needs_fingerprint: Empty your follow list. Do this from your phone, with your fingerprint.');
+  assert.equal(await viaBunker({ kind: 3, tags: [] }), 'needs_fingerprint: Empty your follow list. Do this from your phone.');
   assert.equal(errorText(plain), 'wrong_account'); assert.equal(errorText(new Error('x')), 'failed');
   // An account change's needs_fingerprint has no words, and is said as before.
   assert.equal(errorText(new KeykinError('needs_fingerprint')), 'needs_fingerprint');
-  assert.equal(errorText(new KeykinError('no_chip_key', 'Empty your follow list', 'Empty your follow list')), 'no_chip_key: Empty your follow list. Do this from your phone, with your fingerprint.');
+  assert.equal(errorText(new KeykinError('no_chip_key', 'Empty your follow list', 'Empty your follow list')), 'no_chip_key: Empty your follow list. Do this from your phone.');
   // The command-line device prints the error's message, which is the same words.
   assert.match(String(err.message), /^needs_tap: Delete 5/);
 });
@@ -212,8 +212,8 @@ test('the command line never signs level 2, and says in plain words that it is d
     const lines: string[] = [];
     await main(['create', b.qr()!, 'Laptop', '--username', 'leveltwo', '--password', 'long enough pw'], (x) => lines.push(x), home);
     const sign = (e: object) => main(['sign', JSON.stringify(e)], () => {}, home).then(() => 'signed', (err) => String(err?.message ?? err));
-    assert.equal(await sign({ kind: 62, tags: [['relay', 'ALL_RELAYS']] }), 'Not signed: Ask relays to erase everything you have ever published. Do this from your phone, with your fingerprint.');
-    assert.equal(await sign({ kind: 3, tags: [] }), 'Not signed: Empty your follow list. Do this from your phone, with your fingerprint.');
+    assert.equal(await sign({ kind: 62, tags: [['relay', 'ALL_RELAYS']] }), 'Not signed: Ask relays to erase everything you have ever published. Do this from your phone.');
+    assert.equal(await sign({ kind: 3, tags: [] }), 'Not signed: Empty your follow list. Do this from your phone.');
     // Level 1 is as before: the box's words with its code.
     assert.equal(await sign({ kind: 5, tags: Array.from({ length: 5 }, (_, i) => ['e', pk(i + 1)]) }), 'needs_tap: Delete 5 of your events');
     assert.equal(await sign({ kind: 1, content: 'gm' }), 'signed');

@@ -142,5 +142,5 @@ export function judge(e: UnsignedEvent, prev: UnsignedEvent | null, now: number)
 }
 
 /** What a device that is not the phone says for a level 2 event it was not let sign. */
-export const FROM_PHONE = 'Do this from your phone, with your fingerprint.';
+export const FROM_PHONE = 'Do this from your phone.';
 export const onlyFromPhone = (why: string) => `${why.replace(/[.\s]+$/, '')}. ${FROM_PHONE}`;

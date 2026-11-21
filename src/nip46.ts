@@ -95,7 +95,7 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
  * The NIP-46 error a site gets. The box's reason travels with its error (`needs_tap: Empty your follow list`): this
  * signer cannot ask the person, so the site is told why rather than a bare code. An event that is never done by
  * accident (level 2, SPEC 11.6) also says where it is done: `needs_fingerprint: Empty your follow list. Do this from
- * your phone, with your fingerprint.`
+ * your phone.`
  */
 export function errorText(e: unknown): string {
   if (!(e instanceof KeykinError)) return 'failed';

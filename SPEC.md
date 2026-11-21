@@ -315,8 +315,7 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
   forgets the site and answers `not_connected` from then on.
 - The signer cannot ask the person. An event the box asks about (section 11.6, The tap) gets the
   error `needs_tap: <why>`, and one it refuses `dated_ahead: <why>`, so the site can say why. One
-  that is never done by accident (level 2) gets `needs_fingerprint: <why>. Do this from your phone,
-  with your fingerprint.`
+  that is never done by accident (level 2) gets `needs_fingerprint: <why>. Do this from your phone.`
 - **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
   the person may name the site when asking for the link ("Which site is it for?"). The link's secret
   is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
@@ -337,7 +336,7 @@ readable only by its owner. The piece in it is not encrypted.
 - `keykin sign` never sends `tapped` or the fingerprint. An event the box asks about fails with the
   box's words (`needs_tap: Remove 10 of your 30 follows`); sign it on a device that can ask. One that
   is never done by accident (level 2) fails with `Not signed: Empty your follow list. Do this from your
-  phone, with your fingerprint.`
+  phone.`
 - `keykin agent <relay>` stays on and does what the account page asks (section 11.6): it adds a
   device, hands out a bunker link, becomes the signer for a pasted `nostrconnect://` code, and asks
   Yes or No at the keyboard before removing blocked devices (with nobody there, the answer is No).

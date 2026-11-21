@@ -1325,11 +1325,133 @@ at a time, so a note reaches it within about a second (a bunker note was answere
 seconds on an emulator, 2026-11-19, with the screen off and in forced Doze), and still checks every 30 seconds as before (that
 check also keeps the device list and grants fresh, and is all it does with an older box).
 
+### 11.7 Helpers report what they sign (not built)
+
+Proposed 2026-11-21, agreed with Aaron as a design to build later. Nothing in this section is built:
+no device queues reports and the box has no `signed` op. Recent signing (section 11.6) lists only
+what the box helped with until it is.
+
+**Why the helper reports.** Any two pieces sign, and either may be the helper (section 3). With the
+box off a device helps (section 8g), and the box never hears of it. So the piece that *answers* a
+round says so, not the piece that asks. Today the only device that answers is the command-line
+device's `keykin serve` (sections 8g and 9); a phone or a browser that helps later reports the same way. One stolen piece cannot sign alone: it needs a helper, and
+an honest helper reports. So every signature made with at least one honest piece reaches the log,
+whoever started it. The asker's own word is worth less: an asker that is stolen would not report.
+
+**What a helper queues.** Each time a piece answers a `sign` or an `ecdh` round for another piece, it
+queues a row from the request it answered:
+
+```
+{ "signedAt": <unix s, the helper's clock>, "asker": "<member key that signed the request>",
+  "op": "sign" | "ecdh", "kind"?: <event kind>, "eventId"?: "<hex>", "grant"?: "<grant id>" }
+```
+
+`kind` and `eventId` for `sign` (the helper recomputes the id from the event, section 3), `grant`
+when the request named one. The peer of an `ecdh` is never reported, nor any event content. The
+queue is kept on the device, in its state, so a restart does not lose it: at most 1000 rows, the
+oldest going first, with a count of rows dropped that way.
+
+A device that forms the whole key (section 8) and signs alone reports those signatures too, with
+itself as the asker and the helper. Otherwise they would show as unknown below, which is fair, but
+noisy for a person who chose to do it. The page words such a row "<device> alone, with the whole
+key", never "+ your box", so it still stands out.
+
+**Sending them.** A new device request, in the usual envelope (section 4: `{ body, key, sig }`,
+`ts` within 60 s, `id` refused twice), with no fingerprint and no epoch:
+
+```
+{ "op": "signed", "account": "<npub hex>", "rows": [ ...at most 200... ], "dropped"?: <n> }
+```
+
+A device sends it when its queue is not empty, the next time it reaches the box, and then at most
+once a minute while rows are waiting; a device that already keeps a `notes_wait` or a grants report
+going sends it beside those, not on its own timer. It is its own op rather than part of `grants`,
+since a grants report replaces a whole list and is sent when that list changes. The box answers
+`{ ok: true, took: <n> }`, and the device drops what it sent. On any error it keeps the rows and
+tries again later, so the same row can arrive twice.
+
+**What the box does with them.** For each row:
+
+- `helper` is the reporting member's key, always: a member reports only what it helped with. The
+  box sets `receivedAt` to now, and `signedAt` to at most now.
+- It checks the shape (`op`, a 64 hex `asker`, for `sign` an integer `kind` and a 64 hex `eventId`,
+  a 32 hex `grant` if any) and drops a row that fails, without failing the others. A row with
+  `signedAt` more than 30 days ago is dropped.
+- **Dedupe.** A `sign` row is the same as one already kept with the same `eventId` and `helper`. An
+  `ecdh` row is the same as one with the same `asker`, `helper`, `grant` and `signedAt`, and folds
+  as in section 11.6 (`ECDH_SAME`). A copy is counted in `took` and not kept again.
+- It goes into the log at its place by `signedAt` (section 11.6). Past the cap of 200 the oldest
+  goes, so a late row older than everything kept on a full log goes at once.
+- `asker` need not be on the list now: a cycle may have removed it since. The page then names it
+  "A removed device". When the asker is on the list and blocked, the row stays, and the page marks
+  it "asked by a blocked device": a helper that has not heard of a block yet (section 8g) is exactly
+  what this should show.
+- `dropped`, when more than 0, adds one activity line ("MacBook could not keep 12 signing reports
+  while your box was away"). Those signatures may then show as unknown below.
+
+A blocked member is refused `signed` like everything else, and a removed one is `unknown_member`.
+Its queued rows are lost. Signatures it helped with then have no row, and if published show as
+unknown below. That is the right way to be wrong: a blocked device is one the person stopped
+trusting.
+
+When built, `signed` joins the table in section 6, and `dropped` and the per-member `seen` below join
+How much the box keeps.
+
+**What this does not close.** Two pieces held by the same person can sign together and stay quiet:
+neither reports. Both are members, so they could even send a report of their own and make the
+signature look accounted for. A thief who holds two pieces, or a person with two devices who wants
+a signature off the record, can always do this. Nothing here closes that gap, and nothing can: any
+two pieces are the whole key (section 1). The log and the alarm below are for the common case, one
+piece stolen or one helper lied to, not for someone who holds two.
+
+**The alarm: comparing with the relays.** The page looks at what the relays hold for the account's
+npub and flags any event whose id no helper reported. Rows the box wrote as helper count like
+reported ones. The page shows it at the top of Home, as an alert like the pointer's: "Something
+signed as you that none of your pieces knows about", with each event's kind, time and the relay it
+came from, and what to do (block the device you suspect, then remove blocked devices for good).
+The page does this, not the box: the page already reads the relays (section 11.1), and the box
+talks to none.
+
+- **Only published events.** A message key (`ecdh`) never reaches a relay, nor does an event that
+  was signed and not sent. Neither can be checked. Ephemeral kinds (20000 to 29999: relay logins,
+  remote-signer messages) are skipped, since relays do not keep them. Child keys (section 8k) are
+  not checked, since their events are under other npubs.
+- **Which relays.** The account's own relay list (kind 10002, write relays) and the relays the login
+  page already uses for the pointer, at most 8. Up to 500 events per check, newest first.
+- **Which window.** From the newest of: when the box began keeping the log for this account
+  (`signedSince`, set the first time a row is written; for a log begun before it existed, the
+  oldest row's `signedAt` when the box first loads it), 30 days ago, and the `signedAt` of the oldest
+  row while the log is full (older rows are gone, so older events cannot be told apart). Events
+  dated before the window are not checked. If the window is short because the log is full, the
+  page says so in a line rather than flag what it can no longer see.
+- **Waiting for late reports.** A helper reports only when it next reaches the box, which can be
+  hours after the box came back. So an unreported event is flagged only once every unblocked member
+  other than the box has reached the box since the event's `created_at` plus 5 minutes, or 7 days
+  have passed, whichever comes first. For this the box keeps, per member, `seen`: when it last made
+  any request, saved at most once a minute like `last`, and `me` returns it. Until then the event is
+  not shown at all. A row that arrives after the flag clears it.
+- **`created_at` is the signer's word.** An event dated far back or far ahead is still checked if a
+  relay returned it for the window: dated ahead, it is checked as if it were dated now; dated
+  before the window, it is not checked, and this is a known hole (a thief can backdate).
+- **That was me.** Each flagged event has "That was me", a page call `signed_ok` with the event id.
+  The box keeps those ids (at most 200 per account, the oldest going), and the page stops flagging
+  them. The page asks the relays when Home or Devices is opened and every 10 minutes while it stays
+  open, not more.
+
+**Privacy cost.** The box now learns about signatures it did not help with: which two pieces, when,
+the kind, the event id, and which site or app (by grant). With the event id it can find a published
+event on a relay; for one that was never published it knows only the kind and the time. For a
+message key it learns that one was made, and for which grant, not with whom. It learned all this
+already for every signature it helped with; reports extend that to signatures made while it was
+off. The box is run by someone the person trusts with a piece, so this is the same trust, used a
+little more. A device may later get a switch to stop reporting; then its signatures show as unknown
+whenever they are published.
+
 ## 9. Not built yet
 
 - **A background service for the phone's site signer** (section 8j).
-- **Helpers reporting signatures made without the box** (section 11.7). Recent signing lists only
-  what the box helped with.
+- **Helpers reporting signatures made without the box, and the relay alarm** (section 11.7).
+  Recent signing lists only what the box helped with, and nothing compares it with the relays.
 - **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
   `state.json`, start it, and read the new secret from its output.
 - **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the
@@ -1355,6 +1477,9 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 ## 10. Known weak spots
 
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
+- **Two pieces in one hand sign off the record** (section 11.7). Neither reports, and both can even
+  report the signature as if it were fine. Only a signature with one honest piece is sure to be
+  logged, and only a published one can raise the alarm.
 - **A password is now worth the whole account.** Whoever has it can add a device of their own, and from
   then on sign anything. What stands in the way is the guessing limit, and the admin's block and remove.
 - The box cannot check that a device really asked before a level 1 signature. It takes the device's word.

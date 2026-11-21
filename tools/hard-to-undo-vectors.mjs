@@ -3,8 +3,10 @@
 // before it signs. The box is the authority on it (Aaron, 2026-11-20). Two implementations answer it:
 //
 //   box     The Keykin box: box/box.ts #sign with src/destructive.ts judge(event, prev, now). It refuses an event
-//           dated ahead with `dated_ahead`, and one it asks about with `needs_tap` unless the request says the
-//           person tapped Yes (`tapped: true`). Both answers carry the words as `why`. `prev` is the last version
+//           dated ahead with `dated_ahead`, one it asks about at level 1 with `needs_tap` unless the request says
+//           the person tapped Yes (`tapped: true`), and one at level 2 with `needs_fingerprint` unless the request
+//           carries the asking device's fingerprint (`fp`, as for an account change); `tapped` alone never signs
+//           that. All carry the words as `why`. `prev` is the last version
 //           of that list the box signed, from its list store (box/lists.ts).
 //   marble  Marble's own rules, android/signer/src/main/java/cc/aaro/cosign/core/Policy.kt (refuse and hold), which
 //           Marble keeps on top: they judge a list or profile against the last version the phone saw (`prev`).
@@ -19,7 +21,8 @@
 //   node tools/hard-to-undo-vectors.mjs --check <dir>    exits 1 if the copy in <dir> was edited or is not this one
 //
 // `answers` is what each implementation answers today: `decision` is sign, ask or refuse, `says` the words it gives
-// (null when it signs). `expect` is the box's decision: the box is where disputes are decided. `outcome` is what
+// (null when it signs), `level` how it asks (1: "Are you sure?", Yes or No on the device in use; 2: "Never by
+// accident", Yes only on the phone behind the fingerprint; null when it does not ask). `expect` is the box's decision: the box is where disputes are decided. `outcome` is what
 // that means on each kind of device (see `outcomes`). `uncaught` marks a case nobody has decided to catch yet.
 // test/hard-to-undo-vectors.test.ts holds src/destructive.ts and the box to the box answers; Marble's
 // HardToUndoVectorsTest holds Policy.kt to its own.
@@ -42,13 +45,16 @@ const SEALED = 'AhjhT8nNyAh4ozUgSqzQxVUHvOJ9n2CXhqC2HoU5Do2pW2oFmV1E8vL+Rq1PKbmT
 const NIP04 = 'o6Lq2T5xvRk3o8QKk3g6WQ==?iv=Zm9vYmFyYmF6cXV4MTIzNA==';
 
 // ── What each one answers ──
-const sign = { decision: 'sign', says: null };
-const ask = (says) => ({ decision: 'ask', says });
-const refuse = (says) => ({ decision: 'refuse', says });
-const VANISH = ask('Ask relays to erase everything you have ever published');
+// `level` is how the person is asked (Aaron, 2026-11-20): 1, "Are you sure?" (Yes or No on the device in use), or
+// 2, "Never by accident" (Yes only on the phone, behind the fingerprint the box checks). Null when nobody is asked.
+const sign = { decision: 'sign', says: null, level: null };
+const ask = (says) => ({ decision: 'ask', says, level: 1 });
+const never = (says) => ({ decision: 'ask', says, level: 2 });
+const refuse = (says) => ({ decision: 'refuse', says, level: null });
+const VANISH = never('Ask relays to erase everything you have ever published');
 const DEL5 = ask('Delete 5 of your events');
-const FOLLOWS = ask('Empty your follow list');
-const PROFILE = ask('Wipe your profile: everything');
+const FOLLOWS = never('Empty your follow list');
+const PROFILE = never('Wipe your profile: everything');
 const M = 'marble', B = 'box';
 
 // ── Every rule each one has ──
@@ -57,32 +63,32 @@ const rules = [
     when: 'created_at more than 600 s after now', says: '"<Kind> dated <day>: a version dated ahead would block every later change"' },
   { id: 'marble-ahead-delete-a', impl: [M, B], kinds: '5', then: 'refuse',
     when: 'created_at more than 600 s after now, and any a tag', says: '"Deletion dated <day>: it would delete every version until then"' },
-  { id: 'marble-ahead', impl: [M, B], kinds: 'any other', then: 'ask',
+  { id: 'marble-ahead', impl: [M, B], kinds: 'any other', then: 'ask', level: '1, or 2 when the same event dated now would be level 2',
     when: 'created_at more than 600 s after now', says: '"<Kind> dated in the future (<day>)"' },
-  { id: 'marble-vanish', impl: [M, B], kinds: '62', then: 'ask', when: 'always', says: '"Ask relays to erase everything you have ever published"' },
-  { id: 'marble-delete-list', impl: [M, B], kinds: '5', then: 'ask',
+  { id: 'marble-vanish', impl: [M, B], kinds: '62', then: 'ask', level: 2, when: 'always', says: '"Ask relays to erase everything you have ever published"' },
+  { id: 'marble-delete-list', impl: [M, B], kinds: '5', then: 'ask', level: 2,
     when: 'an a tag (kind:pubkey:d) or k tag naming a kind Marble keeps (0, 3, 10000-10004, 10006, 10007, 10015, 10030, 30000-30004, 30015, 30030)',
     says: '"Delete your <name of the first such kind>"' },
-  { id: 'marble-delete-5', impl: [M, B], kinds: '5', then: 'ask', when: '5 or more e and a tags (after marble-delete-list)', says: '"Delete <n> of your events"' },
-  { id: 'marble-profile-wipe', impl: [M, B], kinds: '0', then: 'ask',
+  { id: 'marble-delete-5', impl: [M, B], kinds: '5', then: 'ask', level: 1, when: '5 or more e and a tags (after marble-delete-list)', says: '"Delete <n> of your events"' },
+  { id: 'marble-profile-wipe', impl: [M, B], kinds: '0', then: 'ask', level: '2 when none of name, display_name, about, picture, nip05, lud16 is filled after (the whole profile goes); else 1',
     when: 'with a previous version: 2 or more of name, display_name, picture, about, nip05, lud16, banner, website go from filled to empty, or the new content is no JSON object (or an empty one) and the old one had keys. '
       + 'The box reads both with its one strict reading (see box-profile-empty), so a field is filled only when it is a string with something in it',
     says: '"Wipe your profile: <fields>" ("everything" when none of the eight were filled)' },
-  { id: 'marble-private-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask',
+  { id: 'marble-private-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask', level: 2,
     when: 'with a previous version whose content was not blank and did not start with "{" (a private part), the new content is blank',
     says: '"Empty your private <name>"' },
-  { id: 'marble-list-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask',
+  { id: 'marble-list-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask', level: '2 for the follow list (kind 3), 1 for the rest',
     when: 'with a previous version of 3 or more entries, none left (kind 3 counts p tags with a value; relay kinds r and relay tags; the rest every tag but d, title, description)',
     says: '"Empty your <name> (it has <n> <items>)"' },
-  { id: 'marble-relays-most', impl: [M, B], kinds: '10002, 10006, 10007, 30002', then: 'ask',
+  { id: 'marble-relays-most', impl: [M, B], kinds: '10002, 10006, 10007, 30002', then: 'ask', level: 1,
     when: 'with a previous version: 2 or more relays removed, and at least half (a trailing / does not count)',
     says: '"Remove <r> of your <n> relays" (+ " (and add <a>)")' },
-  { id: 'marble-list-most', impl: [M, B], kinds: 'the other kept kinds except 0', then: 'ask',
+  { id: 'marble-list-most', impl: [M, B], kinds: 'the other kept kinds except 0', then: 'ask', level: 1,
     when: 'with a previous version: 10 or more entries removed, and at least a fifth', says: '"Remove <r> of your <n> <items>s" (+ " (and add <a>)")' },
-  { id: 'box-vanish', impl: [B], kinds: '62', then: 'ask', when: 'always (the same as marble-vanish)', says: '"Ask relays to erase everything you have ever published"' },
-  { id: 'box-delete-5', impl: [B], kinds: '5', then: 'ask', when: '5 or more e and a tags (the same as marble-delete-5)', says: '"Delete <n> of your events"' },
-  { id: 'box-follows-empty', impl: [B], kinds: '3', then: 'ask', when: 'no tag named p, whatever came before (after the marble rules)', says: '"Empty your follow list"' },
-  { id: 'box-profile-empty', impl: [B], kinds: '0', then: 'ask',
+  { id: 'box-vanish', impl: [B], kinds: '62', then: 'ask', level: 2, when: 'always (the same as marble-vanish)', says: '"Ask relays to erase everything you have ever published"' },
+  { id: 'box-delete-5', impl: [B], kinds: '5', then: 'ask', level: 1, when: '5 or more e and a tags (the same as marble-delete-5)', says: '"Delete <n> of your events"' },
+  { id: 'box-follows-empty', impl: [B], kinds: '3', then: 'ask', level: 2, when: 'no tag named p, whatever came before (after the marble rules)', says: '"Empty your follow list"' },
+  { id: 'box-profile-empty', impl: [B], kinds: '0', then: 'ask', level: 2,
     when: 'none of name, display_name, about, picture, nip05, lud16 is filled, whatever came before. One strict reading: the content is exactly one JSON object as Keykin reads kind 0 '
       + '(src/bytes.ts parseJson, numbers by grammar); a key named twice, a control character in a string, a lone surrogate, a byte order mark, loose JSON or text after it make it no profile, '
       + 'which counts as empty. A field is filled when it is a string with a character that is not white space, a control character or a format character',
@@ -97,14 +103,21 @@ const cases = [];
  */
 function c({ why, rules: r, e, prev = null, m, b = m, uncaught }) {
   const answers = { [M]: m, [B]: b };
-  if (m.decision !== 'sign' && (b.decision !== m.decision || b.says !== m.says)) throw new Error(`${why}: the box answers as Marble does where Marble does not sign`);
-  cases.push({ why, rules: r, event: e, prev, answers, expect: b.decision, outcome: outcome(answers), ...(uncaught ? { uncaught } : {}) });
+  if (m.decision !== 'sign' && (b.decision !== m.decision || b.says !== m.says || b.level !== m.level)) throw new Error(`${why}: the box answers as Marble does where Marble does not sign`);
+  cases.push({ why, rules: r, event: e, prev, answers, expect: b.decision, level: b.level, outcome: outcome(answers), ...(uncaught ? { uncaught } : {}) });
 }
-/** What a person sees on each kind of device. */
+/** What a person sees on each kind of device (see `outcomes`). */
 function outcome(a) {
-  const no = a[M].decision === 'refuse' || a[B].decision === 'refuse', asks = a[M].decision === 'ask' || a[B].decision === 'ask';
-  const box = a[B].decision === 'refuse' ? 'dated_ahead' : a[B].decision === 'ask' ? 'needs_tap' : 'signs';
-  return { marble: no ? 'refuses' : asks ? 'asks' : 'signs', mac: box === 'dated_ahead' ? 'refuses' : box === 'needs_tap' ? 'asks' : 'signs', keykinDevices: box };
+  const no = a[M].decision === 'refuse' || a[B].decision === 'refuse';
+  const level = Math.max(a[M].level ?? 0, a[B].level ?? 0);
+  const box = a[B].decision === 'refuse' ? 'dated_ahead' : a[B].level === 2 ? 'needs_fingerprint' : a[B].level === 1 ? 'needs_tap' : 'signs';
+  const alone = a[M].decision === 'refuse' ? 'refuses' : a[M].level === 2 ? 'fingerprint' : a[M].level === 1 ? 'asks' : 'signs';
+  return {
+    marble: no ? 'refuses' : level === 2 ? 'fingerprint' : level === 1 ? 'asks' : 'signs',
+    marbleAlone: alone,
+    mac: { dated_ahead: 'refuses', needs_fingerprint: 'phone', needs_tap: 'asks', signs: 'signs' }[box],
+    keykinDevices: box,
+  };
 }
 
 // Plain things
@@ -112,8 +125,8 @@ c({ why: 'a note', rules: [], e: ev(1, [], 'gm'), m: sign });
 c({ why: 'a reaction', rules: [], e: ev(7, [['e', pk(1)], ['p', pk(2)]], '+'), m: sign });
 
 // Request to vanish
-c({ why: 'vanish from every relay', rules: ['marble-vanish', 'box-vanish'], e: ev(62, [['relay', 'ALL_RELAYS']]), m: ask('Ask relays to erase everything you have ever published') });
-c({ why: 'vanish from one relay: still the whole account there', rules: ['marble-vanish', 'box-vanish'], e: ev(62, [['relay', 'wss://r.example']]), m: ask('Ask relays to erase everything you have ever published') });
+c({ why: 'vanish from every relay', rules: ['marble-vanish', 'box-vanish'], e: ev(62, [['relay', 'ALL_RELAYS']]), m: never('Ask relays to erase everything you have ever published') });
+c({ why: 'vanish from one relay: still the whole account there', rules: ['marble-vanish', 'box-vanish'], e: ev(62, [['relay', 'wss://r.example']]), m: never('Ask relays to erase everything you have ever published') });
 
 // Deletions
 c({ why: 'delete 4 posts', rules: ['marble-delete-5', 'box-delete-5'], e: ev(5, es(4)), m: sign });
@@ -123,12 +136,12 @@ c({ why: 'delete 5 articles by address (kind 30023 is not a kept kind)', rules: 
 c({ why: 'delete 3 posts and 2 articles: e and a count together', rules: ['marble-delete-5', 'box-delete-5'],
   e: ev(5, [...es(3), ['a', `30023:${ME}:a`], ['a', `30023:${ME}:b`]]), m: ask('Delete 5 of your events') });
 c({ why: 'delete 4 posts with a k tag: k is not a target', rules: ['marble-delete-5', 'box-delete-5'], e: ev(5, [...es(4), ['k', '1']]), m: sign });
-c({ why: 'delete the follow list by address', rules: ['marble-delete-list'], e: ev(5, [['a', `3:${ME}:`]]), m: ask('Delete your follow list') });
-c({ why: 'delete one event, saying it is a relay list (k 10002)', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10002']]), m: ask('Delete your relay list') });
-c({ why: 'delete the bookmarks by k 10003', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10003']]), m: ask('Delete your bookmarks') });
-c({ why: 'delete a bookmark set by address', rules: ['marble-delete-list'], e: ev(5, [['a', `30003:${ME}:reading`]]), m: ask('Delete your bookmark set') });
+c({ why: 'delete the follow list by address', rules: ['marble-delete-list'], e: ev(5, [['a', `3:${ME}:`]]), m: never('Delete your follow list') });
+c({ why: 'delete one event, saying it is a relay list (k 10002)', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10002']]), m: never('Delete your relay list') });
+c({ why: 'delete the bookmarks by k 10003', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10003']]), m: never('Delete your bookmarks') });
+c({ why: 'delete a bookmark set by address', rules: ['marble-delete-list'], e: ev(5, [['a', `30003:${ME}:reading`]]), m: never('Delete your bookmark set') });
 c({ why: 'delete 5, one of them the follow list: Marble names the list', rules: ['marble-delete-list', 'box-delete-5'],
-  e: ev(5, [['a', `3:${ME}:`], ...es(4)]), m: ask('Delete your follow list') });
+  e: ev(5, [['a', `3:${ME}:`], ...es(4)]), m: never('Delete your follow list') });
 c({ why: 'delete one article by address: every version of it, and neither asks', rules: [], e: ev(5, [['a', `30023:${ME}:my-essay`]]), m: sign,
   uncaught: 'An address deletion removes every version of an article up to now, and only refusing it when dated ahead covers that. Is one article worth a question?' });
 
@@ -142,12 +155,12 @@ c({ why: 'unfollow 10 of 50: exactly a fifth', rules: ['marble-list-most'], e: e
 c({ why: 'unfollow 10 of 51: under a fifth', rules: ['marble-list-most'], e: ev(3, ps(41)), prev: ev(3, ps(51)), m: sign });
 c({ why: 'all 30 replaced by 30 others', rules: ['marble-list-most'], e: ev(3, ps(30, 101)), prev: ev(3, ps(30)), m: ask('Remove 30 of your 30 follows (and add 30)') });
 c({ why: 'down to 1 of 200', rules: ['marble-list-most', 'box-follows-empty'], e: ev(3, ps(1)), prev: ev(3, ps(200)), m: ask('Remove 199 of your 200 follows') });
-c({ why: 'emptied from 3', rules: ['marble-list-emptied', 'box-follows-empty'], e: ev(3, []), prev: ev(3, ps(3)), m: ask('Empty your follow list (it has 3 follows)') });
+c({ why: 'emptied from 3', rules: ['marble-list-emptied', 'box-follows-empty'], e: ev(3, []), prev: ev(3, ps(3)), m: never('Empty your follow list (it has 3 follows)') });
 c({ why: 'emptied from 2', rules: ['marble-list-emptied', 'box-follows-empty'], e: ev(3, []), prev: ev(3, ps(2)), m: sign, b: FOLLOWS });
 c({ why: 'emptied, with no earlier version seen (or as a site\'s own key, which Marble never compares)', rules: ['box-follows-empty'], e: ev(3, []), m: sign, b: FOLLOWS });
-c({ why: 'emptied of people, hashtags kept', rules: ['marble-list-emptied', 'box-follows-empty'], e: ev(3, [['t', 'nostr']]), prev: ev(3, [...ps(3), ['t', 'nostr']]), m: ask('Empty your follow list (it has 3 follows)') });
+c({ why: 'emptied of people, hashtags kept', rules: ['marble-list-emptied', 'box-follows-empty'], e: ev(3, [['t', 'nostr']]), prev: ev(3, [...ps(3), ['t', 'nostr']]), m: never('Empty your follow list (it has 3 follows)') });
 c({ why: 'only bare p tags left (no key in them): Keykin sees a p tag, Marble sees no one', rules: ['marble-list-emptied', 'box-follows-empty'],
-  e: ev(3, [['p'], ['p']]), prev: ev(3, ps(3)), m: ask('Empty your follow list (it has 3 follows)') });
+  e: ev(3, [['p'], ['p']]), prev: ev(3, ps(3)), m: never('Empty your follow list (it has 3 follows)') });
 c({ why: 'the old relay list in the content dropped, follows kept: no private part', rules: ['marble-private-emptied'],
   e: ev(3, ps(30)), prev: ev(3, ps(30), json({ 'wss://a.example': { read: true, write: true } })), m: sign });
 
@@ -156,22 +169,22 @@ const PROF = json({ name: 'Aaron', about: 'hi', picture: 'https://x.example/p.pn
 c({ why: 'name changed', rules: [], e: ev(0, [], json({ name: 'B', about: 'x' })), prev: ev(0, [], json({ name: 'A', about: 'x' })), m: sign });
 c({ why: 'the first profile', rules: [], e: ev(0, [], json({ name: 'Aaron' })), m: sign });
 c({ why: 'an empty first profile', rules: ['box-profile-empty'], e: ev(0, [], '{}'), m: sign, b: PROFILE });
-c({ why: 'emptied, from a name', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '{}'), prev: ev(0, [], json({ name: 'Aaron' })), m: ask('Wipe your profile: name') });
+c({ why: 'emptied, from a name', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '{}'), prev: ev(0, [], json({ name: 'Aaron' })), m: never('Wipe your profile: name') });
 c({ why: 'one field removed', rules: ['marble-profile-wipe'], e: ev(0, [], json({ name: 'Aaron', about: 'hi' })), prev: ev(0, [], PROF), m: sign });
 c({ why: 'two fields removed, the name kept', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], json({ name: 'Aaron' })), prev: ev(0, [], PROF), m: ask('Wipe your profile: picture, about') });
 c({ why: 'banner and website removed, the name kept', rules: ['marble-profile-wipe'], e: ev(0, [], json({ name: 'Aaron' })), prev: ev(0, [], json({ name: 'Aaron', banner: 'https://x.example/b.png', website: 'https://x.example' })),
   m: ask('Wipe your profile: banner, website') });
 c({ why: 'only a banner left: Keykin does not count banner or website', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], json({ banner: 'https://x.example/b.png' })), prev: ev(0, [], json({ name: 'Aaron', about: 'hi' })),
-  m: ask('Wipe your profile: name, about') });
+  m: never('Wipe your profile: name, about') });
 c({ why: 'a first profile with only a website', rules: ['box-profile-empty'], e: ev(0, [], json({ website: 'https://x.example' })), m: sign, b: PROFILE });
 c({ why: 'a first profile whose name is white space', rules: ['box-profile-empty'], e: ev(0, [], json({ name: '  ' })), m: sign, b: PROFILE });
-c({ why: 'content that is not JSON', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], 'hello'), prev: ev(0, [], json({ name: 'Aaron' })), m: ask('Wipe your profile: name') });
-c({ why: 'content that is a JSON array', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '[]'), prev: ev(0, [], json({ name: 'Aaron' })), m: ask('Wipe your profile: name') });
+c({ why: 'content that is not JSON', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], 'hello'), prev: ev(0, [], json({ name: 'Aaron' })), m: never('Wipe your profile: name') });
+c({ why: 'content that is a JSON array', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '[]'), prev: ev(0, [], json({ name: 'Aaron' })), m: never('Wipe your profile: name') });
 c({ why: 'a first profile that is JSON null', rules: ['box-profile-empty'], e: ev(0, [], 'null'), m: sign, b: PROFILE });
-c({ why: 'the name a number: Marble counts it as filled, Keykin wants a string', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '{"name":5}'), prev: ev(0, [], json({ name: 'Aaron' })), m: sign, b: ask('Wipe your profile: name') });
-c({ why: 'loose JSON (unquoted key, single quotes): only JSON.parse refuses it', rules: ['box-profile-empty'], e: ev(0, [], "{name:'Aaron'}"), prev: ev(0, [], json({ name: 'Aaron' })), m: sign, b: ask('Wipe your profile: name') });
+c({ why: 'the name a number: Marble counts it as filled, Keykin wants a string', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '{"name":5}'), prev: ev(0, [], json({ name: 'Aaron' })), m: sign, b: never('Wipe your profile: name') });
+c({ why: 'loose JSON (unquoted key, single quotes): only JSON.parse refuses it', rules: ['box-profile-empty'], e: ev(0, [], "{name:'Aaron'}"), prev: ev(0, [], json({ name: 'Aaron' })), m: sign, b: never('Wipe your profile: name') });
 c({ why: 'a key twice: JSON.parse keeps the last; org.json and the box\'s strict reading refuse the whole thing', rules: ['marble-profile-wipe', 'box-profile-empty'], e: ev(0, [], '{"name":"","name":"Aaron"}'), prev: ev(0, [], json({ name: 'Aaron' })),
-  m: ask('Wipe your profile: name') });
+  m: never('Wipe your profile: name') });
 c({ why: 'something after the object', rules: ['box-profile-empty'], e: ev(0, [], '{"name":"Aaron"} x'), m: sign, b: PROFILE });
 c({ why: 'a name that is only a byte order mark: JavaScript trims it, Kotlin does not', rules: ['box-profile-empty'], e: ev(0, [], json({ name: '﻿' })), m: sign, b: PROFILE });
 c({ why: 'a name that is only a unit separator (U+001F): Kotlin calls it blank, JavaScript does not trim it', rules: ['box-profile-empty'], e: ev(0, [], json({ name: '\u001f' })), m: sign, b: PROFILE });
@@ -181,20 +194,20 @@ const BM = es(4);
 c({ why: 'bookmarks emptied, from 4', rules: ['marble-list-emptied'], e: ev(10003, []), prev: ev(10003, BM), m: ask('Empty your bookmarks (it has 4 bookmarks)') });
 c({ why: 'bookmarks emptied, from 2', rules: ['marble-list-emptied'], e: ev(10003, []), prev: ev(10003, es(2)), m: sign,
   uncaught: 'A list of 1 or 2 emptied is never asked about.' });
-c({ why: 'the 2026-11-18 shape: public bookmarks kept, the private part (NIP-44) dropped', rules: ['marble-private-emptied'], e: ev(10003, BM), prev: ev(10003, BM, SEALED), m: ask('Empty your private bookmarks') });
-c({ why: 'the private part in the old NIP-04 form dropped', rules: ['marble-private-emptied'], e: ev(10003, BM), prev: ev(10003, BM, NIP04), m: ask('Empty your private bookmarks') });
-c({ why: 'private part dropped and the public part emptied: the private part is named', rules: ['marble-private-emptied', 'marble-list-emptied'], e: ev(10003, []), prev: ev(10003, BM, SEALED), m: ask('Empty your private bookmarks') });
+c({ why: 'the 2026-11-18 shape: public bookmarks kept, the private part (NIP-44) dropped', rules: ['marble-private-emptied'], e: ev(10003, BM), prev: ev(10003, BM, SEALED), m: never('Empty your private bookmarks') });
+c({ why: 'the private part in the old NIP-04 form dropped', rules: ['marble-private-emptied'], e: ev(10003, BM), prev: ev(10003, BM, NIP04), m: never('Empty your private bookmarks') });
+c({ why: 'private part dropped and the public part emptied: the private part is named', rules: ['marble-private-emptied', 'marble-list-emptied'], e: ev(10003, []), prev: ev(10003, BM, SEALED), m: never('Empty your private bookmarks') });
 c({ why: 'the private part replaced by a shorter one', rules: [], e: ev(10003, BM, 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='), prev: ev(10003, BM, SEALED), m: sign,
   uncaught: 'A private part rewritten without what it held looks like any edit until it is read. Should a signer that can decrypt compare the entries inside?' });
 c({ why: 'the private part dropped, with no earlier version seen', rules: [], e: ev(10003, BM), m: sign,
   uncaught: 'A list is judged only against a version the signer saw: on a new phone, a box that has not signed this list yet, a set past the box\'s cap, or a site\'s own key, nothing is compared.' });
 c({ why: 'a bookmark added, the private part kept', rules: [], e: ev(10003, [...BM, ['e', pk(99)]], SEALED), prev: ev(10003, BM, SEALED), m: sign });
-c({ why: 'mute list: the private part dropped', rules: ['marble-private-emptied'], e: ev(10000, ps(1)), prev: ev(10000, ps(1), SEALED), m: ask('Empty your private mute list') });
+c({ why: 'mute list: the private part dropped', rules: ['marble-private-emptied'], e: ev(10000, ps(1)), prev: ev(10000, ps(1), SEALED), m: never('Empty your private mute list') });
 c({ why: 'mute list emptied, from 3', rules: ['marble-list-emptied'], e: ev(10000, []), prev: ev(10000, ps(3)), m: ask('Empty your mute list (it has 3 mutes)') });
 c({ why: 'mute list emptied, from 2', rules: ['marble-list-emptied'], e: ev(10000, []), prev: ev(10000, ps(2)), m: sign,
   uncaught: 'Two muted people unmuted at once, with no question.' });
 c({ why: 'a follow set emptied (its d tag kept)', rules: ['marble-list-emptied'], e: ev(30000, [['d', 'friends']]), prev: ev(30000, [['d', 'friends'], ...ps(5)]), m: ask('Empty your follow set (it has 5 persons)') });
-c({ why: 'a bookmark set: the private part dropped', rules: ['marble-private-emptied'], e: ev(30003, [['d', 'reading'], ...es(2)]), prev: ev(30003, [['d', 'reading'], ...es(2)], SEALED), m: ask('Empty your private bookmark set') });
+c({ why: 'a bookmark set: the private part dropped', rules: ['marble-private-emptied'], e: ev(30003, [['d', 'reading'], ...es(2)]), prev: ev(30003, [['d', 'reading'], ...es(2)], SEALED), m: never('Empty your private bookmark set') });
 c({ why: 'a list renamed: title and description are not entries', rules: [], e: ev(30001, [['d', 'x'], ['title', 'New'], ...es(3)]), prev: ev(30001, [['d', 'x'], ['title', 'Old'], ['description', 'd'], ...es(3)]), m: sign });
 
 // Relays
@@ -231,22 +244,30 @@ c({ why: 'DM relays dated 2099: any replaceable kind', rules: ['marble-ahead-lis
 c({ why: 'a deletion by address dated 2099', rules: ['marble-ahead-delete-a'], e: ev(5, [['a', `30023:${ME}:my-essay`]], '', Y2099), m: refuse('Deletion dated 2099-01-01: it would delete every version until then') });
 c({ why: 'a deletion by id dated 2099', rules: ['marble-ahead'], e: ev(5, [['e', pk(1)]], '', Y2099), m: ask('Deletion dated in the future (2099-01-01)') });
 c({ why: 'deleting 5 by id, dated 2099', rules: ['marble-ahead', 'box-delete-5'], e: ev(5, es(5), '', Y2099), m: ask('Deletion dated in the future (2099-01-01)') });
-c({ why: 'vanish dated 2099', rules: ['marble-ahead', 'box-vanish'], e: ev(62, [['relay', 'ALL_RELAYS']], '', Y2099), m: ask('Request to vanish dated in the future (2099-01-01)') });
+c({ why: 'vanish dated 2099', rules: ['marble-ahead', 'box-vanish'], e: ev(62, [['relay', 'ALL_RELAYS']], '', Y2099), m: never('Request to vanish dated in the future (2099-01-01)') });
+c({ why: 'deleting the bookmarks by k, dated 2099: dated ahead, and level 2 as it would be dated now', rules: ['marble-ahead', 'marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10003']], '', Y2099),
+  m: never('Deletion dated in the future (2099-01-01)') });
 
 export function build() {
   return {
     about: 'Shared cases for "is this event hard to undo?" Made by tools/hard-to-undo-vectors.mjs; run by test/hard-to-undo-vectors.test.ts (Keykin) and HardToUndoVectorsTest (Marble). '
-      + '`answers` is what each implementation answers today; `expect` is the box\'s decision, since the box is the authority (Marble may ask more on top). `prev` is the last version of that list or profile the signer saw (null: none). `now` is the signer\'s clock. '
+      + '`answers` is what each implementation answers today, with `level` (1: Are you sure?, 2: never by accident; null when nobody is asked); `expect` is the box\'s decision and `level` its level, since the box is the authority (Marble may ask more on top). `prev` is the last version of that list or profile the signer saw (null: none). `now` is the signer\'s clock. '
       + 'Events are unsigned; their pubkey is a stand-in.',
     now: NOW,
     implementations: {
-      [B]: 'Keykin box/box.ts #sign with src/destructive.ts judge(event, prev, now). ask: the box answers needs_tap unless the request says tapped: true. refuse: it answers dated_ahead. Both carry says as why',
-      [M]: 'Marble android/signer/src/main/java/cc/aaro/cosign/core/Policy.kt, refuse(e, now) then hold(e, prev, now): its own check on top of the box',
+      [B]: 'Keykin box/box.ts #sign with src/destructive.ts judge(event, prev, now). ask, level 1: the box answers needs_tap unless the request says tapped: true. ask, level 2: it answers needs_fingerprint '
+        + '(no_chip_key to a device with no chip key) unless the request carries a valid fp by the asking device\'s chip key, as for an account change; tapped alone never signs it. refuse: it answers dated_ahead. All carry says as why',
+      [M]: 'Marble android/signer/src/main/java/cc/aaro/cosign/core/Policy.kt, refuse(e, now) then question(e, prev, now): its own check on top of the box, and its only one with no box in the signature',
     },
     outcomes: {
-      marble: 'Marble Android with a box. signs: nobody is asked. asks: the phone asks once (in its own words when its rules ask, else in the box\'s), and Yes signs with tapped. refuses: never signed.',
-      mac: 'Marble for the Mac. signs: nobody is asked. asks: the box answers needs_tap, the Mac asks with the box\'s words, and Yes sends it again with tapped. refuses: never signed.',
-      keykinDevices: 'Devices that cannot ask a person (the NIP-46 bunker in src/nip46.ts, the command-line device). needs_tap or dated_ahead: refused, and the error carries the box\'s words. signs: signed.',
+      marble: 'Marble Android with a box. signs: nobody is asked. asks: the phone asks once (in its own words when its rules ask, else in the box\'s), and Yes signs with tapped. '
+        + 'fingerprint: the same question, and Yes goes on to the fingerprint, sent as fp for the box to check (level 2 on either side). refuses: never signed.',
+      marbleAlone: 'Marble Android with no box in the signature (the whole key on the phone, or another device helping while the box is off): its own rules only. '
+        + 'asks: Yes or No. fingerprint: Yes, then the phone\'s fingerprint prompt (none on a phone with no fingerprint set up). refuses: never signed.',
+      mac: 'Marble for the Mac. signs: nobody is asked. asks: the box answers needs_tap, the Mac asks with the box\'s words, and Yes sends it again with tapped. '
+        + 'phone: the box answers needs_fingerprint; the Mac shows the box\'s words and that this is done from the phone, with no Yes, and sends nothing more. refuses: never signed.',
+      keykinDevices: 'Devices that cannot ask a person (the NIP-46 bunker in src/nip46.ts, the command-line device). needs_tap, needs_fingerprint or dated_ahead: refused, and the error carries the box\'s words '
+        + '(for needs_fingerprint, also that it is done from the phone). signs: signed.',
     },
     rules,
     cases,

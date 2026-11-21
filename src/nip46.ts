@@ -8,6 +8,7 @@ import { Relay } from 'nostr-tools/relay';
 import * as D from './device.ts';
 import { KeykinError, hexToBytes, bytesToHex, randomBytes } from './bytes.ts';
 import { TICKET_SECONDS } from './ticket.ts';
+import { onlyFromPhone } from './destructive.ts';
 
 export interface BunkerState {
   sk: string; secret: string; clients: string[];
@@ -92,11 +93,17 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
 
 /**
  * The NIP-46 error a site gets. The box's reason travels with its error (`needs_tap: Empty your follow list`): this
- * signer cannot ask the person, so the site is told why rather than a bare code.
+ * signer cannot ask the person, so the site is told why rather than a bare code. An event that is never done by
+ * accident (level 2, SPEC 11.6) also says where it is done: `needs_fingerprint: Empty your follow list. Do this from
+ * your phone, with your fingerprint.`
  */
 export function errorText(e: unknown): string {
-  return e instanceof KeykinError ? (e.why ? `${e.code}: ${e.why}` : e.code) : 'failed';
+  if (!(e instanceof KeykinError)) return 'failed';
+  if (!e.why) return e.code;
+  return `${e.code}: ${phoneOnly(e) ? onlyFromPhone(e.why) : e.why}`;
 }
+/** A level 2 refusal: the box wants the phone's fingerprint for this event (an account change's refusal carries no words). */
+export const phoneOnly = (e: unknown) => e instanceof KeykinError && !!e.why && (e.code === 'needs_fingerprint' || e.code === 'no_chip_key');
 
 /** Lets a site's key in, as a grant the account page lists under Sites and apps (SPEC 11.5). */
 function admit(b: BunkerState, client: string, name?: string) {

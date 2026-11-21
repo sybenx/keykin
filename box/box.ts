@@ -306,7 +306,7 @@ export class Box {
       switch (body.op) {
         case 'cycle': return this.#cycle(s, from, req, body);
         case 'caught_up': if (s.catchups[from.key]) { delete s.catchups[from.key]; this.#save(); } return { ok: true };
-        case 'sign': return this.#sign(s, from, body, now);
+        case 'sign': return this.#sign(s, from, req, body, now);
         case 'ecdh': return this.#ecdh(s, from, body, now);
         case 'members': return { ok: true, npub: s.npub, commitment: s.commitment, epoch: s.epoch, next: s.next, boxKey: this.state.key, members: s.members, password: !!s.login };
         case 'block': return this.#block(s, body.key);
@@ -726,7 +726,7 @@ export class Box {
     return body.child === undefined ? mine : childPiece(mine, tweakOf(body.child));
   }
 
-  #sign(s: Account, from: Member, body: any, now: number) {
+  #sign(s: Account, from: Member, req: Signed, body: any, now: number) {
     if (from.kind !== 'device') refuse('devices_only');
     const ev = body.event as UnsignedEvent;
     const msg = eventId(ev);
@@ -734,12 +734,16 @@ export class Box {
     // The event must be by the key being asked for: the account's, or the child's.
     if (ev.pubkey !== xOnly(piece.C[0])) refuse('wrong_account');
     // The box decides what is hard to undo (src/destructive.ts), against the last version of that list it signed.
-    // A refusal is final; a question needs the device to have asked the person, and say so with `tapped`.
-    // A child's lists are not kept here, so its changes are judged on their own.
+    // A refusal is final. A level 1 question needs the device to have asked the person, and say so with `tapped`.
+    // Level 2 is never done by accident: it needs the fingerprint, checked as for an account change, and `tapped`
+    // alone is not enough. A child's lists are not kept here, so its changes are judged on their own.
     const mine = body.child === undefined && KEPT.has(ev.kind);
     const j = judge(ev, mine ? this.lists.latest(s.npub, ev) : null, now);
     if (j.decision === 'refuse') refuseWhy('dated_ahead', j.says!);
-    if (j.decision === 'ask' && body.tapped !== true) refuseWhy('needs_tap', j.says!);
+    if (j.decision === 'ask' && j.level === 2) {
+      if (!from.chip) refuseWhy('no_chip_key', j.says!);
+      if (!fingerprintOk(req, from.chip)) refuseWhy('needs_fingerprint', j.says!);
+    } else if (j.decision === 'ask' && body.tapped !== true) refuseWhy('needs_tap', j.says!);
     const c = body.commit;
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
     const a = answer(piece, msg, c);

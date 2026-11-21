@@ -42,7 +42,8 @@ import * as D from '../src/device.ts';
 import { createServer } from 'node:http';
 import { load, save, meOf, heldOf, keep, sender } from './store.ts';
 import { DeviceHelper } from '../src/helper.ts';
-import { newBunker, runBunker, signOut, bunkerUrl, bunkerTicket, syncGrants } from '../src/nip46.ts';
+import { newBunker, runBunker, signOut, bunkerUrl, bunkerTicket, syncGrants, phoneOnly } from '../src/nip46.ts';
+import { onlyFromPhone } from '../src/destructive.ts';
 import { readCode, answerCode, newTicket } from '../src/ticket.ts';
 import { readAddCode, answerAddCode, showAddCode } from '../src/adddevice.ts';
 import { getPublicKey } from 'nostr-tools/pure';
@@ -209,8 +210,11 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
       const held = heldOf(s), e = JSON.parse(a);
       try {
         const child = argv[2] === undefined ? undefined : await childOf(argv[2], held);
+        // Never `tapped`, never the fingerprint: what the box asks about is signed on a device that can ask, and what
+        // is never done by accident (level 2, SPEC 11.6) only on the phone.
         return out(JSON.stringify(await D.signEvent(me, held, { pubkey: child?.npub ?? held.npub, created_at: e.created_at ?? Math.floor(Date.now() / 1000), kind: e.kind ?? 1, tags: e.tags ?? [], content: e.content ?? '' }, box(), undefined, undefined, undefined, child)));
       }
+      catch (err) { if (phoneOnly(err)) fail(`Not signed: ${onlyFromPhone((err as any).why)}`); throw err; }
       finally { keep(s, held, s.addr!); save(file, s); }
     }
     case 'child': {

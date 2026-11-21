@@ -20,7 +20,7 @@ export interface Me { sk: string; key: string; name: string; chip?: string; fp?:
 /** What a device keeps once it is in an account. */
 export interface Held { piece: Piece; npub: string; boxKey: string; epoch: number }
 
-/** An error answer as an error here. `why` is the box's reason in plain words (`needs_tap`, `dated_ahead`): it becomes the message, so a device that cannot ask the person still says what the box said. */
+/** An error answer as an error here. `why` is the box's reason in plain words (`needs_tap`, `needs_fingerprint`, `dated_ahead`): it becomes the message, so a device that cannot ask the person still says what the box said. */
 function failed(r: any): never {
   const why = typeof r.why === 'string' ? r.why.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) : '';
   throw why ? new KeykinError(String(r.error), why, why) : new KeykinError(String(r.error));
@@ -88,11 +88,16 @@ export async function importWithBox(me: Me, qr: { key: string; code: string }, n
 /** The piece to use: the account's own, or this holder's piece of a child (SPEC 8k). Read after any catch-up. */
 const pieceFor = (h: Held, child?: Child): Piece => (child ? childPiece(h.piece, tweakOf(child.t)) : h.piece);
 
-/** `child`: sign as that child key instead of the account's. The event's `pubkey` must be the child's. */
-export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean, child?: Child) {
+/**
+ * `child`: sign as that child key instead of the account's. The event's `pubkey` must be the child's.
+ * `fp`: the fingerprint, for an event that is never done by accident (level 2, SPEC 11.6): the box answers such an
+ * event `needs_fingerprint` with its words, and `tapped` alone never signs it. Only the phone passes it; the
+ * command line and the bunker never do, so they can never sign one.
+ */
+export async function signEvent(me: Me, h: Held, ev: UnsignedEvent, send: Send, t = now(), grant?: string, tapped?: boolean, child?: Child, fp?: Fingerprint) {
   const id = eventId(ev);
   let mine = ask(pieceFor(h, child), id);
-  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(pieceFor(h, child), id)).commit, grant, tapped, child: child?.t }));
+  const r = await current(me, h, send, t, (h) => ({ op: 'sign', event: ev, commit: (mine = ask(pieceFor(h, child), id)).commit, grant, tapped, child: child?.t }), fp);
   if (r.id !== id) refuse('wrong_id');
   return { ...ev, id, sig: finish(pieceFor(h, child), id, mine, { commit: r.commit, z: r.z }) };
 }

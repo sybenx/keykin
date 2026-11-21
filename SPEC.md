@@ -72,13 +72,23 @@ A helper never signs a bare hash. Nonces are made per request and used once.
 - An **account change** also carries `fp`: an ECDSA (SHA-256) signature by the asker's chip key
   over the same `JCS(body)`. Without a valid one the box answers `needs_fingerprint`. A device
   with no chip key gets `no_chip_key` and cannot make account changes.
+- **A signature that is never done by accident** (level 2, section 11.6, The tap) carries `fp` the same
+  way, checked the same way (Aaron, 2026-11-20). Without a valid one the box answers `needs_fingerprint`,
+  now with `why`, the question in plain words; a device with no chip key gets `no_chip_key` with `why`.
+  With a box, such a phone cannot sign a level 2 event, as it cannot make account changes. `tapped`
+  alone never signs one.
 - **Fallback (Aaron, 2026-11-16).** Where this checked fingerprint hits a blocker (a platform
   whose chip cannot do it, the browser extension, a device with no chip), that spot may use the
   easy kind instead: the app shows a fingerprint prompt and then proceeds, with nothing the box
   can verify. Spots using the easy kind:
   - **The command-line device** (`cli/`). Its chip key is a software key in its state file, and
     nothing prompts. The box still checks the signature, so the rule that a device with no chip
-    key cannot make account changes holds; what is missing is the fingerprint itself.
+    key cannot make account changes holds; what is missing is the fingerprint itself. It never sends
+    `fp` with `sign`, though it could: level 2 is the phone's (section 11.6).
+  - **Marble on Android with no box in the signature** (the whole key on the phone, or another device
+    helping while the box is off, section 8g). At level 2 it shows the phone's own fingerprint prompt
+    and then signs, as it does before showing the whole key. A phone with no fingerprint set up has no
+    prompt to show, so it asks Yes or No only: a box is an upgrade, never a burden.
 
 ## 5. Sealed values
 
@@ -96,7 +106,7 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `op` | From | Fingerprint | Does |
 |---|---|---|---|
 | `create1`, `create2` | The first device, with the code from the QR | No | Makes the key with the device. Once only |
-| `sign` | An unblocked device | No | Answers a signing round for an event of this account, or of one of its child keys (section 8k). A hard-to-undo event needs `tapped` (section 11.6, The tap) |
+| `sign` | An unblocked device | Level 2 only | Answers a signing round for an event of this account, or of one of its child keys (section 8k). A hard-to-undo event needs `tapped`, and one that is never done by accident the fingerprint (section 11.6, The tap) |
 | `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a), as the account or as a child key |
 | `members` | Any unblocked member | No | Returns the list, the epoch, the next unused index, and `password` (true when the account has a username and password, section 11.3) |
 | `cycle` | An unblocked device | **Yes** | Moves every piece to a new line and drops blocked members (section 8f) |
@@ -304,7 +314,9 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
   forgets the site and answers `not_connected` from then on.
 - The signer cannot ask the person. An event the box asks about (section 11.6, The tap) gets the
-  error `needs_tap: <why>`, and one it refuses `dated_ahead: <why>`, so the site can say why.
+  error `needs_tap: <why>`, and one it refuses `dated_ahead: <why>`, so the site can say why. One
+  that is never done by accident (level 2) gets `needs_fingerprint: <why>. Do this from your phone,
+  with your fingerprint.`
 - **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
   the person may name the site when asking for the link ("Which site is it for?"). The link's secret
   is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
@@ -322,8 +334,10 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 `signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
 readable only by its owner. The piece in it is not encrypted.
 
-- `keykin sign` never sends `tapped`. An event the box asks about fails with the box's words
-  (`needs_tap: Empty your follow list`); sign it on a device that can ask.
+- `keykin sign` never sends `tapped` or the fingerprint. An event the box asks about fails with the
+  box's words (`needs_tap: Remove 10 of your 30 follows`); sign it on a device that can ask. One that
+  is never done by accident (level 2) fails with `Not signed: Empty your follow list. Do this from your
+  phone, with your fingerprint.`
 - `keykin agent <relay>` stays on and does what the account page asks (section 11.6): it adds a
   device, hands out a bunker link, becomes the signer for a pasted `nostrconnect://` code, and asks
   Yes or No at the keyboard before removing blocked devices (with nobody there, the answer is No).
@@ -346,7 +360,7 @@ libsecp256k1 for the member key.
 - **The chip key is real here.** A P-256 key in the Android Keystore that needs a strong
   fingerprint or face for every signature and is thrown away if new fingerprints are enrolled.
   Add a device, Unblock and Form the whole key each show the system fingerprint prompt, and the
-  box checks the result.
+  box checks the result. So does a Yes to a level 2 signature (section 11.6, The tap).
 - **A phone with no fingerprint set up has no chip key.** It signs, and cannot make account
   changes. (A debug build makes a key that asks for nothing instead, for emulators.)
 - **Saved state** is one file in the app's no-backup folder, encrypted with a Keystore key.
@@ -381,8 +395,8 @@ signing and message keys work this way. Everything else needs the box.
 
 A block made while the box is off does not reach a helper until the box is back. A helper does not
 check grants at all: a revoke or a limit (section 11.5) is kept only by the box. A helper does not
-judge what is hard to undo either (section 11.6, The tap): asking is left to the device that wants the
-signature, by its own rules.
+judge what is hard to undo either (section 11.6, The tap), nor check a fingerprint: asking is left to the
+device that wants the signature, by its own rules.
 
 ## 8h. The browser extension
 
@@ -1037,43 +1051,73 @@ Yes or No. No fingerprint and no typing. No pushes the request away and ends the
 that asked. The hard-to-undo things are removing blocked devices for good (cycling), forming the
 whole key, and signing the events below.
 
+**Two levels** (Aaron, 2026-11-20). Signing those events comes in two levels:
+
+- **Level 1, Are you sure?** A big unfollow, a relay list trim, a profile losing fields, something
+  dated in the future, five or more deletions at once. Yes or No on the device the person is using, as
+  above.
+- **Level 2, Never by accident.** Erasing the account (kind 62), wiping the profile, emptying the
+  follow list, deleting a whole kept list, a list's private part emptied. The answer is No unless the
+  person says Yes on the phone, behind the fingerprint. Every other device refuses and says to do it
+  from the phone. This revises "no fingerprint and no typing" (2026-11-17) for level 2 only.
+
+Not built: a Yes on the account page, and passing the question from one device to another device or
+page.
+
 **Which events, and who decides** (Aaron, 2026-11-20). The box decides. It is a relationship
 (the admin, or the admin's friend or family), and that is why disputes between devices are settled
 there. For a signature the box takes part in, a device needs no copy of its rules. The rules are in
 `src/destructive.ts` (`judge`) and the cases in `vectors/hard-to-undo.json`:
 
-- `sign` for an event the box asks about, without `"tapped": true`, is answered
+- `sign` for a level 1 event, without `"tapped": true`, is answered
   `{ "error": "needs_tap", "why": "<the question, in plain words>" }`. A device shows `why` to the
   person with Yes and No and, on Yes, sends the same request again with `"tapped": true`. On No
   nothing is signed. A device that cannot ask anyone (a bunker, the command line) fails with the
   words: `needs_tap: <why>`.
+- `sign` for a level 2 event, without a valid `fp` (section 4), is answered
+  `{ "error": "needs_fingerprint", "why": "<the question>" }`, whatever `tapped` says, and a device
+  with no chip key gets `{ "error": "no_chip_key", "why": "<the question>" }`. The answer carries the
+  level, so a device needs no copy of the rules to know it, and an account change's refusal has no
+  `why`, so the two are told apart. The phone shows `why` with No and Yes; on Yes it takes the
+  fingerprint and sends the same request again with `fp`. Any other device shows `why` and that this
+  is done from the phone, and sends nothing more. A device that knows only `needs_tap` gets an answer
+  it does not ask about, so sending `tapped` can never sign a level 2 event.
 - An event the box never signs, Yes or not, is answered `{ "error": "dated_ahead", "why": "<why>" }`.
 - A device may ask more on top (Marble keeps its own rules, and a phone sometimes knows a newer
   version of a list than the box). When it has already asked and the person said Yes, it sends
-  `tapped` with the first request, so nobody is asked twice for one event.
+  `tapped` with the first request, so nobody is asked twice for one event, and at level 2 `fp` too.
+  When the person said Yes on the phone and the box then answers `needs_fingerprint`, the phone goes
+  straight to the fingerprint, with the box's words, without asking Yes or No again.
 - **When no box takes part, the device asks by its own rules, and must have them.** That is an
   account with no box (the whole key on the device, section 7) and two devices signing while the box
   is off (section 8g). A box is an upgrade here: it remembers a list's last version for every device
   and settles disputes, but being asked before something hard to undo does not depend on having one.
-  A device with no rules of its own asks nothing on those paths (section 10).
+  At level 2 Marble shows the phone's own fingerprint prompt, with nothing to check it (section 4,
+  fallback). A device with no rules of its own asks nothing on those paths (section 10).
 
 What the box asks about, in its words (`<kind>` is the kind's name: profile, follow list, mute list,
 relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
 
-| Event | The box | `why` |
-|---|---|---|
-| A list (kind 0, 3, 10000 to 19999, 30000 to 39999) dated more than 600 s ahead | refuses | `<Kind> dated <day>: a version dated ahead would block every later change` |
-| A deletion with an `a` tag dated more than 600 s ahead | refuses | `Deletion dated <day>: it would delete every version until then` |
-| Anything else dated more than 600 s ahead | asks | `<Kind> dated in the future (<day>)` |
-| A request to vanish (kind 62) | asks | `Ask relays to erase everything you have ever published` |
-| A deletion naming a kept kind by `a` (`kind:pubkey:d`) or `k` | asks | `Delete your <kind of the first one>` |
-| A deletion with five or more `e` and `a` tags | asks | `Delete <n> of your events` |
-| A profile that empties two or more of name, display_name, picture, about, nip05, lud16, banner, website, or leaves none of name, display_name, about, picture, nip05, lud16 filled | asks | `Wipe your profile: <the fields emptied>` (`everything` when none were filled before, or there is no earlier version) |
-| A kept list whose private part (content not blank and not starting with `{`) is now blank | asks | `Empty your private <kind>` |
-| A kept list of 3 or more entries left with none | asks | `Empty your <kind> (it has <n> <items>)` |
-| A relay list (10002, 10006, 10007, 30002): 2 or more relays removed, and at least half | asks | `Remove <r> of your <n> relays` (and ` (and add <a>)`) |
-| Another kept list: 10 or more entries removed, and at least a fifth | asks | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
-| A follow list with no `p` tag, whatever came before | asks | `Empty your follow list` |
+| Event | The box | Level | `why` |
+|---|---|---|---|
+| A list (kind 0, 3, 10000 to 19999, 30000 to 39999) dated more than 600 s ahead | refuses | | `<Kind> dated <day>: a version dated ahead would block every later change` |
+| A deletion with an `a` tag dated more than 600 s ahead | refuses | | `Deletion dated <day>: it would delete every version until then` |
+| Anything else dated more than 600 s ahead | asks | 1, or 2 when the same event dated now would be 2 | `<Kind> dated in the future (<day>)` |
+| A request to vanish (kind 62) | asks | 2 | `Ask relays to erase everything you have ever published` |
+| A deletion naming a kept kind by `a` (`kind:pubkey:d`) or `k` | asks | 2 | `Delete your <kind of the first one>` |
+| A deletion with five or more `e` and `a` tags | asks | 1 | `Delete <n> of your events` |
+| A profile that empties two or more of name, display_name, picture, about, nip05, lud16, banner, website, or leaves none of name, display_name, about, picture, nip05, lud16 filled | asks | 2 when none of those six is left filled (the whole profile goes), else 1 | `Wipe your profile: <the fields emptied>` (`everything` when none were filled before, or there is no earlier version) |
+| A kept list whose private part (content not blank and not starting with `{`) is now blank | asks | 2 | `Empty your private <kind>` |
+| A kept list of 3 or more entries left with none | asks | 2 for the follow list, else 1 | `Empty your <kind> (it has <n> <items>)` |
+| A relay list (10002, 10006, 10007, 30002): 2 or more relays removed, and at least half | asks | 1 | `Remove <r> of your <n> relays` (and ` (and add <a>)`) |
+| Another kept list: 10 or more entries removed, and at least a fifth | asks | 1 | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
+| A follow list with no `p` tag, whatever came before | asks | 2 | `Empty your follow list` |
+
+Where a case sat between the levels, it took level 2: a profile left with only a banner or a website,
+or with a name that is only white space; a first profile with nothing in it, or one that is not a JSON
+object; a request to vanish, or a list's deletion by `k`, dated ahead. A follow list cut to one person
+is a big unfollow, level 1. Emptying a list other than the follow list (mutes, bookmarks, a follow set,
+relays) is level 1.
 
 The rows that compare need the earlier version: the last version of that list the box signed, from
 its list store (section 6). With none, they say nothing, as on a new phone. A child key's lists
@@ -1222,10 +1266,14 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
 - **A password is now worth the whole account.** Whoever has it can add a device of their own, and from
   then on sign anything. What stands in the way is the guessing limit, and the admin's block and remove.
-- The box cannot check that a device really asked before a hard-to-undo signature. It takes the device's word.
+- The box cannot check that a device really asked before a level 1 signature. It takes the device's word.
+- **At level 2 the box checks a fingerprint, not that it came from a phone.** It cannot tell a phone's
+  chip key from the command line's software one (section 9, proof that a chip key lives in a chip).
+  That only the phone says Yes rests on the other devices never sending `fp` with `sign`.
 - **With the box off, only the asking device's own rules stand between a request and a hard-to-undo
-  signature.** A helper (section 8g) signs without judging. Marble asks by its own rules. The Mac app
-  and the command-line device have none, so signing through a helper they ask nothing.
+  signature.** A helper (section 8g) signs without judging. Marble asks by its own rules, with its own
+  fingerprint prompt at level 2 that nothing checks. The Mac app and the command-line device have none,
+  so signing through a helper they ask nothing.
 - The box compares a list only with the last version it signed. A version signed while the box was
   off (section 8g), or by another signer, is not known to it, so it may compare with an older one.
 - Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and

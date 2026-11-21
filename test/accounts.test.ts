@@ -389,16 +389,28 @@ test('a device added through the page gets its piece only with the approval code
   assert.ok(valid(await D.signEvent(tablet, th, note(held.npub), send, NOW)));
 });
 
-test('hard-to-undo signatures need a Yes on the device; ordinary ones do not', async () => {
+test('hard-to-undo signatures need a Yes on the device, the ones never done by accident the fingerprint; ordinary ones neither', async () => {
   const { box, send } = world();
   const phone = device('Phone');
   const held = await D.createWithBox(phone, D.readQr(box.qr('http://box')!), send, NOW);
   const ev = (kind: number, tags: string[][], content = '') => ({ pubkey: held.npub, created_at: NOW, kind, tags, content });
   const many = ['1', '2', '3', '4', '5'].map((x) => ['e', x.repeat(64)]);
-  const hard = [ev(62, [['relay', 'ALL_RELAYS']]), ev(5, many), ev(3, []), ev(0, [], '{}'), ev(0, [], '{"name":"  "}')];
+  const hard = [ev(5, many), ev(1, [], 'later')].map((e, i) => (i === 1 ? { ...e, created_at: NOW + 3600 } : e));
+  const never = [ev(62, [['relay', 'ALL_RELAYS']]), ev(3, []), ev(0, [], '{}'), ev(0, [], '{"name":"  "}'), ev(5, [['a', `3:${held.npub}:`]])];
   const fine = [ev(1, []), ev(5, many.slice(0, 4)), ev(3, [['p', 'a'.repeat(64)]]), ev(0, [], '{"name":"Aaron"}'), ev(7, [['e', 'a'.repeat(64)]], '+')];
   for (const e of hard) await assert.rejects(D.signEvent(phone, held, e, send, NOW), /needs_tap/);
   for (const e of hard) assert.ok(valid(await D.signEvent(phone, held, e, send, NOW, undefined, true)));
+  for (const e of never) {
+    await assert.rejects(D.signEvent(phone, held, e, send, NOW), /needs_fingerprint/);
+    await assert.rejects(D.signEvent(phone, held, e, send, NOW, undefined, true), /needs_fingerprint/, 'tapped alone');
+    assert.ok(valid(await D.signEvent(phone, held, e, send, NOW, undefined, true, undefined, phone.fp)));
+  }
+  // A second device with no chip key (a phone with no fingerprint set up) is told so, in the box's words.
+  const bare = { ...newMemberKey(), name: 'Old phone' };
+  await D.addMember(phone, held, { key: bare.key, name: bare.name, kind: 'device' }, send, NOW);
+  const bh = await D.join(bare, held.boxKey, held.npub, send, NOW);
+  await assert.rejects(D.signEvent(bare, bh, never[0], send, NOW, undefined, true), (e: any) => e.code === 'no_chip_key' && e.why === 'Ask relays to erase everything you have ever published');
+  assert.ok(valid(await D.signEvent(bare, bh, hard[0], send, NOW, undefined, true)), 'level 1 is unchanged for it');
   for (const e of fine) assert.ok(valid(await D.signEvent(phone, held, e, send, NOW)));
   // The box notes when the device last signed.
   assert.ok(box.only()!.members[0].last! > 0);

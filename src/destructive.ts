@@ -1,7 +1,14 @@
 // What the box asks about before it signs, and what it never signs (SPEC 11.6, "The tap"). The box is the
-// authority on this (Aaron, 2026-11-20): it answers `needs_tap` with the reason in plain words, and a device
-// that gets that asks the person and, on Yes, sends the same request again with `tapped: true`. Devices need
-// no copy of these rules. Marble may keep its own checks on top.
+// authority on this (Aaron, 2026-11-20): it answers with the reason in plain words, and a device asks the person
+// and sends the same request again with their answer. Devices need no copy of these rules. Marble may keep its
+// own checks on top.
+//
+// Two levels (Aaron, 2026-11-20). Level 1, "Are you sure?": Yes or No on the device the person is using, and the
+// device says Yes with `tapped: true` (the box answers `needs_tap`). Level 2, "Never by accident": erasing the
+// account, wiping the profile, emptying the follow list, deleting a whole kept list, a list's private part
+// emptied. Yes only on the phone, behind the fingerprint the box checks as it does for an account change (SPEC 4):
+// the box answers `needs_fingerprint` (or `no_chip_key` to a device with no chip key), and `tapped` alone never
+// signs one.
 //
 // The rules are Marble's (android/signer/.../cosign/core/Policy.kt, `refuse` and `hold`), in the words Marble
 // shows the person, plus the box's own four from before: a request to vanish, five or more deletions at once,
@@ -80,37 +87,60 @@ export function refusal(e: UnsignedEvent, now: number): string | null {
   return null;
 }
 
-/** Set when the person has to say Yes first: what would be lost, in plain words. `prev` is the last version the box signed. */
-export function hold(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): string | null {
-  if (e.created_at > now + AHEAD) return refusal(e, now) ? null : `${upper(kindName(e.kind))} dated in the future (${day(e.created_at)})`;
-  if (e.kind === 62) return 'Ask relays to erase everything you have ever published';
+/** How hard to undo: 1 asks "Are you sure?", 2 is never done by accident (only on the phone, behind the fingerprint). */
+export type Level = 1 | 2;
+/** A question for the person: what would be lost, in plain words, and its level. */
+export interface Question { says: string; level: Level }
+const q = (says: string, level: Level): Question => ({ says, level });
+
+/** Set when the person has to say Yes first: what would be lost, in plain words, and how. `prev` is the last version the box signed. */
+export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): Question | null {
+  if (e.created_at > now + AHEAD) {
+    if (refusal(e, now)) return null;
+    // Dated ahead is level 1, unless the same event dated now would be level 2 (a request to vanish, a list's deletion by k).
+    return q(`${upper(kindName(e.kind))} dated in the future (${day(e.created_at)})`, question({ ...e, created_at: now }, prev, now)?.level ?? 1);
+  }
+  if (e.kind === 62) return q('Ask relays to erase everything you have ever published', 2);
   if (e.kind === 5) {
     const targets = e.tags.filter((t) => t.length && (t[0] === 'e' || t[0] === 'a')).length;
     const lists = e.tags.filter((t) => t.length > 1 && (t[0] === 'a' || t[0] === 'k')).map((t) => asInt(t[1].split(':')[0])).filter((k) => KEPT.has(k));
-    if (lists.length) return `Delete your ${kindName(lists[0])}`;
-    return targets >= 5 ? `Delete ${targets} of your events` : null;
+    if (lists.length) return q(`Delete your ${kindName(lists[0])}`, 2);
+    return targets >= 5 ? q(`Delete ${targets} of your events`, 1) : null;
   }
   if (e.kind === 0) {
     const after = profileOf(e.content) ?? {}, was = (prev && profileOf(prev.content)) ?? {};
     const gone = PROFILE_FIELDS.filter((k) => filled(was[k]) && !filled(after[k]));
-    return gone.length >= 2 || !ANY_OF.some((k) => filled(after[k])) ? `Wipe your profile: ${gone.join(', ') || 'everything'}` : null;
+    // Nothing left that says who this is: the whole profile goes. Fields lost with some still there: level 1.
+    const wiped = !ANY_OF.some((k) => filled(after[k]));
+    return gone.length >= 2 || wiped ? q(`Wipe your profile: ${gone.join(', ') || 'everything'}`, wiped ? 2 : 1) : null;
   }
-  const noOne = e.kind === 3 && !e.tags.some((t) => t[0] === 'p') ? 'Empty your follow list' : null;
+  const noOne = e.kind === 3 && !e.tags.some((t) => t[0] === 'p') ? q('Empty your follow list', 2) : null;
   if (!KEPT.has(e.kind) || !prev) return noOne;
   // The encrypted private part (private bookmarks, private mutes): an app that cannot read it may write the list back without it.
-  if (emptied(prev, e)) return `Empty your private ${kindName(e.kind)}`;
+  if (emptied(prev, e)) return q(`Empty your private ${kindName(e.kind)}`, 2);
   const before = items(prev), after = items(e), kept = new Set(after), had = new Set(before);
   const removed = before.filter((x) => !kept.has(x)).length, added = after.filter((x) => !had.has(x)).length;
-  if (!after.length && before.length >= 3) return `Empty your ${kindName(e.kind)} (it has ${plural(before.length, e.kind)})`;
+  // Of the lists emptied, only the follow list is level 2.
+  if (!after.length && before.length >= 3) return q(`Empty your ${kindName(e.kind)} (it has ${plural(before.length, e.kind)})`, e.kind === 3 ? 2 : 1);
   const big = RELAYISH.has(e.kind) ? removed >= 2 && removed >= before.length * 0.5 : removed >= 10 && removed >= before.length * 0.2;
-  if (big) return `Remove ${removed} of your ${before.length} ${itemName(e.kind)}s` + (added > 0 ? ` (and add ${added})` : '');
+  if (big) return q(`Remove ${removed} of your ${before.length} ${itemName(e.kind)}s` + (added > 0 ? ` (and add ${added})` : ''), 1);
   return noOne;
 }
 
-/** The box's answer for an event: sign it, ask first (`says` is the question), or refuse it (`says` is why). */
-export function judge(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): { decision: 'sign' | 'ask' | 'refuse'; says: string | null } {
+/** The question's words alone, as before levels. */
+export function hold(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): string | null { return question(e, prev, now)?.says ?? null; }
+
+/**
+ * The box's answer for an event: sign it, ask first (`says` is the question, `level` how), or refuse it (`says` is
+ * why). `level` is null unless it asks.
+ */
+export function judge(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): { decision: 'sign' | 'ask' | 'refuse'; says: string | null; level: Level | null } {
   const no = refusal(e, now);
-  if (no) return { decision: 'refuse', says: no };
-  const ask = hold(e, prev, now);
-  return ask ? { decision: 'ask', says: ask } : { decision: 'sign', says: null };
+  if (no) return { decision: 'refuse', says: no, level: null };
+  const ask = question(e, prev, now);
+  return ask ? { decision: 'ask', says: ask.says, level: ask.level } : { decision: 'sign', says: null, level: null };
 }
+
+/** What a device that is not the phone says for a level 2 event it was not let sign. */
+export const FROM_PHONE = 'Do this from your phone, with your fingerprint.';
+export const onlyFromPhone = (why: string) => `${why.replace(/[.\s]+$/, '')}. ${FROM_PHONE}`;

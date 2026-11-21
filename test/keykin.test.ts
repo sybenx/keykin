@@ -289,8 +289,9 @@ test('child keys: the same two pieces sign as a different npub, and the box chec
     assert.equal((await send(await seal({ op: 'sign', event: ev, commit, child: t, epoch: held.epoch, account: held.npub }, phone.sk, NOW))).error, 'bad_child');
     assert.equal((await send(await seal({ op: 'ecdh', peer: home.npub, child: t, epoch: held.epoch, account: held.npub }, phone.sk, NOW))).error, 'bad_child');
   }
-  // Hard-to-undo events still need the tap.
-  await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 62 }, send, NOW, undefined, undefined, home), /needs_tap/);
+  // Hard-to-undo events still need the tap, and those never done by accident the fingerprint.
+  await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 5, tags: ['1', '2', '3', '4', '5'].map((x) => ['e', x.repeat(64)]) }, send, NOW, undefined, undefined, home), /needs_tap/);
+  await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 62 }, send, NOW, undefined, true, home), /needs_fingerprint/);
 
   // Another device makes the same child on its own, and nothing about children is stored at the box.
   const mac = await add('Mac');

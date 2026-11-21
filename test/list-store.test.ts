@@ -12,6 +12,8 @@ import { Box, keptSetsOf } from '../box/box.ts';
 import { Lists, MemoryShelf, KEPT_SETS } from '../box/lists.ts';
 import { startBox } from '../box/server.ts';
 import { newBunker, answerRequest, errorText } from '../src/nip46.ts';
+import { KeykinError } from '../src/bytes.ts';
+import { main } from '../cli/keykin.ts';
 
 const NOW = 1_800_000_000;
 const pk = (i: number) => i.toString(16).padStart(64, '0');
@@ -55,7 +57,7 @@ test('a site\'s own key (a child) is not compared, and nothing of it is kept', a
   const as = (e: any, tapped?: boolean) => D.signEvent(a.phone, a.held, { ...e, pubkey: child.npub }, send, NOW, undefined, tapped, child).then(() => 'signed', (err) => `${err.code}${err.why ? ': ' + err.why : ''}`);
   assert.equal(await as(follows(30)), 'signed');
   assert.equal(await as(follows(3)), 'signed', 'nothing to compare with');
-  assert.equal(await as(follows(0)), 'needs_tap: Empty your follow list', 'the rules that need no earlier version still speak');
+  assert.equal(await as(follows(0)), 'needs_fingerprint: Empty your follow list', 'the rules that need no earlier version still speak');
   assert.equal((box.lists.shelf as MemoryShelf).names(a.held.npub).length, 0);
 });
 
@@ -140,7 +142,7 @@ test('on disk: one file per list beside state.json, read again after a restart, 
     assert.equal(f.key, '3'); assert.equal(f.at, NOW); assert.equal(f.event.tags.length, 30);
     assert.equal(f.event.id, eventId({ ...follows(30), pubkey: a.held.npub }));
     b = await startBox({ dir: d, port: 0, log: () => {} });
-    assert.equal(await a.signer(local(b.box))(follows(0)), 'needs_tap: Empty your follow list (it has 30 follows)', 'compared after a restart');
+    assert.equal(await a.signer(local(b.box))(follows(0)), 'needs_fingerprint: Empty your follow list (it has 30 follows)', 'compared after a restart');
     b.box.removeAccount(a.held.npub);
     assert.equal(existsSync(mine), false, 'its lists go with it');
     await b.close();
@@ -158,7 +160,7 @@ test('an old box with no list store keeps working, and lists of accounts no long
     b = await startBox({ dir: d, port: 0, log: () => {} });
     const sign = a.signer(local(b.box));
     assert.equal(await sign(follows(3)), 'signed', 'nothing to compare with, as on a new phone');
-    assert.equal(await sign(follows(0)), 'needs_tap: Empty your follow list (it has 3 follows)', 'and from then on it compares');
+    assert.equal(await sign(follows(0)), 'needs_fingerprint: Empty your follow list (it has 3 follows)', 'and from then on it compares');
     // A folder for an account this box does not hold goes at the next start.
     new Lists(new (await import('../box/lists.ts')).DiskShelf(join(d, 'lists'))).keep('ab'.repeat(32), { ...follows(2), pubkey: 'ab'.repeat(32), id: 'x' }, 200, NOW);
     await b.close();
@@ -168,27 +170,52 @@ test('an old box with no list store keeps working, and lists of accounts no long
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('needs_tap and dated_ahead carry the reason as why, the bunker and the command line say it, other errors carry none', async () => {
+test('needs_tap, needs_fingerprint and dated_ahead carry the reason as why, the bunker and the command line say it, other errors carry none', async () => {
   const box = new Box();
   const a = await account(local(box), box.qr('http://box')!);
-  const r = await a.sign({ created_at: NOW, kind: 62, tags: [['relay', 'ALL_RELAYS']], content: '' });
-  assert.equal(r, 'needs_tap: Ask relays to erase everything you have ever published');
+  const five = { created_at: NOW, kind: 5, tags: Array.from({ length: 5 }, (_, i) => ['e', pk(i + 1)]), content: '' };
+  assert.equal(await a.sign(five), 'needs_tap: Delete 5 of your events');
   // The error itself: code, message and why.
-  const err: any = await D.signEvent(a.phone, a.held, { created_at: NOW, kind: 62, tags: [], content: '', pubkey: a.held.npub }, local(box), NOW).catch((e) => e);
-  assert.equal(err.code, 'needs_tap'); assert.equal(err.why, 'Ask relays to erase everything you have ever published');
-  assert.equal(err.message, 'needs_tap: Ask relays to erase everything you have ever published');
+  const err: any = await D.signEvent(a.phone, a.held, { ...five, pubkey: a.held.npub }, local(box), NOW).catch((e) => e);
+  assert.equal(err.code, 'needs_tap'); assert.equal(err.why, 'Delete 5 of your events');
+  assert.equal(err.message, 'needs_tap: Delete 5 of your events');
+  // Level 2 carries its words the same way, under its own code, and tapped does not sign it.
+  const vanish = { created_at: NOW, kind: 62, tags: [['relay', 'ALL_RELAYS']], content: '' };
+  assert.equal(await a.sign(vanish, true), 'needs_fingerprint: Ask relays to erase everything you have ever published');
+  const two: any = await D.signEvent(a.phone, a.held, { ...vanish, pubkey: a.held.npub }, local(box), NOW, undefined, true).catch((e) => e);
+  assert.equal(two.code, 'needs_fingerprint'); assert.equal(two.why, 'Ask relays to erase everything you have ever published');
   // Dated ahead is refused whatever the person says.
   assert.equal(await a.sign({ ...follows(3), created_at: NOW + 3600 }, true), 'dated_ahead: Follow list dated 2027-01-15: a version dated ahead would block every later change');
   // An ordinary error has no why.
   const plain: any = await D.signEvent(a.phone, a.held, { ...follows(1), pubkey: 'ab'.repeat(32) }, local(box), NOW).catch((e) => e);
   assert.equal(plain.code, 'wrong_account'); assert.equal(plain.why, undefined);
-  // The bunker, which cannot ask: a site that asks it to sign gets the box's words, not a bare code.
+  // The bunker, which cannot ask: a site that asks it to sign gets the box's words, not a bare code, and for level 2
+  // that it is done from the phone.
   const b = newBunker(); b.clients.push('cd'.repeat(32));
   const real = () => Math.floor(Date.now() / 1000);       // the bunker signs at the time it is
-  const viaBunker = await answerRequest(b, a.phone, a.held, (async (r) => box.handle(JSON.parse(JSON.stringify(r)), real())) as D.Send, 'cd'.repeat(32), 'sign_event',
-    [JSON.stringify({ created_at: real(), kind: 3, tags: [], content: '' })], () => {}).catch(errorText);
-  assert.equal(viaBunker, 'needs_tap: Empty your follow list');
+  const viaBunker = (e: object) => answerRequest(b, a.phone, a.held, (async (r) => box.handle(JSON.parse(JSON.stringify(r)), real())) as D.Send, 'cd'.repeat(32), 'sign_event',
+    [JSON.stringify({ created_at: real(), content: '', ...e })], () => {}).then(() => 'signed', errorText);
+  assert.equal(await viaBunker({ kind: 5, tags: five.tags }), 'needs_tap: Delete 5 of your events');
+  assert.equal(await viaBunker({ kind: 3, tags: [] }), 'needs_fingerprint: Empty your follow list. Do this from your phone, with your fingerprint.');
   assert.equal(errorText(plain), 'wrong_account'); assert.equal(errorText(new Error('x')), 'failed');
+  // An account change's needs_fingerprint has no words, and is said as before.
+  assert.equal(errorText(new KeykinError('needs_fingerprint')), 'needs_fingerprint');
+  assert.equal(errorText(new KeykinError('no_chip_key', 'Empty your follow list', 'Empty your follow list')), 'no_chip_key: Empty your follow list. Do this from your phone, with your fingerprint.');
   // The command-line device prints the error's message, which is the same words.
-  assert.match(String(err.message), /^needs_tap: Ask relays/);
+  assert.match(String(err.message), /^needs_tap: Delete 5/);
+});
+
+test('the command line never signs level 2, and says in plain words that it is done from the phone', async () => {
+  const b = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-l2-box-')), port: 0, log: () => {} });
+  const home = mkdtempSync(join(tmpdir(), 'kk-l2-cli-'));
+  try {
+    const lines: string[] = [];
+    await main(['create', b.qr()!, 'Laptop', '--username', 'leveltwo', '--password', 'long enough pw'], (x) => lines.push(x), home);
+    const sign = (e: object) => main(['sign', JSON.stringify(e)], () => {}, home).then(() => 'signed', (err) => String(err?.message ?? err));
+    assert.equal(await sign({ kind: 62, tags: [['relay', 'ALL_RELAYS']] }), 'Not signed: Ask relays to erase everything you have ever published. Do this from your phone, with your fingerprint.');
+    assert.equal(await sign({ kind: 3, tags: [] }), 'Not signed: Empty your follow list. Do this from your phone, with your fingerprint.');
+    // Level 1 is as before: the box's words with its code.
+    assert.equal(await sign({ kind: 5, tags: Array.from({ length: 5 }, (_, i) => ['e', pk(i + 1)]) }), 'needs_tap: Delete 5 of your events');
+    assert.equal(await sign({ kind: 1, content: 'gm' }), 'signed');
+  } finally { await b.close(); rmSync(home, { recursive: true, force: true }); }
 });

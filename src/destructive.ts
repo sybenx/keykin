@@ -149,7 +149,7 @@ export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: numb
   // Where you are found and where DMs to you go: every change is looked at by hand (Aaron, 2026-11-21), even one
   // that only adds, and even when no earlier version is known (an app's first list would replace one signed elsewhere).
   // A child key's relays are its app's to set: that is what the child is for (SPEC 8k), so they are not reviewed.
-  if (REVIEWED.has(e.kind) && !child) return relayReview(e, prev);
+  if (REVIEWED.has(e.kind)) return child ? null : relayReview(e, prev);
   if (!KEPT.has(e.kind) || !prev) return noOne;
   // The encrypted private part (private bookmarks, private mutes): an app that cannot read it may write the list back without it.
   if (emptied(prev, e)) return q(`Empty your private ${kindName(e.kind)}`, 2);

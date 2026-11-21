@@ -162,6 +162,7 @@ where something can go, and none of them ever refuses a signature. The numbers a
 | Revoked grants, grants' last use, limits | 2000 each | The oldest goes; a grant's last kind goes with its last use | Section 11.5 |
 | Browsers remembered for nostrconnect codes | 20, for 30 days | The oldest goes | Section 11.5 |
 | Activity lines | 60 | The oldest goes | |
+| Rows of the signature log | 200 per account (`MAX_SIGNED`) | The oldest `signedAt` goes | Section 11.6, Recent signing |
 | Named sets the list store compares | 200, set on the admin page or by `KEYKIN_KEPT_SETS` | Not compared, never refused | The soft cap, above |
 
 What a device that was removed left behind goes at the cycle that removed it (section 8f). The
@@ -1240,6 +1241,35 @@ shorter one.
 the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
 last used. The page shows them.
 
+**Recent signing** (2026-11-21). The box keeps a signature log per account, `signed` in its state:
+which two pieces made each signature or message key. A row is
+
+```
+{ "signedAt": <unix s>, "receivedAt": <unix s>, "asker": "<member key>", "helper": "<member key>",
+  "op": "sign" | "ecdh", "kind"?: <event kind>, "eventId"?: "<hex>", "grant"?: "<grant id>" }
+```
+
+`asker` is the piece that started the round (section 3), `helper` the one that answered. `kind` and
+`eventId` are for `sign` only, `grant` when the request named one. Rows are kept in `signedAt` order,
+at most 200 per account, the oldest going first (section 6, How much the box keeps). Today the box
+writes a row each time it answers a `sign` or an `ecdh`, with itself as `helper` and `signedAt` =
+`receivedAt` = when it answered; a child key's signature (section 8k) is a row like any other, with
+its own event id. A message key for the same asker, helper and grant within 10 minutes of the last
+one (`ECDH_SAME`) replaces that row rather than adding one, since reading a conversation asks for
+many and they would push every signature out. The log is saved with the last-use times, at most
+once a minute, so a box stopped hard can lose the last minute of rows. Rows naming a member that a
+cycle removed stay until they age out.
+
+`me` returns `signed`, newest first, each row with `askerName` and `helperName` (the member's name
+now, or `null` when it was removed; `helperName` is `null` for the box answering). The page shows it
+under Devices as Recent signing, one row each, worded "<device> + your box", then what was made
+("Signed a reaction for jumble.social", "Made a message key"), when, and the first 8 hex of the
+event id. 15 rows, then Show all.
+
+**Not in the log yet:** signatures two devices make without the box (section 8g, any piece can be
+the helper, section 3). The box never sees them. The page says so in one line under Recent signing.
+How a helping device would report them is section 11.7, not built.
+
 **Possible later: tiered sign-in strength (not adopted).** An idea from 2026-11-18, kept for
 later. A passkey or a scan would be strong and a password alone weak:
 
@@ -1298,6 +1328,8 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 ## 9. Not built yet
 
 - **A background service for the phone's site signer** (section 8j).
+- **Helpers reporting signatures made without the box** (section 11.7). Recent signing lists only
+  what the box helped with.
 - **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
   `state.json`, start it, and read the new secret from its output.
 - **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the

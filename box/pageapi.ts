@@ -399,6 +399,9 @@ export class PageApi {
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
+      // Who signed with whom, newest first (SPEC 11.6, Recent signing). Names are the list's now; a removed piece has none.
+      signed: [...(a.signed ?? [])].reverse().map((r) => ({ ...r, askerName: a.members.find((m) => m.key === r.asker)?.name ?? null,
+        helperName: r.helper === this.box.state.key ? null : a.members.find((m) => m.key === r.helper)?.name ?? null })),
       grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null,
         lists: typeof g.lists === 'boolean' ? g.lists : null, dms: typeof g.dms === 'boolean' ? g.dms : null, want: a.wants?.[g.id] ?? null }))),
     };

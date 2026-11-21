@@ -900,7 +900,8 @@
           card(el('h2', {}, 'Remove blocked devices for good'), el('div', { className: 'sub' }, 'A blocked device still holds its old piece. Removing makes that piece useless. Your npub does not change.'),
             blocked.length ? noteForm({ kind: 'cycle', button: `Remove ${blocked.length} ${blocked.length === 1 ? 'device' : 'devices'}`, plain: true, needs: 'Asks for a Yes on one of your devices', waiting: 'Waiting for a Yes on one of your devices…',
               done: () => { flash = 'Blocked devices are removed for good.'; refresh().then(draw); return el('div', { className: 'sub' }, 'Removed.'); } })
-              : el('div', { className: 'with-note' }, el('button', { className: 'btn', disabled: true }, 'Nothing to remove'))))],
+              : el('div', { className: 'with-note' }, el('button', { className: 'btn', disabled: true }, 'Nothing to remove')))),
+        signingCard()],
       sites: () => [
         head('Sites and apps', 'Everything that can sign as you. Revoking here stops it at the box, even if the device that let it in is off.'),
         el('div', { className: 'card rows' }, me.grants.length ? me.grants.map(siteRow)
@@ -932,6 +933,18 @@
       el('div', { className: 'shell' },
         el('nav', { ariaLabel: 'Sections' }, SECTIONS.map(([id, label]) => el('button', { ariaCurrent: section === id ? 'page' : 'false', on: { click: () => go(id) } }, label))),
         el('main', {}, flash ? el('div', { className: 'notice', id: 'status', role: 'status' }, flash) : null, noPassword(), sections[section]())));
+  }
+  // Recent signing (SPEC 11.6): which two pieces made each signature or message key. Today only the box's own help.
+  let allSigned = false;
+  function signingCard() {
+    const rows = me.signed ?? [], shown = allSigned ? rows : rows.slice(0, 15);
+    return el('div', { className: 'card', id: 'signing' }, el('h2', {}, 'Recent signing'),
+      el('div', { className: 'sub' }, 'Every signature takes two pieces. These are the ones your box helped with. Signatures two devices make without the box are not listed yet.'),
+      el('div', { className: 'signed' }, shown.length ? shown.map((r) => {
+        const { who, detail } = globalThis.KeykinRows.signedRow(r, me.boxKey, me.grants);
+        return el('div', { className: 'row' }, el('div', { className: 'grow' }, el('div', { className: 'name' }, who), el('div', { className: 'detail' }, detail)));
+      }) : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing signed yet.'))),
+      rows.length > shown.length ? el('button', { className: 'go-link linkish', on: { click: () => { allSigned = true; draw(); } } }, `Show all ${rows.length}`) : null);
   }
   // An account made before setup asked for a password has none: say so on every section until it is set (SPEC 11.3).
   function noPassword() {

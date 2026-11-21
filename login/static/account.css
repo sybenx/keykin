@@ -148,3 +148,7 @@ a.linkbtn:hover { color:var(--on); }
 .stickcard a#stickback { align-self:flex-start; font-weight:500; }
 @media (max-width:820px) { .stick { --end:104px; } }
 @media (max-width:420px) { .stick { --end:96px; } }
+/* Recent signing on Devices: a list inside a card, tighter than the device rows. Colours come from the tokens above, so dark mode follows. */
+.signed { display:flex; flex-direction:column; }
+.signed .row { padding:10px 0; }
+.signed .name { font-size:15px; }

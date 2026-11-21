@@ -33,5 +33,20 @@
   const scopeShown = (g, k) => (typeof g.want?.[k] === 'boolean' ? g.want[k] : g[k] === true);
   /** "waiting for Pixel 9a" while a want differs from what the device reported, else null. */
   const scopeWaiting = (g) => (SCOPES.some((k) => typeof g.want?.[k] === 'boolean' && typeof g[k] === 'boolean' && g.want[k] !== g[k]) ? `waiting for ${g.deviceName}` : null);
-  globalThis.KeykinRows = { siteDetail, kindWord, when, scopeShown, scopeWaiting };
+  /**
+   * One row of Recent signing (SPEC 11.6): r is a row of `me.signed`, boxKey `me.boxKey`, grants `me.grants`.
+   * Returns who signed ("Pixel 9a + your box") and the detail line.
+   */
+  function signedRow(r, boxKey, grants = [], now = Date.now() / 1000) {
+    const asker = r.askerName ?? 'A removed device';
+    const helper = r.helper === boxKey ? 'your box' : r.helperName ?? 'a removed device';
+    const kind = kindWord(r.kind);
+    const what = r.op === 'ecdh' ? 'made a message key' : kind ? `signed ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}` : 'signed an event';
+    const g = r.grant ? grants.find((x) => x.id === r.grant) : null;
+    const site = g ? ` for ${g.name.replace(/^https?:\/\//, '')}` : r.grant ? ' for a site that was signed out' : '';
+    const id = typeof r.eventId === 'string' && /^[0-9a-f]{8}/.test(r.eventId) ? `event ${r.eventId.slice(0, 8)}…` : null;
+    return { who: `${asker} + ${helper}`, detail: [`${cap(what)}${site}`, ago(r.signedAt, now), id].filter(Boolean).join(' · ') };
+  }
+  const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+  globalThis.KeykinRows = { siteDetail, kindWord, when, scopeShown, scopeWaiting, signedRow };
 })();

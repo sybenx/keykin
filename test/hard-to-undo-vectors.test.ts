@@ -126,8 +126,10 @@ test('hard-to-undo vectors: without an earlier version, only the rules that need
     const alone = V.cases.find((x: any) => !x.prev && JSON.stringify(x.event) === JSON.stringify(c.event));
     const got = await sign(c.event);
     // The same event with no earlier version is a case of its own where the file has one; otherwise the answer is
-    // never more than with one (no rule asks only because nothing came before), and refusals do not depend on it.
-    if (alone) assert.equal(got, wanted(alone.answers.box, false), label(c));
+    // never more than with one, and refusals do not depend on it. The one rule that asks only because nothing came
+    // before is marble-relays-reviewed: a relay list or DM relays with no earlier version is always asked about.
+    if (c.rules.includes('marble-relays-reviewed') && !alone) assert.match(got, /^needs_tap: Set your /, label(c));
+    else if (alone) assert.equal(got, wanted(alone.answers.box, false), label(c));
     else if (c.answers.box.decision === 'ask' && got !== 'signed') assert.ok(alone || /^needs_(tap|fingerprint): /.test(got), label(c));
     else if (c.answers.box.decision === 'refuse') assert.equal(got, wanted(c.answers.box, false), label(c));
     else if (c.answers.box.decision === 'sign') assert.equal(got, 'signed', label(c));

@@ -51,6 +51,22 @@ export function relaysCut(before: string[], after: string[]): boolean {
   const kept = new Set(after), removed = before.filter((x) => !kept.has(x)).length;
   return before.length > 0 && removed >= before.length * 0.5 && (removed >= 2 || removed === before.length);
 }
+/** The relay lists whose every change is asked about: the relay list and the DM relays. */
+export const REVIEWED = new Set([10002, 10050]);
+/** The set of relays a list names, as compared: r and relay tags, a trailing / not counted. */
+const relaysOf = (e: UnsignedEvent) => [...new Set(e.tags.filter((t) => t.length > 1 && (t[0] === 'r' || t[0] === 'relay')).map((t) => t[1].replace(/\/+$/, '')))];
+/** Any change to a reviewed relay list, in words that say which relays come and go. Null when the relays are the same. */
+function relayReview(e: UnsignedEvent, prev: UnsignedEvent | null): Question | null {
+  const after = relaysOf(e), name = kindName(e.kind);
+  if (!prev) return q(after.length ? `Set your ${name} to ${relayWords(after)}` : `Set your ${name} to no relays`, 1);
+  const before = relaysOf(prev), had = new Set(before), kept = new Set(after);
+  const added = after.filter((x) => !had.has(x)), removed = before.filter((x) => !kept.has(x));
+  if (!added.length && !removed.length) return null;
+  if (!after.length) return q(`Remove every relay from your ${name}: ${relayWords(before)}`, 1);
+  if (!removed.length) return q(`Add ${relayWords(added)} to your ${name}`, 1);
+  if (!added.length) return q(`Remove ${relayWords(removed)} from your ${name}`, 1);
+  return q(`Change your ${name} from ${relayWords(before)} to ${relayWords(after)}`, 1);
+}
 const replaceable = (k: number) => k === 0 || k === 3 || (k >= 10000 && k < 20000) || (k >= 30000 && k < 40000);
 /** A named set: one version per d tag. */
 export const namedSet = (k: number) => k >= 30000 && k < 40000;
@@ -109,11 +125,11 @@ export interface Question { says: string; level: Level }
 const q = (says: string, level: Level): Question => ({ says, level });
 
 /** Set when the person has to say Yes first: what would be lost, in plain words, and how. `prev` is the last version the box signed. */
-export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): Question | null {
+export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: number, child = false): Question | null {
   if (e.created_at > now + AHEAD) {
     if (refusal(e, now)) return null;
     // Dated ahead is level 1, unless the same event dated now would be level 2 (a request to vanish, a list's deletion by k).
-    return q(`${upper(kindName(e.kind))} dated in the future (${day(e.created_at)})`, question({ ...e, created_at: now }, prev, now)?.level ?? 1);
+    return q(`${upper(kindName(e.kind))} dated in the future (${day(e.created_at)})`, question({ ...e, created_at: now }, prev, now, child)?.level ?? 1);
   }
   if (e.kind === 62) return q('Ask relays to erase everything you have ever published', 2);
   if (e.kind === 5) {
@@ -130,6 +146,10 @@ export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: numb
     return gone.length >= 2 || wiped ? q(`Wipe your profile: ${gone.join(', ') || 'everything'}`, wiped ? 2 : 1) : null;
   }
   const noOne = e.kind === 3 && !e.tags.some((t) => t[0] === 'p') ? q('Empty your follow list', 2) : null;
+  // Where you are found and where DMs to you go: every change is looked at by hand (Aaron, 2026-11-21), even one
+  // that only adds, and even when no earlier version is known (an app's first list would replace one signed elsewhere).
+  // A child key's relays are its app's to set: that is what the child is for (SPEC 8k), so they are not reviewed.
+  if (REVIEWED.has(e.kind) && !child) return relayReview(e, prev);
   if (!KEPT.has(e.kind) || !prev) return noOne;
   // The encrypted private part (private bookmarks, private mutes): an app that cannot read it may write the list back without it.
   if (emptied(prev, e)) return q(`Empty your private ${kindName(e.kind)}`, 2);
@@ -154,10 +174,10 @@ export function hold(e: UnsignedEvent, prev: UnsignedEvent | null, now: number):
  * The box's answer for an event: sign it, ask first (`says` is the question, `level` how), or refuse it (`says` is
  * why). `level` is null unless it asks.
  */
-export function judge(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): { decision: 'sign' | 'ask' | 'refuse'; says: string | null; level: Level | null } {
+export function judge(e: UnsignedEvent, prev: UnsignedEvent | null, now: number, child = false): { decision: 'sign' | 'ask' | 'refuse'; says: string | null; level: Level | null } {
   const no = refusal(e, now);
   if (no) return { decision: 'refuse', says: no, level: null };
-  const ask = question(e, prev, now);
+  const ask = question(e, prev, now, child);
   return ask ? { decision: 'ask', says: ask.says, level: ask.level } : { decision: 'sign', says: null, level: null };
 }
 

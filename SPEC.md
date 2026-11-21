@@ -1108,7 +1108,8 @@ relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
 | A profile that empties two or more of name, display_name, picture, about, nip05, lud16, banner, website, or leaves none of name, display_name, about, picture, nip05, lud16 filled | asks | 2 when none of those six is left filled (the whole profile goes), else 1 | `Wipe your profile: <the fields emptied>` (`everything` when none were filled before, or there is no earlier version) |
 | A kept list whose private part (content not blank and not starting with `{`) is now blank | asks | 2 | `Empty your private <kind>` |
 | A kept list of 3 or more entries left with none | asks | 2 for the follow list, else 1 | `Empty your <kind> (it has <n> <items>)` |
-| A relay list (10002, 10006, 10007, 30002): 2 or more relays removed, and at least half | asks | 1 | `Remove <r> of your <n> relays` (and ` (and add <a>)`) |
+| The relay list (10002) or the DM relays (10050), as the account: any change to the relays it names, an addition too, and any version when no earlier one is known (Aaron, 2026-11-21: relay changes are always looked at by hand). Not for a child key, whose relays are its app's | asks | 1 | `Set your <kind> to <relays>` (no earlier version), `Add <relays> to your <kind>`, `Remove <relays> from your <kind>`, `Remove every relay from your <kind>: <relays>`, else `Change your <kind> from <old> to <new>` |
+| Another relay list (10006, 10007, 10051, 30002): 2 or more relays removed and at least half, or all of them | asks | 1 | `Change your <kind> from <old> to <new>`, or `Remove every relay from your <kind>: <old>` |
 | Another kept list: 10 or more entries removed, and at least a fifth | asks | 1 | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
 | A follow list with no `p` tag, whatever came before | asks | 2 | `Empty your follow list` |
 
@@ -1119,8 +1120,9 @@ is a big unfollow, level 1. Emptying a list other than the follow list (mutes, b
 relays) is level 1.
 
 The rows that compare need the earlier version: the last version of that list the box signed, from
-its list store (section 6). With none, they say nothing, as on a new phone. A child key's lists
-(section 8k) are not kept, so only the rows that need no earlier version apply to a child. The
+its list store (section 6). With none, they say nothing, as on a new phone, except the relay list
+and DM relays row, which then asks. A child key's lists (section 8k) are not kept, so only the rows
+that need no earlier version apply to a child, and the relay list and DM relays row does not. The
 kept kinds are 0, 3, 10000 to 10004, 10006, 10007, 10015, 10030, 30000 to 30004, 30015 and 30030.
 Entries are counted as Marble counts them: a follow list's `p` tags with a key, a relay list's `r` and
 `relay` tags (a trailing `/` does not count), every other tag but `d`, `title` and `description`.

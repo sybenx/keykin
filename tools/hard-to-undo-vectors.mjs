@@ -80,7 +80,10 @@ const rules = [
   { id: 'marble-list-emptied', impl: [M, B], kinds: 'the kept kinds except 0 and the relay kinds', then: 'ask', level: '2 for the follow list (kind 3), 1 for the rest',
     when: 'with a previous version of 3 or more entries, none left (kind 3 counts p tags with a value; relay kinds r and relay tags; the rest every tag but d, title, description)',
     says: '"Empty your <name> (it has <n> <items>)"' },
-  { id: 'marble-relays-most', impl: [M, B], kinds: '10002, 10006, 10007, 10050, 10051, 30002', then: 'ask', level: 1,
+  { id: 'marble-relays-reviewed', impl: [M, B], kinds: '10002, 10050', then: 'ask', level: 1,
+    when: 'any change to the relays it names, an addition too, and always when no earlier version was seen (Aaron, 2026-11-21: relay changes are always looked at by hand). r and relay tags; a trailing / and the order do not count',
+    says: '"Set your <name> to <relays>" with no earlier version ("to no relays" when empty), "Add <relays> to your <name>", "Remove <relays> from your <name>", "Remove every relay from your <name>: <old relays>", else "Change your <name> from <old relays> to <new relays>". Relays as below' },
+  { id: 'marble-relays-most', impl: [M, B], kinds: '10006, 10007, 10051, 30002', then: 'ask', level: 1,
     when: 'with a previous version: at least half its relays removed, and 2 or more of them or all of them (an app writing its defaults over yours). r and relay tags; a trailing / does not count',
     says: '"Change your <name> from <old relays> to <new relays>", or "Remove every relay from your <name>: <old relays>" when none are left. Relays without wss://, each once, joined "a, b and c", past six "and <n> more"' },
   { id: 'marble-list-most', impl: [M, B], kinds: 'the other kept kinds except 0', then: 'ask', level: 1,
@@ -211,30 +214,37 @@ c({ why: 'a bookmark set: the private part dropped', rules: ['marble-private-emp
 c({ why: 'a list renamed: title and description are not entries', rules: [], e: ev(30001, [['d', 'x'], ['title', 'New'], ...es(3)]), prev: ev(30001, [['d', 'x'], ['title', 'Old'], ['description', 'd'], ...es(3)]), m: sign });
 
 // Relays
-c({ why: 'relay list: 2 of 3 dropped', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Change your relay list from a, b and c to a') });
-c({ why: 'relay list: 1 of 3 dropped', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: sign });
-c({ why: 'relay list: 1 of 2 dropped, one kept', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b')), m: sign });
-c({ why: 'relay list: 2 of 4 dropped, exactly half', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c', 'wss://d')), m: ask('Change your relay list from a, b, c and d to a and b') });
-c({ why: 'relay list: 2 of 5 dropped, under half', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c', 'wss://d', 'wss://e')), m: sign });
-c({ why: 'relay list: only a trailing / changed', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a/', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b/')), m: sign });
-c({ why: 'relay list: all 3 replaced by 3 others', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x', 'wss://y', 'wss://z')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Change your relay list from a, b and c to x, y and z') });
-c({ why: 'relay list: its only relay swapped for another', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x')), prev: ev(10002, rs('wss://a')), m: ask('Change your relay list from a to x') });
-c({ why: 'relay list: 8 replaced, six named', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x')), prev: ev(10002, rs(...'abcdefgh'.split('').map((l) => `wss://${l}`))),
+const R = ['marble-relays-reviewed'];
+c({ why: 'relay list: 2 of 3 dropped', rules: R, e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove b and c from your relay list') });
+c({ why: 'relay list: 1 of 3 dropped', rules: R, e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove c from your relay list') });
+c({ why: 'relay list: one added', rules: R, e: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), prev: ev(10002, rs('wss://a', 'wss://b')), m: ask('Add c to your relay list') });
+c({ why: 'relay list: only a trailing / changed', rules: R, e: ev(10002, rs('wss://a/', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b/')), m: sign });
+c({ why: 'relay list: the same relays in another order', rules: R, e: ev(10002, rs('wss://b', 'wss://a')), prev: ev(10002, rs('wss://a', 'wss://b')), m: sign });
+c({ why: 'relay list: one read marker changed, the relays the same', rules: R, e: ev(10002, [['r', 'wss://a', 'read'], ['r', 'wss://b']]), prev: ev(10002, rs('wss://a', 'wss://b')), m: sign,
+  uncaught: 'Only which relays are named is compared, not whether each is for reading or writing.' });
+c({ why: 'relay list: all 3 replaced by 3 others', rules: R, e: ev(10002, rs('wss://x', 'wss://y', 'wss://z')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Change your relay list from a, b and c to x, y and z') });
+c({ why: 'relay list: its only relay swapped for another', rules: R, e: ev(10002, rs('wss://x')), prev: ev(10002, rs('wss://a')), m: ask('Change your relay list from a to x') });
+c({ why: 'relay list: 8 replaced, six named', rules: R, e: ev(10002, rs('wss://x')), prev: ev(10002, rs(...'abcdefgh'.split('').map((l) => `wss://${l}`))),
   m: ask('Change your relay list from a, b, c, d, e, f and 2 more to x') });
-c({ why: 'relay list emptied, from 3', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove every relay from your relay list: a, b and c') });
-c({ why: 'relay list emptied, from 2', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b')), m: ask('Remove every relay from your relay list: a and b') });
-c({ why: 'relay list emptied, from 1', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a')), m: ask('Remove every relay from your relay list: a') });
+c({ why: 'relay list emptied, from 3', rules: R, e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove every relay from your relay list: a, b and c') });
+c({ why: 'relay list emptied, from 1', rules: R, e: ev(10002, []), prev: ev(10002, rs('wss://a')), m: ask('Remove every relay from your relay list: a') });
+c({ why: 'relay list with no earlier version seen', rules: R, e: ev(10002, rs('wss://a', 'wss://b')), m: ask('Set your relay list to a and b') });
 c({ why: 'search relays: 2 of 3 dropped (relay tags)', rules: ['marble-relays-most'], e: ev(10007, [['relay', 'wss://a']]), prev: ev(10007, [['relay', 'wss://a'], ['relay', 'wss://b'], ['relay', 'wss://c']]),
   m: ask('Change your search relays from a, b and c to a') });
+c({ why: 'search relays: 1 of 3 dropped', rules: ['marble-relays-most'], e: ev(10007, [['relay', 'wss://a'], ['relay', 'wss://b']]), prev: ev(10007, [['relay', 'wss://a'], ['relay', 'wss://b'], ['relay', 'wss://c']]), m: sign });
 // 2026-11-21 01:44:57 UTC: Vector wrote its own DM relays over Aaron's, and nothing asked.
 const dm = (...urls) => urls.map((u) => ['relay', u]);
-c({ why: 'DM relays (kind 10050) replaced by an app\'s defaults', rules: ['marble-relays-most'],
+c({ why: 'DM relays (kind 10050) replaced by an app\'s defaults', rules: R,
   e: ev(10050, dm('wss://jskitty.com/nostr', 'wss://asia.vectorapp.io/nostr', 'wss://nostr.computingcache.com', 'wss://relay.ditto.pub')),
   prev: ev(10050, dm('wss://haven.aaro.cc/inbox', 'wss://herbstmeister.com/inbox', 'wss://relay.vantis.ninja', 'wss://herbstmeister.com', 'wss://bothy-relay.sybenx.workers.dev')),
   m: ask('Change your DM relays from haven.aaro.cc/inbox, herbstmeister.com/inbox, relay.vantis.ninja, herbstmeister.com and bothy-relay.sybenx.workers.dev to jskitty.com/nostr, asia.vectorapp.io/nostr, nostr.computingcache.com and relay.ditto.pub') });
-c({ why: 'DM relays (kind 10050) emptied', rules: ['marble-relays-most'], e: ev(10050, []), prev: ev(10050, dm('wss://a', 'wss://b')), m: ask('Remove every relay from your DM relays: a and b') });
-c({ why: 'DM relays: one added', rules: ['marble-relays-most'], e: ev(10050, dm('wss://a', 'wss://b', 'wss://c')), prev: ev(10050, dm('wss://a', 'wss://b')), m: sign });
+c({ why: 'DM relays (kind 10050) set by an app, no earlier version seen', rules: R, e: ev(10050, dm('wss://jskitty.com/nostr')), m: ask('Set your DM relays to jskitty.com/nostr') });
+c({ why: 'DM relays set to none, no earlier version seen', rules: R, e: ev(10050, []), m: ask('Set your DM relays to no relays') });
+c({ why: 'DM relays (kind 10050) emptied', rules: R, e: ev(10050, []), prev: ev(10050, dm('wss://a', 'wss://b')), m: ask('Remove every relay from your DM relays: a and b') });
+c({ why: 'DM relays: one added', rules: R, e: ev(10050, dm('wss://a', 'wss://b', 'wss://c')), prev: ev(10050, dm('wss://a', 'wss://b')), m: ask('Add c to your DM relays') });
+c({ why: 'DM relays: the same ones again', rules: R, e: ev(10050, dm('wss://a', 'wss://b')), prev: ev(10050, dm('wss://a', 'wss://b')), m: sign });
 c({ why: 'group invite relays (kind 10051) swapped', rules: ['marble-relays-most'], e: ev(10051, dm('wss://x', 'wss://y')), prev: ev(10051, dm('wss://a', 'wss://b')), m: ask('Change your group invite relays from a and b to x and y') });
+c({ why: 'group invite relays: one added', rules: ['marble-relays-most'], e: ev(10051, dm('wss://a', 'wss://b')), prev: ev(10051, dm('wss://a')), m: sign });
 c({ why: 'blocked relays: 2 of 2 unblocked', rules: ['marble-relays-most'], e: ev(10006, []), prev: ev(10006, dm('wss://a', 'wss://b')), m: ask('Remove every relay from your blocked relays: a and b') });
 c({ why: 'delete one event, saying it is the DM relays (k 10050)', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10050']]), m: never('Delete your DM relays') });
 

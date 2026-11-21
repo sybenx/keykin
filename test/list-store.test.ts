@@ -81,7 +81,8 @@ test('named sets: soft-capped per account, the least recently changed goes, it i
   // Signing "one" kept it again, newest; "two" went in its place.
   assert.deepEqual(box.lists.uncompared(a.held.npub).map((u) => u.key), ['30003:two']);
   // Replaceable lists have no cap.
-  for (const k of [10000, 10001, 10002, 10003]) assert.equal(await sign({ created_at: t, kind: k, tags: [], content: '' }), 'signed');
+  // (10002 is left out: a relay list is asked about whenever it changes, marble-relays-reviewed.)
+  for (const k of [10000, 10001, 10003]) assert.equal(await sign({ created_at: t, kind: k, tags: [], content: '' }), 'signed');
   assert.equal(box.lists.setCount(a.held.npub), 2);
   // A cap of 0 keeps no set and says nothing about one never kept.
   box.setKeptSets(0);

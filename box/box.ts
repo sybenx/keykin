@@ -738,7 +738,7 @@ export class Box {
     // Level 2 is never done by accident: it needs the fingerprint, checked as for an account change, and `tapped`
     // alone is not enough. A child's lists are not kept here, so its changes are judged on their own.
     const mine = body.child === undefined && KEPT.has(ev.kind);
-    const j = judge(ev, mine ? this.lists.latest(s.npub, ev) : null, now);
+    const j = judge(ev, mine ? this.lists.latest(s.npub, ev) : null, now, body.child !== undefined);
     if (j.decision === 'refuse') refuseWhy('dated_ahead', j.says!);
     if (j.decision === 'ask' && j.level === 2) {
       if (!from.chip) refuseWhy('no_chip_key', j.says!);

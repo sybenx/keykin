@@ -126,9 +126,11 @@ export function codePage(o: { qrText: string; csrf: string; nonce: string; logou
 /** The login page address: what codes carry now, whether KEYKIN_LOGIN_URL fixed it, and one to suggest
  *  (the address this page was visited at, or the one Keykin Login says it serves). A suggestion is never saved by itself. */
 export interface LoginPageSetting { addr?: string; fixed: boolean; suggest?: { addr: string; from: 'here' | 'login' } }
+/** How many named sets the box compares per account, and whether KEYKIN_KEPT_SETS fixed it. */
+export interface KeptSetsSetting { n: number; fixed: boolean }
 
 /** `door`: the public address if one is set, and when Keykin Login last reached the box (0 if never). */
-export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number; loginPage?: LoginPageSetting }) {
+export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: string; csrf: string; notice?: string; logout: boolean; where: Where; door: { url?: string; seen: number; side: boolean }; now: number; loginPage?: LoginPageSetting; keptSets?: KeptSetsSetting }) {
   const waiting = o.requests.filter((r) => r.state === 'waiting');
   const asks = `<div class="card"><h2>Waiting for your answer</h2>
   <p class="sub">${waiting.length ? 'Nothing is made until you approve.' : 'Nobody is asking for an account.'}</p>
@@ -156,6 +158,16 @@ export function adminPage(o: { accounts: Account[]; requests: Ask[]; boxKey: str
     <input id="lp" name="address" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://account.example.com" value="${esc(lp.suggest?.addr ?? lp.addr ?? '')}" style="margin-bottom:0">
     ${lp.suggest ? `<p class="sub small">Suggested from ${from}. Nothing changes until you press Save.</p>` : '<p class="sub small">https:// and the host, nothing after.</p>'}
     <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button>${lp.addr ? '<button type="submit" name="do" value="clear">Clear</button>' : ''}</div></form>`}</div>`;
+
+  // The list store's soft cap (box/lists.ts). Over it a set is not compared, never refused.
+  const ks = o.keptSets;
+  const keptCard = !ks ? '' : `<div class="card" id="keptsets"><h2>Lists the box compares</h2>
+  <p class="sub">Before it signs a change to a list, the box compares it with the last version it signed. It keeps every profile, follow list and relay list, and this many named sets per account (bookmark sets and the like). Past that, the least recently changed set is not compared.</p>
+  ${ks.fixed ? `<div class="kv"><span>Named sets</span><span>${ks.n}</span></div>
+  <p class="sub small">Set by KEYKIN_KEPT_SETS on this box. Change it there.</p>` : `<form method="post" action="/admin/keptsets">${hidden(o.csrf)}
+    <label class="small dim" for="ks">Named sets per account</label>
+    <input id="ks" name="sets" type="text" inputmode="numeric" autocomplete="off" value="${ks.n}" style="margin-bottom:0">
+    <div class="acts"><button class="go" type="submit" name="do" value="save">Save</button></div></form>`}</div>`;
 
   // Until the address is set (and KEYKIN_LOGIN_URL does not set it), the page says so above everything else.
   const alert = lp.fixed || lp.addr ? '' : `<div class="alerts"><div class="alert" id="loginalert" role="alert"><h2>Set your login page address</h2>
@@ -190,5 +202,6 @@ ${asks}
   <form method="post" action="/admin/code">${hidden(o.csrf)}<button type="submit">Make a setup code</button></form></div>
 ${door}
 ${loginCard}
+${keptCard}
 </div><div class="col">${accounts || '<div class="card"><h2>No accounts yet</h2></div>'}</div></div>`);
 }

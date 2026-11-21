@@ -90,6 +90,14 @@ export async function answerRequest(b: BunkerState, me: D.Me, h: D.Held, send: D
   }
 }
 
+/**
+ * The NIP-46 error a site gets. The box's reason travels with its error (`needs_tap: Empty your follow list`): this
+ * signer cannot ask the person, so the site is told why rather than a bare code.
+ */
+export function errorText(e: unknown): string {
+  return e instanceof KeykinError ? (e.why ? `${e.code}: ${e.why}` : e.code) : 'failed';
+}
+
 /** Lets a site's key in, as a grant the account page lists under Sites and apps (SPEC 11.5). */
 function admit(b: BunkerState, client: string, name?: string) {
   if (!b.clients.includes(client)) b.clients.push(client);
@@ -164,7 +172,7 @@ export async function runBunker(o: { bunker: BunkerState; me: D.Me; held: D.Held
             let body: { id: string; result?: string; error?: string };
             o.before?.();   // pick up sign-outs made while running
             try { body = { id: req.id, result: await answerRequest(o.bunker, o.me, o.held, o.send, ev.pubkey, req.method, req.params ?? [], o.onChange ?? (() => {})) }; }
-            catch (e) { body = { id: req.id, error: e instanceof KeykinError ? e.code : 'failed' }; if (!(e instanceof KeykinError)) log(`bunker: ${String(e)}`); }
+            catch (e) { body = { id: req.id, error: errorText(e) }; if (!(e instanceof KeykinError)) log(`bunker: ${String(e)}`); }
             log(`bunker: ${req.method} from ${ev.pubkey.slice(0, 8)} -> ${body.error ?? 'ok'}`);
             await reply(relay, ev.pubkey, body);
           },

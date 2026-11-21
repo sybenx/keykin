@@ -7,11 +7,12 @@ import { answer, type Piece } from '../src/round.ts';
 import { childPiece, tweakOf } from '../src/child.ts';
 import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
-import { destructive } from '../src/destructive.ts';
+import { judge, KEPT, AHEAD } from '../src/destructive.ts';
+import { Lists, KEPT_SETS } from './lists.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, xOnly, type Commitment } from '../src/curve.ts';
-import { KeykinError, refuse, randomBytes, bytesToHex, hexToBytes, sha, jcsBytes } from '../src/bytes.ts';
+import { KeykinError, refuse, refuseWhy, randomBytes, bytesToHex, hexToBytes, sha, jcsBytes } from '../src/bytes.ts';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 
 /** How long an approval code lasts, and how many wrong tries a member gets (SPEC 11.6). */
@@ -112,6 +113,8 @@ export interface Ask {
 export interface BoxState { sk: string; key: string; owner?: string; pwSecret?: string; accounts: Record<string, Account>; requests: Record<string, Ask>;
   /** The box's public login page (Keykin Login in front of it), set on the admin page. KEYKIN_LOGIN_URL overrides it. */
   loginPage?: string
+  /** How many named sets the list store keeps per account (box/lists.ts), set on the admin page. KEYKIN_KEPT_SETS overrides it. */
+  keptSets?: number
   /** The account page's sessions, by SHA-256(token) in hex. */
   sessions?: Record<string, PageSession> }
 
@@ -147,6 +150,18 @@ export function allowedBy(limit: Limit | undefined, op: string, kind: unknown, p
   if (!limit) return true;
   if (op === 'ecdh') return limit === 'dms' && !sameKey(peer, npub);
   return POST_KINDS.has(kind as number) || (limit === 'dms' && DM_KINDS.has(kind as number));
+}
+
+/** A named-set cap as the admin page and KEYKIN_KEPT_SETS take it: a whole number from 0 to 100000. Null if anything else. */
+export function keptSetsOf(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : /^\s*[0-9]{1,6}\s*$/.test(String(v ?? '')) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 0 && n <= 100000 ? n : null;
+}
+const SET_NAMES: Record<string, string> = { 30000: 'follow set', 30001: 'list', 30002: 'relay set', 30003: 'bookmark set', 30004: 'curation set', 30015: 'interest set', 30030: 'emoji set' };
+/** "bookmark set "reading"", for the activity list. */
+function setName(key: string) {
+  const i = key.indexOf(':'), d = key.slice(i + 1).replace(/[\u0000-\u001f\u007f]/g, '');
+  return `${SET_NAMES[key.slice(0, i)] ?? 'set'} "${d.length > 40 ? d.slice(0, 40) + '...' : d}"`;
 }
 
 export class Box {
@@ -189,6 +204,19 @@ export class Box {
     this.#save();
   }
   #login() { return this.login ? { loginPage: this.login } : {}; }
+
+  /** The latest version the box signed of each kept list, beside the state file, never in it. In memory until the server gives it a directory. */
+  lists = new Lists();
+  /** The named-set cap set by KEYKIN_KEPT_SETS. When set it wins over the admin setting. */
+  fixedKeptSets: number | undefined;
+  /** How many named sets are kept per account (a soft cap: past it a set is not compared, never refused). */
+  get keptSets(): number { return this.fixedKeptSets ?? this.state.keptSets ?? KEPT_SETS; }
+  /** The admin sets the cap, or goes back to the default (null). */
+  setKeptSets(n: number | null) {
+    if (n === null) delete this.state.keptSets;
+    else this.state.keptSets = keptSetsOf(n) ?? refuse('bad_number');
+    this.#save();
+  }
   qr(addr: string) { return this.accounts().length ? null : JSON.stringify({ keykin: 2, addr, key: this.state.key, code: this.setupCode, ...this.#login() }); }
 
   /** The admin makes room for one more account: a request approved in advance, as a setup code. */
@@ -209,6 +237,7 @@ export class Box {
   removeAccount(npub: string) {
     if (!this.state.accounts[npub]) refuse('unknown_account');
     delete this.state.accounts[npub];
+    this.lists.forget(npub);
     this.#save();
   }
   #tidyRequests(now: number) {
@@ -365,7 +394,7 @@ export class Box {
         default: return refuse('unknown_op');
       }
     } catch (e) {
-      if (e instanceof KeykinError) return { error: e.code };
+      if (e instanceof KeykinError) return { error: e.code, ...(e.why ? { why: e.why } : {}) };
       throw e;
     }
   }
@@ -704,15 +733,29 @@ export class Box {
     const piece = this.#piece(s, body);
     // The event must be by the key being asked for: the account's, or the child's.
     if (ev.pubkey !== xOnly(piece.C[0])) refuse('wrong_account');
-    // Hard to undo: the device must have asked the person, and says so.
-    if (destructive(ev) && body.tapped !== true) refuse('needs_tap');
+    // The box decides what is hard to undo (src/destructive.ts), against the last version of that list it signed.
+    // A refusal is final; a question needs the device to have asked the person, and say so with `tapped`.
+    // A child's lists are not kept here, so its changes are judged on their own.
+    const mine = body.child === undefined && KEPT.has(ev.kind);
+    const j = judge(ev, mine ? this.lists.latest(s.npub, ev) : null, now);
+    if (j.decision === 'refuse') refuseWhy('dated_ahead', j.says!);
+    if (j.decision === 'ask' && body.tapped !== true) refuseWhy('needs_tap', j.says!);
     const c = body.commit;
     if (!c || c.i !== from.i || typeof c.D !== 'string' || typeof c.E !== 'string') refuse('bad_commit');
     const a = answer(piece, msg, c);
+    if (mine && ev.created_at <= now + AHEAD) this.#keep(s, { ...ev, id: msg }, now);
     this.#used(s, from, body.grant, now);
     if (typeof body.grant === 'string' && /^[0-9a-f]{32}$/.test(body.grant) && Number.isInteger(ev.kind)) (s.kinds ??= {})[body.grant] = ev.kind;
     if (s.welcomes[from.key]) { delete s.welcomes[from.key]; this.#save(); }   // it has its piece
     return { ok: true, id: msg, commit: a.commit, z: a.z };
+  }
+
+  /** Keeps what was just signed as the latest version of that list. Sets dropped past the cap are said in the activity. */
+  #keep(s: Account, e: UnsignedEvent & { id: string }, now: number) {
+    let dropped: string[];
+    // A list that cannot be written (a full disk) never fails the signature: the next change is compared with an older version.
+    try { dropped = this.lists.keep(s.npub, e, this.keptSets, now).dropped; } catch { return; }
+    for (const key of dropped) this.happened(s.npub, `Your ${setName(key)} is no longer compared before signing: this box keeps the ${this.keptSets} most recently changed sets`, now);
   }
 
   // The box's part of a shared secret with another person's key, for encrypting and decrypting

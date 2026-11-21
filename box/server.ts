@@ -17,31 +17,41 @@
 //   KEYKIN_LOGIN_URL     the login page's origin (https://, nothing after), when Keykin Login is in front. The box's
 //                        codes carry it, so the device that scans one publishes the account's login-page pointer.
 //                        Usually set on the admin page instead ("Your login page address"); this overrides that.
+//   KEYKIN_KEPT_SETS     how many named sets (kinds 30000 to 39999, one per d tag) the list store keeps per account
+//                        to compare with before signing (default 200). Usually set on the admin page instead
+//                        ("Lists the box compares"); this overrides that. A soft cap: past it a set is not
+//                        compared, never refused.
 //   KEYKIN_OPEN          set to 1 to let anyone who signs in on the account page bring their account onto this
 //                        box. Without it, a new account needs a code from the admin page or the admin's approval.
 //   KEYKIN_BEHIND_LOGIN  set to 1 when something in front of the admin page already asks who you are (the
 //                        Umbrel login, say). The page then asks for nothing itself and makes no owner
 //                        secret. Use it only when the page cannot be reached any other way.
 // On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
+// The list store (box/lists.ts) is the lists/ folder beside state.json.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { Box, loginOrigin, HOLD, type BoxState, type Hold } from './box.ts';
+import { Box, loginOrigin, keptSetsOf, HOLD, type BoxState, type Hold } from './box.ts';
+import { Lists, DiskShelf } from './lists.ts';
 import { PageApi } from './pageapi.ts';
 import { loginPage, codePage, adminPage } from './page.ts';
 import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/bytes.ts';
 
 const SESSION_SECONDS = 12 * 3600, MAX_FAILS = 5, FAIL_WINDOW = 60;
 
-export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; login?: string; policy?: ConstructorParameters<typeof PageApi>[3]; log?: (s: string) => void }) {
+export function startBox(o: { dir: string; addr?: string; port?: number; sidePort?: number; url?: string; behindLogin?: boolean; open?: boolean; login?: string; keptSets?: string; policy?: ConstructorParameters<typeof PageApi>[3]; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   mkdirSync(o.dir, { recursive: true, mode: 0o700 });
   const file = join(o.dir, 'state.json');
   const state: BoxState | null = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
   const box = new Box(state);
   if (o.login !== undefined) { box.fixedLogin = loginOrigin(o.login) ?? undefined; if (!box.fixedLogin) throw new Error(`KEYKIN_LOGIN_URL must be https:// and a host, nothing after: ${o.login}`); }
+  if (o.keptSets !== undefined) { box.fixedKeptSets = keptSetsOf(o.keptSets) ?? undefined; if (box.fixedKeptSets === undefined) throw new Error(`KEYKIN_KEPT_SETS must be a whole number from 0 to 100000: ${o.keptSets}`); }
+  // The lists the box compares with, beside the state file. Those of accounts no longer here go.
+  box.lists = new Lists(new DiskShelf(join(o.dir, 'lists')));
+  box.lists.tidy((a) => !!box.state.accounts[a]);
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
   const nowS = () => Math.floor(Date.now() / 1000);
@@ -133,7 +143,8 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
       if (first) { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: first, csrf: s.csrf, nonce, logout: !o.behindLogin, first: true, count: 0, where: whereIs }), nonce); }
       return html(res, 200, adminPage({ accounts: box.accounts(), requests: Object.values(box.state.requests), boxKey: box.state.key, csrf: s.csrf, notice: url.searchParams.get('n') ?? undefined, logout: !o.behindLogin, where: whereIs,
         door: { url: o.url, seen: sideSeen, side: o.sidePort !== undefined }, now: nowS(),
-        loginPage: { addr: box.login, fixed: !!box.fixedLogin, suggest: suggest?.addr === box.login ? undefined : suggest } }));
+        loginPage: { addr: box.login, fixed: !!box.fixedLogin, suggest: suggest?.addr === box.login ? undefined : suggest },
+        keptSets: { n: box.keptSets, fixed: box.fixedKeptSets !== undefined } }));
     }
     if (method === 'GET' && path === '/admin/state') return s ? json(res, 200, { accounts: box.accounts().length }) : json(res, 401, { error: 'login' });
 
@@ -173,6 +184,12 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
             if (!a) return told(res, 'That is not a login page address. It starts with https:// and has nothing after the host.');
             box.setLoginPage(a); log(`keykin box: admin set the login page address to ${a}`); return told(res, `New codes carry ${a}.`);
           }
+          case '/admin/keptsets': {
+            if (box.fixedKeptSets !== undefined) return told(res, 'How many sets the box compares is set by KEYKIN_KEPT_SETS on this box. Change it there.');
+            const n = keptSetsOf(form.get('sets'));
+            if (n === null) return told(res, 'That is not a number from 0 to 100000.');
+            box.setKeptSets(n); log(`keykin box: admin set the kept sets to ${n}`); return told(res, `The box compares the ${n} most recently changed sets of each account.`);
+          }
           case '/admin/code': { const nonce = bytesToHex(randomBytes(16)); return html(res, 200, codePage({ qrText: box.newSetupCode(addr(), nowS()), csrf: s.csrf, nonce, logout: !o.behindLogin, first: false, count: box.accounts().length, where: whereIs }), nonce); }
         }
       } catch (e) { if (e instanceof KeykinError) return told(res, 'That did not work: ' + e.code); throw e; }
@@ -204,6 +221,6 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
 if (import.meta.url === `file://${process.argv[1]}`) {
   const e = process.env;
   startBox({ dir: e.KEYKIN_DIR ?? './box-data', addr: e.KEYKIN_ADDR, port: Number(e.KEYKIN_PORT ?? 7460), sidePort: e.KEYKIN_SIDE_PORT ? Number(e.KEYKIN_SIDE_PORT) : undefined,
-    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1', login: e.KEYKIN_LOGIN_URL?.replace(/\/+$/, ''),
+    url: e.KEYKIN_URL?.replace(/\/+$/, ''), behindLogin: e.KEYKIN_BEHIND_LOGIN === '1', open: e.KEYKIN_OPEN === '1', login: e.KEYKIN_LOGIN_URL?.replace(/\/+$/, ''), keptSets: e.KEYKIN_KEPT_SETS,
     policy: e.KEYKIN_POLICY ? JSON.parse(e.KEYKIN_POLICY) : undefined });
 }

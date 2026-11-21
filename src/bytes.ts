@@ -92,9 +92,13 @@ export const eqBytes = (a: Bytes, b: Bytes) => a.length === b.length && cmpBytes
 /** A refusal with a stable code, the `code` of an `error` message (core §9.1). */
 export class KeykinError extends Error {
   code: string;
-  constructor(code: string, message?: string) { super(message ? `${code}: ${message}` : code); this.code = code; }
+  /** The box's reason in plain words, for a person to read (`needs_tap`, `dated_ahead`). It travels with the error as `why`. */
+  why?: string;
+  constructor(code: string, message?: string, why?: string) { super(message ? `${code}: ${message}` : code); this.code = code; if (why) this.why = why; }
 }
 export const refuse = (code: string, message?: string): never => { throw new KeykinError(code, message); };
+/** Refuses with a reason a person reads: the error's message and its `why`. */
+export const refuseWhy = (code: string, why: string): never => { throw new KeykinError(code, why, why); };
 
 // --- The JSON profile (core §9.5) ------------------------------------------------------------
 // One RFC 8259 reader, written by hand because JSON.parse cannot refuse what §9.5 refuses: a key named

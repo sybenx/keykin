@@ -96,7 +96,7 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `op` | From | Fingerprint | Does |
 |---|---|---|---|
 | `create1`, `create2` | The first device, with the code from the QR | No | Makes the key with the device. Once only |
-| `sign` | An unblocked device | No | Answers a signing round for an event of this account, or of one of its child keys (section 8k) |
+| `sign` | An unblocked device | No | Answers a signing round for an event of this account, or of one of its child keys (section 8k). A hard-to-undo event needs `tapped` (section 11.6, The tap) |
 | `ecdh` | An unblocked device | No | The box's part of a shared secret with another person's key (section 8a), as the account or as a child key |
 | `members` | Any unblocked member | No | Returns the list, the epoch, the next unused index, and `password` (true when the account has a username and password, section 11.3) |
 | `cycle` | An unblocked device | **Yes** | Moves every piece to a new line and drops blocked members (section 8f) |
@@ -112,6 +112,28 @@ One endpoint, `POST /keykin`, taking a request and answering `{ ok: true, … }`
 | `grants`, `revoke`, `limit` | Any unblocked member | No | What is signed in, and ending or limiting it (section 11.5) |
 
 A blocked member is refused everything. A box may not ask for a signature.
+
+**The list store.** To judge a change to a list, the box keeps the latest version it signed of
+each kept list (section 11.6, The tap). It lives in `lists/` beside `state.json`, never inside it,
+since the box rewrites the whole state file on every change. One file per account per list:
+`lists/<account hex>/<kind>.json` for a replaceable list, `lists/<account hex>/<kind>-<first 32 hex
+of SHA-256 of the d tag>.json` for a named set. Each is
+`{ "key": "<kind>" or "<kind>:<d>", "at": <when the box kept it>, "event": { id, pubkey, created_at, kind, tags, content } }`,
+written to a temporary file and renamed, and only when that list changes: when the box answers a
+`sign` for a newer version (an equal `created_at` replaces, the same id does nothing). The box never
+sees the finished signature, only the event it helped sign. Events dated ahead and child keys'
+lists are not kept. Removing an account deletes its folder; at start the box deletes the folders of
+accounts it no longer holds. A box from before the list store just has none yet, and compares from
+the next version it signs.
+
+**The soft cap.** Named sets (kinds 30000 to 39999, one per `d` tag) are kept up to a number per
+account, 200 by default, set on the admin page or by `KEYKIN_KEPT_SETS` (which wins). The number is
+a first proposal. Past it, the least recently changed set is dropped, and the box says so in the
+account's activity ("Your bookmark set "reading" is no longer compared before signing: this box
+keeps the 200 most recently changed sets") and lists it under `uncompared` in
+`lists/<account hex>/sets.json`, which also holds when each kept set last changed. Over the cap never
+refuses a signature: that set is simply not compared until it is signed again, when it is kept as
+the newest. Replaceable lists are a fixed handful of kinds and have no cap.
 
 **Removing a box.** An account can hold a second box, as a backup. Any member can block it like a
 device, and cycling the keys afterwards (section 8f) drops it for good. The box answering a request
@@ -141,6 +163,8 @@ It is never on the public side.
   the admin's own power, and the way back when a thief blocks every other device first.
 - **Remove an account**, behind a tick box. It deletes the box's piece.
 - **Make a setup code** for one new account: a request approved in advance, good for 24 hours.
+- **Lists the box compares:** how many named sets the list store keeps per account (section 6,
+  The soft cap). Shown, not editable, when `KEYKIN_KEPT_SETS` sets it.
 - Every button carries a per-session token.
 
 ## 6b. Keykin Login and the side door
@@ -279,6 +303,8 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 - Each answer goes back on the relay its request came in on.
 - Each site's requests name its grant (section 11.5). When the box answers `revoked`, the signer
   forgets the site and answers `not_connected` from then on.
+- The signer cannot ask the person. An event the box asks about (section 11.6, The tap) gets the
+  error `needs_tap: <why>`, and one it refuses `dated_ahead: <why>`, so the site can say why.
 - **A site's name** (Aaron, 2026-11-19). A bunker `connect` says nothing of where the site runs, so
   the person may name the site when asking for the link ("Which site is it for?"). The link's secret
   is then a ticket (good once, for 15 minutes) that carries the name, and the site is listed by it.
@@ -296,6 +322,8 @@ from the account. The link is `bunker://<bunker key>?relay=<relay>&secret=<secre
 `signout`, `login`, `nsec`, `transfer`, `moved`. Its state is one file, `~/.keykin/device.json`,
 readable only by its owner. The piece in it is not encrypted.
 
+- `keykin sign` never sends `tapped`. An event the box asks about fails with the box's words
+  (`needs_tap: Empty your follow list`); sign it on a device that can ask.
 - `keykin agent <relay>` stays on and does what the account page asks (section 11.6): it adds a
   device, hands out a bunker link, becomes the signer for a pasted `nostrconnect://` code, and asks
   Yes or No at the keyboard before removing blocked devices (with nobody there, the answer is No).
@@ -1004,17 +1032,60 @@ stays in the app.
 
 **The tap.** For the hard-to-undo things a device shows what is asked and the person presses
 Yes or No. No fingerprint and no typing. No pushes the request away and ends the page session
-that asked. The hard-to-undo things are:
+that asked. The hard-to-undo things are removing blocked devices for good (cycling), forming the
+whole key, and signing the events below.
 
-- removing blocked devices for good (cycling), and forming the whole key;
-- signing an event that asks relays to erase the account (kind 62);
-- signing a delete of five or more posts at once (kind 5 with five or more `e` or `a` tags);
-- signing an empty profile (kind 0 with no name, about or picture) or an empty follow list
-  (kind 3 with no `p` tag).
+**Which events, and who decides** (Aaron, 2026-11-20). The box decides. It is a relationship
+(the admin, or the admin's friend or family), and that is why disputes between devices are settled
+there. Devices need no copy of its rules. The rules are in `src/destructive.ts` (`judge`) and the
+cases in `vectors/hard-to-undo.json`:
 
-For the three kinds of event, the device sends `"tapped": true` with `sign` once the person
-said Yes. Without it the box answers `needs_tap`. `src/destructive.ts` and `Destructive` in the
-Kotlin core are the test both sides use.
+- `sign` for an event the box asks about, without `"tapped": true`, is answered
+  `{ "error": "needs_tap", "why": "<the question, in plain words>" }`. A device shows `why` to the
+  person with Yes and No and, on Yes, sends the same request again with `"tapped": true`. On No
+  nothing is signed. A device that cannot ask anyone (a bunker, the command line) fails with the
+  words: `needs_tap: <why>`.
+- An event the box never signs, Yes or not, is answered `{ "error": "dated_ahead", "why": "<why>" }`.
+- A device may ask more on top (Marble keeps its own rules, and a phone sometimes knows a newer
+  version of a list than the box). When it has already asked and the person said Yes, it sends
+  `tapped` with the first request, so nobody is asked twice for one event.
+
+What the box asks about, in its words (`<kind>` is the kind's name: profile, follow list, mute list,
+relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
+
+| Event | The box | `why` |
+|---|---|---|
+| A list (kind 0, 3, 10000 to 19999, 30000 to 39999) dated more than 600 s ahead | refuses | `<Kind> dated <day>: a version dated ahead would block every later change` |
+| A deletion with an `a` tag dated more than 600 s ahead | refuses | `Deletion dated <day>: it would delete every version until then` |
+| Anything else dated more than 600 s ahead | asks | `<Kind> dated in the future (<day>)` |
+| A request to vanish (kind 62) | asks | `Ask relays to erase everything you have ever published` |
+| A deletion naming a kept kind by `a` (`kind:pubkey:d`) or `k` | asks | `Delete your <kind of the first one>` |
+| A deletion with five or more `e` and `a` tags | asks | `Delete <n> of your events` |
+| A profile that empties two or more of name, display_name, picture, about, nip05, lud16, banner, website, or leaves none of name, display_name, about, picture, nip05, lud16 filled | asks | `Wipe your profile: <the fields emptied>` (`everything` when none were filled before, or there is no earlier version) |
+| A kept list whose private part (content not blank and not starting with `{`) is now blank | asks | `Empty your private <kind>` |
+| A kept list of 3 or more entries left with none | asks | `Empty your <kind> (it has <n> <items>)` |
+| A relay list (10002, 10006, 10007, 30002): 2 or more relays removed, and at least half | asks | `Remove <r> of your <n> relays` (and ` (and add <a>)`) |
+| Another kept list: 10 or more entries removed, and at least a fifth | asks | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
+| A follow list with no `p` tag, whatever came before | asks | `Empty your follow list` |
+
+The rows that compare need the earlier version: the last version of that list the box signed, from
+its list store (section 6). With none, they say nothing, as on a new phone. A child key's lists
+(section 8k) are not kept, so only the rows that need no earlier version apply to a child. The
+kept kinds are 0, 3, 10000 to 10004, 10006, 10007, 10015, 10030, 30000 to 30004, 30015 and 30030.
+Entries are counted as Marble counts them: a follow list's `p` tags with a key, a relay list's `r` and
+`relay` tags (a trailing `/` does not count), every other tag but `d`, `title` and `description`.
+
+**One reading of a profile.** The content is exactly one JSON object as Keykin reads kind 0
+(`parseJson` in `src/bytes.ts`, numbers by RFC 8259's grammar). A key named twice, a control
+character in a string other than `\b \t \n \f \r`, a lone surrogate, a byte order mark, loose JSON
+(an unquoted key, single quotes) or text after the object make it no profile at all, which counts as
+empty. A field is filled when it is a string with at least one character that is not white space,
+a control character or a format character. Anything else (a number, `null`) is empty.
+
+Not asked about yet, and listed as uncaught in the vectors: deleting one article by address, fewer
+than 10 entries removed (9 of 30 follows), a list of 1 or 2 emptied, kinds the box does not keep
+(10050 DM relays, 10063 media servers, 30078 app data) emptied, and a private part swapped for a
+shorter one.
 
 **Notes: things the page starts and a device finishes.**
 
@@ -1145,6 +1216,8 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - **A password is now worth the whole account.** Whoever has it can add a device of their own, and from
   then on sign anything. What stands in the way is the guessing limit, and the admin's block and remove.
 - The box cannot check that a device really asked before a hard-to-undo signature. It takes the device's word.
+- The box compares a list only with the last version it signed. A version signed while the box was
+  off (section 8g), or by another signer, is not known to it, so it may compare with an older one.
 - Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and
   keep a username locked by guessing wrong. None of that reaches a key, but it can be a nuisance.
 - The side port and, behind another login, the admin page trust the network they are on. On an Umbrel,

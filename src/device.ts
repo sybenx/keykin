@@ -7,7 +7,7 @@ import { eventId, type UnsignedEvent } from './event.ts';
 import { seal, type Signed, type Fingerprint } from './member.ts';
 import { sealTo, openFrom } from './seal.ts';
 import { commitmentFrom, scalarFrom, scalarHex, interpolate, mul, compHex, mod, derivePoint } from './curve.ts';
-import { randomBytes, bytesToHex, hexToBytes, shaHex } from './bytes.ts';
+import { randomBytes, bytesToHex, hexToBytes, shaHex, KeykinError } from './bytes.ts';
 import { ecdhPart, ecdhShared, nip44Key } from './ecdh.ts';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { refuse } from './bytes.ts';
@@ -20,7 +20,12 @@ export interface Me { sk: string; key: string; name: string; chip?: string; fp?:
 /** What a device keeps once it is in an account. */
 export interface Held { piece: Piece; npub: string; boxKey: string; epoch: number }
 
-const call = async (send: Send, req: Signed) => { const r = await send(req); if (r?.error) refuse(r.error); return r; };
+/** An error answer as an error here. `why` is the box's reason in plain words (`needs_tap`, `dated_ahead`): it becomes the message, so a device that cannot ask the person still says what the box said. */
+function failed(r: any): never {
+  const why = typeof r.why === 'string' ? r.why.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) : '';
+  throw why ? new KeykinError(String(r.error), why, why) : new KeykinError(String(r.error));
+}
+const call = async (send: Send, req: Signed) => { const r = await send(req); if (r?.error) failed(r); return r; };
 
 /**
  * A request that depends on the current pieces. If the keys were cycled while this device was away,
@@ -30,7 +35,7 @@ const call = async (send: Send, req: Signed) => { const r = await send(req); if 
 async function current(me: Me, h: Held, send: Send, t: number, body: (h: Held) => object, fp?: Fingerprint) {
   for (let tries = 0; ; tries++) {
     const r = await send(await seal({ ...body(h), epoch: h.epoch, account: h.npub }, me.sk, t, fp));
-    if (r?.error !== 'stale' || tries || !Array.isArray(r.catchups)) { if (r?.error) refuse(r.error); return r; }
+    if (r?.error !== 'stale' || tries || !Array.isArray(r.catchups)) { if (r?.error) failed(r); return r; }
     let share = h.piece.share;
     for (const c of r.catchups) share = mod(share + scalarFrom(openFrom(me.sk, c.from, 'cycle', c.sealed)));
     const C = commitmentFrom(r.commitment);
@@ -61,7 +66,11 @@ export async function createWithBox(me: Me, qr: { key: string; code: string }, s
 }
 
 /** `grant` names the site or app this signature is for (SPEC 11.5); leave it out for the person's own use. */
-/** `tapped`: the person said Yes on this device to a hard-to-undo event (see destructive.ts). Without it the box answers `needs_tap`. */
+/**
+ * `tapped`: the person said Yes on this device to this event. The box decides what needs it (src/destructive.ts):
+ * without it such an event fails with `needs_tap`, whose `why` is the question to put to the person, and the same
+ * request with `tapped` signs it. An event the box never signs fails with `dated_ahead` and its `why`.
+ */
 /**
  * Brings in a key the person already has (hex). This device splits it, keeps one piece and sends the
  * box the other, sealed. The caller KEEPS the whole key, encrypted at rest, as the tier 1 backup: it is

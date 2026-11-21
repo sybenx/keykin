@@ -382,6 +382,32 @@ readable only by its owner. The piece in it is not encrypted.
   and box key to the new box. It checks that the join text is for this account and that the box at
   that address has that key. The piece is not touched: it catches up on the next request (`stale`).
 
+**The sealed signer** (`device-rs/`, `keykin` in Rust, 2026-11-21): a command-line device with no piece in a
+plain file, for signing from Terminal as the account. Above, the Node device keeps its piece unencrypted. As the
+box signs with any one device, anything running as the person that reads `device.json` gets ordinary events
+signed. So that one is for tests, servers and box admin, and this one is for a person at a Mac.
+
+- **The device side** is Marble on Mac's (`keykin.rs`, with box-authority's reasons), lifted so that one copy
+  serves every desktop device (the 2026-11-20 direction: one device core, library first, the command line on top).
+- **The file**, `~/Library/Application Support/Keykin/device.json` (mode 600, folder 700), holds the account, the
+  box, the device's name, its member key's public half and its index in plain text. The share and the member
+  key's secret are sealed: XChaCha20-Poly1305 under HKDF-SHA256 (salt `keykin-signer-v1`) of an ECDH between a
+  fresh P-256 key and a Secure Enclave key, with the member key as associated data. The chip key is CryptoKit's
+  (`ThisDeviceOnly`, `.privateKeyUsage` and `.userPresence`). Its blob is usable only by this Mac's chip, and
+  needs no keychain entitlement and no Apple developer signing.
+- **Every use asks for the person**: Touch ID, or the login password without a sensor. The prompt names the event
+  in words. Sealing needs only the chip's public key, so saving after a `stale` catch-up asks for nothing.
+- **`keykin join`** signs in as Marble on Mac does (section 11.6, `add=` with PKCE, a loopback listener for ten
+  minutes). The six digits with the page's address, or a phone's join code, can be typed where it waits.
+- **`keykin sign`** never sends `tapped` or the fingerprint. `needs_tap` fails with the box's words and "sign it in
+  Marble or on your phone". Level 2 fails with the box's words and "Do this from your phone." There is no helper
+  path (section 8g): with the box off, nothing is signed.
+- **Not covered:** a program running as the person that gets them to touch once gets the piece until the device is
+  blocked or the keys are cycled. The prompt's words come from whoever asks, so a Touch ID prompt the person did
+  not cause is the warning sign. The chip stops silent reads, copies, backups and a lost disk, not that.
+- **Not built:** Linux (Secret Service) and Windows (DPAPI with Windows Hello). Until then `join` refuses rather
+  than keeping a plain file. Also not built: Marble on Mac using this crate in place of its own copy, and child keys.
+
 ## 8e. The Android app
 
 `android/` is the phone. Kotlin, with the same Rust FROST library as everything else and

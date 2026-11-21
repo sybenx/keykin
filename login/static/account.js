@@ -903,7 +903,7 @@
               : el('div', { className: 'with-note' }, el('button', { className: 'btn', disabled: true }, 'Nothing to remove'))))],
       sites: () => [
         head('Sites and apps', 'Everything that can sign as you. Revoking here stops it at the box, even if the device that let it in is off.'),
-        el('div', { className: 'card rows' }, me.grants.length ? me.grants.map(siteRow)
+        el('div', { className: 'card rows' }, me.grants.length ? globalThis.KeykinRows.grantOrder(me.grants).map(siteRow)
           : el('div', { className: 'row' }, el('div', { className: 'grow dim' }, 'Nothing is signed in.'))),
         link('Sign in to another app', 'home')],
       security: () => [

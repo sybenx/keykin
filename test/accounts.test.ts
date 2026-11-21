@@ -895,3 +895,19 @@ test('a bunker link names its site: the name typed on the page, else the site\'s
   call({ call: 'note_put', session, kind: 'invite', text: '{}', lists: true });
   assert.equal((await D.notes(phone, held, send, T)).find((x) => x.kind === 'invite')!.lists, undefined);
 });
+
+test('Sites and apps: apps first, then websites, each most recently used first, never used last', async () => {
+  // @ts-ignore: a plain script for the page
+  await import('../login/static/rows.js');
+  const { grantOrder } = (globalThis as any).KeykinRows;
+  const g = (name: string, kind: string, last: number | null, since = 10) => ({ name, kind, last, since });
+  const list = [
+    g('old site', 'site', 100), g('unused site', 'site', null, 20), g('new site', 'site', 300), g('app used', 'app', 50),
+    g('unused newer site', 'site', null, 900), g('unused app', 'app', null), g('app newer', 'app', 400), g('tie b', 'site', 100),
+  ];
+  // A site never used stays below every used one, even one signed in long after them.
+  assert.deepEqual(grantOrder(list).map((x: any) => x.name),
+    ['app newer', 'app used', 'unused app', 'new site', 'old site', 'tie b', 'unused newer site', 'unused site']);
+  assert.deepEqual(list.map((x) => x.name)[0], 'old site', 'the list it was given is left as it was');
+  assert.deepEqual(grantOrder([]), []);
+});

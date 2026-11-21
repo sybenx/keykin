@@ -216,8 +216,17 @@ fn event_of(text: &str, npub_hex: &str) -> Result<Value, String> {
 
 fn sign(args: &[String]) -> Result<(), String> {
     let mut f = store::load()?.ok_or("This Mac isn’t in an account yet. Run: keykin join")?;
+    use std::io::IsTerminal;
+    let at_keyboard = std::io::stdin().is_terminal();
     let text = match args.first().map(String::as_str) {
+        // Typed alone at the keyboard: say what it needs, rather than wait silently for an event on stdin.
+        None if at_keyboard => {
+            return Err("Give the event to sign, for example:\n  keykin sign '{\"kind\":1,\"content\":\"hello\"}'\nor pipe it in: echo '{\"kind\":1,\"content\":\"hello\"}' | keykin sign".into());
+        }
         None | Some("-") => {
+            if at_keyboard {
+                eprintln!("Paste the event, then press Ctrl-D.");
+            }
             let mut s = String::new();
             std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
             s

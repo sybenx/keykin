@@ -292,6 +292,12 @@ test('child keys: the same two pieces sign as a different npub, and the box chec
   // Hard-to-undo events still need the tap, and those never done by accident the fingerprint.
   await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 5, tags: ['1', '2', '3', '4', '5'].map((x) => ['e', x.repeat(64)]) }, send, NOW, undefined, undefined, home), /needs_tap/);
   await assert.rejects(D.signEvent(phone, held, { ...note(home.npub), kind: 62 }, send, NOW, undefined, true, home), /needs_fingerprint/);
+  // A child's relays are its app's to set: DM relays and a relay list sign as the child with no question,
+  // while the same change as the account is looked at by hand (marble-relays-reviewed).
+  const dms = (pk: string) => ({ ...note(pk), kind: 10050, content: '', tags: [['relay', 'wss://inbox.example']] });
+  assert.ok(valid((await D.signEvent(phone, held, dms(home.npub), send, NOW, undefined, undefined, home)).sig, eventId(dms(home.npub)), home.npub));
+  await D.signEvent(phone, held, { ...dms(home.npub), kind: 10002, tags: [['r', 'wss://a.example']] }, send, NOW, undefined, undefined, home);
+  await assert.rejects(D.signEvent(phone, held, dms(held.npub), send, NOW), /needs_tap: Set your DM relays to inbox.example/);
 
   // Another device makes the same child on its own, and nothing about children is stored at the box.
   const mac = await add('Mac');

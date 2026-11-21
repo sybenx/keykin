@@ -1256,10 +1256,11 @@ each signature or message key. A row is
 (`MAX_SIGNED`), the oldest going first (section 6, How much the box keeps). The 30 days is the window
 the relay alarm looks back over (section 11.7): a row has to outlive the 7 days the alarm waits for
 late reports, and then some, or a signature that was reported would be flagged once its row went. The
-10000 is a busy account's month: a row is about 280 bytes, and an active account signs a few
-hundred things a day (notes, reactions, reposts, a relay login for each relay that asks, a seal for
-each direct message sent), so 200 a day fills 30 days with 6000 rows, and 500 a day still keeps 20,
-well past the 7. Message keys fold (below) and do not count much. Past 10000 the window just gets
+10000 is a busy account's month, with room. Measured 2026-11-21 on the one account on Aaron's box:
+128 published events in 14 days, about 9 a day, 43 on the busiest (mostly reactions). Relay logins,
+seals for direct messages and other signatures that are never published come on top and were not
+counted, so take a busy day as 150 rows: that fills 30 days with 4500, and 10000 keeps even 500 a
+day for 20 days, well past the 7. A row is about 280 bytes. Message keys fold (below) and do not count much. Past 10000 the window just gets
 shorter, and the alarm says so (section 11.7). That is up to about 3 MB per account, too much for
 the state file, which the box rewrites whole on every change and which is meant to stay small
 (section 6). So the log is a file of its own beside it, like the list store:

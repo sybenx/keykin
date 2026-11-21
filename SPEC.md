@@ -380,7 +380,9 @@ same epoch. Other devices keep those addresses and try them when the box cannot 
 signing and message keys work this way. Everything else needs the box.
 
 A block made while the box is off does not reach a helper until the box is back. A helper does not
-check grants at all: a revoke or a limit (section 11.5) is kept only by the box.
+check grants at all: a revoke or a limit (section 11.5) is kept only by the box. A helper does not
+judge what is hard to undo either (section 11.6, The tap): asking is left to the device that wants the
+signature, by its own rules.
 
 ## 8h. The browser extension
 
@@ -1037,8 +1039,8 @@ whole key, and signing the events below.
 
 **Which events, and who decides** (Aaron, 2026-11-20). The box decides. It is a relationship
 (the admin, or the admin's friend or family), and that is why disputes between devices are settled
-there. Devices need no copy of its rules. The rules are in `src/destructive.ts` (`judge`) and the
-cases in `vectors/hard-to-undo.json`:
+there. For a signature the box takes part in, a device needs no copy of its rules. The rules are in
+`src/destructive.ts` (`judge`) and the cases in `vectors/hard-to-undo.json`:
 
 - `sign` for an event the box asks about, without `"tapped": true`, is answered
   `{ "error": "needs_tap", "why": "<the question, in plain words>" }`. A device shows `why` to the
@@ -1049,6 +1051,11 @@ cases in `vectors/hard-to-undo.json`:
 - A device may ask more on top (Marble keeps its own rules, and a phone sometimes knows a newer
   version of a list than the box). When it has already asked and the person said Yes, it sends
   `tapped` with the first request, so nobody is asked twice for one event.
+- **When no box takes part, the device asks by its own rules, and must have them.** That is an
+  account with no box (the whole key on the device, section 7) and two devices signing while the box
+  is off (section 8g). A box is an upgrade here: it remembers a list's last version for every device
+  and settles disputes, but being asked before something hard to undo does not depend on having one.
+  A device with no rules of its own asks nothing on those paths (section 10).
 
 What the box asks about, in its words (`<kind>` is the kind's name: profile, follow list, mute list,
 relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
@@ -1216,6 +1223,9 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - **A password is now worth the whole account.** Whoever has it can add a device of their own, and from
   then on sign anything. What stands in the way is the guessing limit, and the admin's block and remove.
 - The box cannot check that a device really asked before a hard-to-undo signature. It takes the device's word.
+- **With the box off, only the asking device's own rules stand between a request and a hard-to-undo
+  signature.** A helper (section 8g) signs without judging. Marble asks by its own rules. The Mac app
+  and the command-line device have none, so signing through a helper they ask nothing.
 - The box compares a list only with the last version it signed. A version signed while the box was
   off (section 8g), or by another signer, is not known to it, so it may compare with an older one.
 - Anyone who can reach the public door can ask for accounts (up to 50 waiting), start sign-in codes, and

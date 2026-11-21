@@ -20,7 +20,7 @@ import type { UnsignedEvent } from './event.ts';
 import { parseJson } from './bytes.ts';
 
 /** The kinds whose last signed version is kept to compare with: Marble's kept kinds (Policy.ARCHIVED). */
-export const KEPT = new Set([0, 3, 10000, 10001, 10002, 10003, 10004, 10006, 10007, 10015, 10030, 30000, 30001, 30002, 30003, 30004, 30015, 30030]);
+export const KEPT = new Set([0, 3, 10000, 10001, 10002, 10003, 10004, 10006, 10007, 10015, 10030, 10050, 10051, 30000, 30001, 30002, 30003, 30004, 30015, 30030]);
 /** How far ahead of now a clock may be; past this, an event is dated in the future. */
 export const AHEAD = 600;
 
@@ -28,6 +28,7 @@ const NAMES: Record<number, [string, string]> = {
   0: ['profile', 'profile field'], 3: ['follow list', 'follow'], 10000: ['mute list', 'mute'], 10001: ['pinned notes', 'pin'],
   10002: ['relay list', 'relay'], 10003: ['bookmarks', 'bookmark'], 10004: ['communities', 'community'],
   10006: ['blocked relays', 'relay'], 10007: ['search relays', 'relay'], 10015: ['interests', 'interest'], 10030: ['emoji list', 'emoji'],
+  10050: ['DM relays', 'relay'], 10051: ['group invite relays', 'relay'],
   30000: ['follow set', 'person'], 30001: ['list', 'item'], 30002: ['relay set', 'relay'], 30003: ['bookmark set', 'bookmark'],
   30004: ['curation set', 'item'], 30015: ['interest set', 'interest'], 30030: ['emoji set', 'emoji'],
 };
@@ -35,7 +36,21 @@ const EVENT_NAMES: Record<number, string> = {
   1: 'note', 4: 'DM', 5: 'deletion', 6: 'repost', 7: 'reaction', 13: 'DM', 14: 'DM', 16: 'repost', 62: 'request to vanish',
   1111: 'comment', 9734: 'zap request', 22242: 'relay login', 24242: 'upload login', 27235: 'web login', 30023: 'article', 30078: 'app data', 10046: 'login page',
 };
-const RELAYISH = new Set([10002, 10006, 10007, 30002]);
+const RELAYISH = new Set([10002, 10006, 10007, 10050, 10051, 30002]);
+/** Relays as a person reads them: no wss://, each once, at most six named. */
+function relayWords(urls: string[]): string {
+  const names = [...new Set(urls.map((u) => u.replace(/^wss:\/\//i, '')))];
+  const shown = names.length > 6 ? [...names.slice(0, 6), `${names.length - 6} more`] : names;
+  return shown.length < 2 ? shown.join('') : `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}`;
+}
+/**
+ * A relay list that loses most of what it had: 2 or more relays removed and at least half, or none of them kept (an app
+ * writing its own defaults over yours, as Vector did to the DM relays on 2026-11-21). A trailing / does not count.
+ */
+export function relaysCut(before: string[], after: string[]): boolean {
+  const kept = new Set(after), removed = before.filter((x) => !kept.has(x)).length;
+  return before.length > 0 && removed >= before.length * 0.5 && (removed >= 2 || removed === before.length);
+}
 const replaceable = (k: number) => k === 0 || k === 3 || (k >= 10000 && k < 20000) || (k >= 30000 && k < 40000);
 /** A named set: one version per d tag. */
 export const namedSet = (k: number) => k >= 30000 && k < 40000;
@@ -120,9 +135,14 @@ export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: numb
   if (emptied(prev, e)) return q(`Empty your private ${kindName(e.kind)}`, 2);
   const before = items(prev), after = items(e), kept = new Set(after), had = new Set(before);
   const removed = before.filter((x) => !kept.has(x)).length, added = after.filter((x) => !had.has(x)).length;
+  // A relay list says where you are found and where messages to you go: say which relays go and which come in.
+  if (RELAYISH.has(e.kind)) {
+    if (!relaysCut(before, after)) return noOne;
+    return q(after.length ? `Change your ${kindName(e.kind)} from ${relayWords(before)} to ${relayWords(after)}` : `Remove every relay from your ${kindName(e.kind)}: ${relayWords(before)}`, 1);
+  }
   // Of the lists emptied, only the follow list is level 2.
   if (!after.length && before.length >= 3) return q(`Empty your ${kindName(e.kind)} (it has ${plural(before.length, e.kind)})`, e.kind === 3 ? 2 : 1);
-  const big = RELAYISH.has(e.kind) ? removed >= 2 && removed >= before.length * 0.5 : removed >= 10 && removed >= before.length * 0.2;
+  const big = removed >= 10 && removed >= before.length * 0.2;
   if (big) return q(`Remove ${removed} of your ${before.length} ${itemName(e.kind)}s` + (added > 0 ? ` (and add ${added})` : ''), 1);
   return noOne;
 }

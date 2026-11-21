@@ -67,7 +67,7 @@ const rules = [
     when: 'created_at more than 600 s after now', says: '"<Kind> dated in the future (<day>)"' },
   { id: 'marble-vanish', impl: [M, B], kinds: '62', then: 'ask', level: 2, when: 'always', says: '"Ask relays to erase everything you have ever published"' },
   { id: 'marble-delete-list', impl: [M, B], kinds: '5', then: 'ask', level: 2,
-    when: 'an a tag (kind:pubkey:d) or k tag naming a kind Marble keeps (0, 3, 10000-10004, 10006, 10007, 10015, 10030, 30000-30004, 30015, 30030)',
+    when: 'an a tag (kind:pubkey:d) or k tag naming a kind Marble keeps (0, 3, 10000-10004, 10006, 10007, 10015, 10030, 10050, 10051, 30000-30004, 30015, 30030)',
     says: '"Delete your <name of the first such kind>"' },
   { id: 'marble-delete-5', impl: [M, B], kinds: '5', then: 'ask', level: 1, when: '5 or more e and a tags (after marble-delete-list)', says: '"Delete <n> of your events"' },
   { id: 'marble-profile-wipe', impl: [M, B], kinds: '0', then: 'ask', level: '2 when none of name, display_name, about, picture, nip05, lud16 is filled after (the whole profile goes); else 1',
@@ -77,12 +77,12 @@ const rules = [
   { id: 'marble-private-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask', level: 2,
     when: 'with a previous version whose content was not blank and did not start with "{" (a private part), the new content is blank',
     says: '"Empty your private <name>"' },
-  { id: 'marble-list-emptied', impl: [M, B], kinds: 'the kept kinds except 0', then: 'ask', level: '2 for the follow list (kind 3), 1 for the rest',
+  { id: 'marble-list-emptied', impl: [M, B], kinds: 'the kept kinds except 0 and the relay kinds', then: 'ask', level: '2 for the follow list (kind 3), 1 for the rest',
     when: 'with a previous version of 3 or more entries, none left (kind 3 counts p tags with a value; relay kinds r and relay tags; the rest every tag but d, title, description)',
     says: '"Empty your <name> (it has <n> <items>)"' },
-  { id: 'marble-relays-most', impl: [M, B], kinds: '10002, 10006, 10007, 30002', then: 'ask', level: 1,
-    when: 'with a previous version: 2 or more relays removed, and at least half (a trailing / does not count)',
-    says: '"Remove <r> of your <n> relays" (+ " (and add <a>)")' },
+  { id: 'marble-relays-most', impl: [M, B], kinds: '10002, 10006, 10007, 10050, 10051, 30002', then: 'ask', level: 1,
+    when: 'with a previous version: at least half its relays removed, and 2 or more of them or all of them (an app writing its defaults over yours). r and relay tags; a trailing / does not count',
+    says: '"Change your <name> from <old relays> to <new relays>", or "Remove every relay from your <name>: <old relays>" when none are left. Relays without wss://, each once, joined "a, b and c", past six "and <n> more"' },
   { id: 'marble-list-most', impl: [M, B], kinds: 'the other kept kinds except 0', then: 'ask', level: 1,
     when: 'with a previous version: 10 or more entries removed, and at least a fifth', says: '"Remove <r> of your <n> <items>s" (+ " (and add <a>)")' },
   { id: 'box-vanish', impl: [B], kinds: '62', then: 'ask', level: 2, when: 'always (the same as marble-vanish)', says: '"Ask relays to erase everything you have ever published"' },
@@ -211,22 +211,34 @@ c({ why: 'a bookmark set: the private part dropped', rules: ['marble-private-emp
 c({ why: 'a list renamed: title and description are not entries', rules: [], e: ev(30001, [['d', 'x'], ['title', 'New'], ...es(3)]), prev: ev(30001, [['d', 'x'], ['title', 'Old'], ['description', 'd'], ...es(3)]), m: sign });
 
 // Relays
-c({ why: 'relay list: 2 of 3 dropped', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove 2 of your 3 relays') });
+c({ why: 'relay list: 2 of 3 dropped', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Change your relay list from a, b and c to a') });
 c({ why: 'relay list: 1 of 3 dropped', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: sign });
-c({ why: 'relay list: 2 of 4 dropped, exactly half', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c', 'wss://d')), m: ask('Remove 2 of your 4 relays') });
+c({ why: 'relay list: 1 of 2 dropped, one kept', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a')), prev: ev(10002, rs('wss://a', 'wss://b')), m: sign });
+c({ why: 'relay list: 2 of 4 dropped, exactly half', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c', 'wss://d')), m: ask('Change your relay list from a, b, c and d to a and b') });
 c({ why: 'relay list: 2 of 5 dropped, under half', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c', 'wss://d', 'wss://e')), m: sign });
 c({ why: 'relay list: only a trailing / changed', rules: ['marble-relays-most'], e: ev(10002, rs('wss://a/', 'wss://b')), prev: ev(10002, rs('wss://a', 'wss://b/')), m: sign });
-c({ why: 'relay list: all 3 replaced by 3 others', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x', 'wss://y', 'wss://z')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove 3 of your 3 relays (and add 3)') });
-c({ why: 'relay list emptied, from 3', rules: ['marble-list-emptied'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Empty your relay list (it has 3 relays)') });
-c({ why: 'relay list emptied, from 2', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b')), m: ask('Remove 2 of your 2 relays') });
-c({ why: 'relay list emptied, from 1', rules: [], e: ev(10002, []), prev: ev(10002, rs('wss://a')), m: sign,
-  uncaught: 'With its only relay gone, nobody can find what the account writes, and neither side asks.' });
+c({ why: 'relay list: all 3 replaced by 3 others', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x', 'wss://y', 'wss://z')), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Change your relay list from a, b and c to x, y and z') });
+c({ why: 'relay list: its only relay swapped for another', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x')), prev: ev(10002, rs('wss://a')), m: ask('Change your relay list from a to x') });
+c({ why: 'relay list: 8 replaced, six named', rules: ['marble-relays-most'], e: ev(10002, rs('wss://x')), prev: ev(10002, rs(...'abcdefgh'.split('').map((l) => `wss://${l}`))),
+  m: ask('Change your relay list from a, b, c, d, e, f and 2 more to x') });
+c({ why: 'relay list emptied, from 3', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b', 'wss://c')), m: ask('Remove every relay from your relay list: a, b and c') });
+c({ why: 'relay list emptied, from 2', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a', 'wss://b')), m: ask('Remove every relay from your relay list: a and b') });
+c({ why: 'relay list emptied, from 1', rules: ['marble-relays-most'], e: ev(10002, []), prev: ev(10002, rs('wss://a')), m: ask('Remove every relay from your relay list: a') });
 c({ why: 'search relays: 2 of 3 dropped (relay tags)', rules: ['marble-relays-most'], e: ev(10007, [['relay', 'wss://a']]), prev: ev(10007, [['relay', 'wss://a'], ['relay', 'wss://b'], ['relay', 'wss://c']]),
-  m: ask('Remove 2 of your 3 relays') });
+  m: ask('Change your search relays from a, b and c to a') });
+// 2026-11-21 01:44:57 UTC: Vector wrote its own DM relays over Aaron's, and nothing asked.
+const dm = (...urls) => urls.map((u) => ['relay', u]);
+c({ why: 'DM relays (kind 10050) replaced by an app\'s defaults', rules: ['marble-relays-most'],
+  e: ev(10050, dm('wss://jskitty.com/nostr', 'wss://asia.vectorapp.io/nostr', 'wss://nostr.computingcache.com', 'wss://relay.ditto.pub')),
+  prev: ev(10050, dm('wss://haven.aaro.cc/inbox', 'wss://herbstmeister.com/inbox', 'wss://relay.vantis.ninja', 'wss://herbstmeister.com', 'wss://bothy-relay.sybenx.workers.dev')),
+  m: ask('Change your DM relays from haven.aaro.cc/inbox, herbstmeister.com/inbox, relay.vantis.ninja, herbstmeister.com and bothy-relay.sybenx.workers.dev to jskitty.com/nostr, asia.vectorapp.io/nostr, nostr.computingcache.com and relay.ditto.pub') });
+c({ why: 'DM relays (kind 10050) emptied', rules: ['marble-relays-most'], e: ev(10050, []), prev: ev(10050, dm('wss://a', 'wss://b')), m: ask('Remove every relay from your DM relays: a and b') });
+c({ why: 'DM relays: one added', rules: ['marble-relays-most'], e: ev(10050, dm('wss://a', 'wss://b', 'wss://c')), prev: ev(10050, dm('wss://a', 'wss://b')), m: sign });
+c({ why: 'group invite relays (kind 10051) swapped', rules: ['marble-relays-most'], e: ev(10051, dm('wss://x', 'wss://y')), prev: ev(10051, dm('wss://a', 'wss://b')), m: ask('Change your group invite relays from a and b to x and y') });
+c({ why: 'blocked relays: 2 of 2 unblocked', rules: ['marble-relays-most'], e: ev(10006, []), prev: ev(10006, dm('wss://a', 'wss://b')), m: ask('Remove every relay from your blocked relays: a and b') });
+c({ why: 'delete one event, saying it is the DM relays (k 10050)', rules: ['marble-delete-list'], e: ev(5, [['e', pk(1)], ['k', '10050']]), m: never('Delete your DM relays') });
 
 // Kinds nobody keeps
-c({ why: 'DM relays (kind 10050) emptied', rules: [], e: ev(10050, []), prev: ev(10050, [['relay', 'wss://a'], ['relay', 'wss://b']]), m: sign,
-  uncaught: 'Kind 10050 is not a kind Marble keeps, so it is never compared: with it emptied, NIP-17 messages to the account have nowhere to go.' });
 c({ why: 'media servers (kind 10063) emptied', rules: [], e: ev(10063, []), prev: ev(10063, [['server', 'https://a.example'], ['server', 'https://b.example']]), m: sign,
   uncaught: 'Not a kept kind either: the account\'s pictures and files stop being found.' });
 c({ why: 'app data (kind 30078) emptied', rules: [], e: ev(30078, [['d', 'marble/settings']], ''), prev: ev(30078, [['d', 'marble/settings']], SEALED), m: sign,
@@ -240,7 +252,7 @@ c({ why: 'a follow list 20 minutes ahead', rules: ['marble-ahead-list'], e: ev(3
 c({ why: 'a follow list 5 minutes ahead (a fast clock)', rules: ['marble-ahead-list'], e: ev(3, ps(4), '', NOW + 300), prev: ev(3, ps(3)), m: sign });
 c({ why: 'an empty profile dated 2099', rules: ['marble-ahead-list', 'box-profile-empty'], e: ev(0, [], '{}', Y2099), m: refuse('Profile dated 2099-01-01: a version dated ahead would block every later change') });
 c({ why: 'a follow set dated 2099', rules: ['marble-ahead-list'], e: ev(30000, [['d', 'x'], ...ps(2)], '', Y2099), m: refuse('Follow set dated 2099-01-01: a version dated ahead would block every later change') });
-c({ why: 'DM relays dated 2099: any replaceable kind', rules: ['marble-ahead-list'], e: ev(10050, [['relay', 'wss://a']], '', Y2099), m: refuse('Kind 10050 event dated 2099-01-01: a version dated ahead would block every later change') });
+c({ why: 'DM relays dated 2099: any replaceable kind', rules: ['marble-ahead-list'], e: ev(10050, [['relay', 'wss://a']], '', Y2099), m: refuse('DM relays dated 2099-01-01: a version dated ahead would block every later change') });
 c({ why: 'a deletion by address dated 2099', rules: ['marble-ahead-delete-a'], e: ev(5, [['a', `30023:${ME}:my-essay`]], '', Y2099), m: refuse('Deletion dated 2099-01-01: it would delete every version until then') });
 c({ why: 'a deletion by id dated 2099', rules: ['marble-ahead'], e: ev(5, [['e', pk(1)]], '', Y2099), m: ask('Deletion dated in the future (2099-01-01)') });
 c({ why: 'deleting 5 by id, dated 2099', rules: ['marble-ahead', 'box-delete-5'], e: ev(5, es(5), '', Y2099), m: ask('Deletion dated in the future (2099-01-01)') });

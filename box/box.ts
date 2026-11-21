@@ -9,6 +9,7 @@ import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
 import { judge, KEPT, AHEAD } from '../src/destructive.ts';
 import { Lists, KEPT_SETS } from './lists.ts';
+import { SignedLog, type SignedRow } from './signedlog.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
 import { commitmentFrom, commitmentHex, scalarHex, scalarFrom, mul, mod, xOnly, type Commitment } from '../src/curve.ts';
@@ -67,17 +68,7 @@ export interface Account {
   wants?: Record<string, Scopes>;
   /** Recent activity, newest last, at most 60 lines. */
   log?: Happened[];
-  /** Signatures and message keys this account's pieces made together (SPEC 11.6, Recent signing), oldest
-   *  `signedAt` first, at most [MAX_SIGNED]. Today only the box's own help is written. */
-  signed?: SignedRow[];
 }
-/**
- * One signature or message key two pieces made. `asker` and `helper` are member keys: the piece that started
- * it and the one that answered. For a row the box writes as helper, `signedAt` and `receivedAt` are the same.
- * A row a helping device reports later (SPEC 11.7) has `receivedAt` when the box got it. `kind` and `eventId`
- * are for `sign` only; `grant` when the request named one.
- */
-export interface SignedRow { signedAt: number; receivedAt: number; asker: string; helper: string; op: 'sign' | 'ecdh'; kind?: number; eventId?: string; grant?: string }
 /** `client`, `device`, `via` come from the device; `browser` is set by the box from the page session that left the nostrconnect note (SPEC 11.5). */
 export interface Grant { id: string; kind: 'site' | 'app'; name: string; since: number; last?: number; client?: string; device?: string; via?: Via; browser?: string;
   /** The device's own switches for a site (SPEC 11.5): may it read the private lists, may it read and send DMs. Absent: it has none. */
@@ -171,10 +162,6 @@ export const WAIT_MOST = 25, WAITS_PER_ACCOUNT = 4;
 /** On a `notes_wait` answer with nothing new yet: the server holds the reply and asks [Box.heldNotes] again later. JSON leaves it out. */
 export const HOLD = Symbol('hold');
 export interface Hold { account: string; member: string; seconds: number }
-/** Rows of the signature log kept per account (SPEC 11.6, Recent signing). Past it the oldest goes. */
-export const MAX_SIGNED = 200;
-/** Message keys for the same asker, helper and grant this close together keep one row, the latest (SPEC 11.6). */
-export const ECDH_SAME = 600;
 /** A grant nobody has used for this long ends (SPEC 11.5). */
 export const GRANT_UNUSED = 90 * 86400;
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
@@ -265,6 +252,8 @@ export class Box {
 
   /** The latest version the box signed of each kept list, beside the state file, never in it. In memory until the server gives it a directory. */
   lists = new Lists();
+  /** Which pieces signed together (SPEC 11.6, Recent signing), beside the state file like the lists. Written with the state. */
+  signedLog = new SignedLog();
   /** The named-set cap set by KEYKIN_KEPT_SETS. When set it wins over the admin setting. */
   fixedKeptSets: number | undefined;
   /** How many named sets are kept per account (a soft cap: past it a set is not compared, never refused). */
@@ -318,6 +307,7 @@ export class Box {
     if (!this.state.accounts[npub]) refuse('unknown_account');
     delete this.state.accounts[npub];
     this.lists.forget(npub);
+    this.signedLog.forget(npub);
     this.#save();
   }
   #tidyRequests(now: number) {
@@ -658,28 +648,11 @@ export class Box {
     }
     if (t - this.#lastSave >= 60) { this.#lastSave = t; this.#save(); }
   }
-  /**
-   * Adds a row to the account's signature log, kept in `signedAt` order. A message key close after one for the
-   * same asker, helper and grant replaces that row rather than adding one: reading a conversation asks for
-   * many, and they would push every signature out. The caller saves (with `#used`, at most once a minute).
-   */
-  #logSigned(s: Account, row: SignedRow) {
-    const log = (s.signed ??= []);
-    if (row.op === 'ecdh') {
-      let k = log.length - 1;
-      while (k >= 0 && !(log[k].op === 'ecdh' && log[k].asker === row.asker && log[k].helper === row.helper && log[k].grant === row.grant)) k--;
-      if (k >= 0 && row.signedAt - log[k].signedAt < ECDH_SAME && row.signedAt >= log[k].signedAt) log.splice(k, 1);
-    }
-    let at = log.length;
-    while (at > 0 && log[at - 1].signedAt > row.signedAt) at--;
-    log.splice(at, 0, row);
-    if (log.length > MAX_SIGNED) log.splice(0, log.length - MAX_SIGNED);
-  }
   #helped(s: Account, from: Member, op: 'sign' | 'ecdh', grant: unknown, now: number, ev?: { kind: unknown; id: string }) {
     const row: SignedRow = { signedAt: now, receivedAt: now, asker: from.key, helper: this.state.key, op };
     if (ev) { if (Number.isInteger(ev.kind)) row.kind = ev.kind as number; row.eventId = ev.id; }
     if (typeof grant === 'string' && /^[0-9a-f]{32}$/.test(grant)) row.grant = grant;
-    this.#logSigned(s, row);
+    this.signedLog.add(s.npub, row, now);
   }
   /** The account page's Unblock (a page session may do it) and the admin's. */
   unblockIn(npub: string, key: string) { return this.ownerUnblock(key, npub); }
@@ -708,7 +681,7 @@ export class Box {
     return { ok: true };
   }
 
-  #save() { this.onChange(this.state); }
+  #save() { this.signedLog.flush(); this.onChange(this.state); }
   #C(s: Account): Commitment { return commitmentFrom(s.commitment); }
 
   // Account changes need the fingerprint: a signature by the asking device's chip key.

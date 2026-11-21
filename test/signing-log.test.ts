@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { newMemberKey, softwareChip } from '../src/member.ts';
 import * as D from '../src/device.ts';
-import { Box, MAX_SIGNED, ECDH_SAME } from '../box/box.ts';
-import { PageApi } from '../box/pageapi.ts';
+import { Box } from '../box/box.ts';
+import { MAX_SIGNED, ECDH_SAME, SIGNED_DAYS } from '../box/signedlog.ts';
+import { MemoryShelf } from '../box/lists.ts';
+import { PageApi, SIGNED_SHOWN } from '../box/pageapi.ts';
 
 const NOW = 1_800_000_000;
 const device = (name: string): D.Me => ({ ...newMemberKey(), name, ...softwareChip() });
@@ -15,8 +17,7 @@ const GRANT = 'ab'.repeat(16);
 
 async function world() {
   const box = new Box();
-  let t = NOW, saves = 0;
-  box.onChange = () => { saves++; };
+  let t = NOW;
   const page = new PageApi(box, () => 'https://account.example', () => false);
   const send: D.Send = async (r) => box.handle(copy(r), t);
   const phone = device('Phone');
@@ -28,13 +29,13 @@ async function world() {
     const event = await D.signEvent(phone, held, { pubkey: held.npub, created_at: t, kind: 22242, tags: [['challenge', challenge]], content: '' }, send, t);
     return page.call({ call: 'signin', event }, t).session as string;
   };
-  return { box, page, send, phone, held, note, session, tick: (s: number) => { t += s; }, now: () => t, saves: () => saves };
+  return { box, page, send, phone, held, note, session, tick: (s: number) => { t += s; }, now: () => t };
 }
 
 test('the box writes a row for each signature it helps with: asker, itself as helper, kind, event id, grant', async () => {
   const w = await world();
   const ev = await D.signEvent(w.phone, w.held, w.note(7), w.send, w.now(), GRANT);
-  const a = w.box.only()!;
+  const a = { get signed() { return w.box.signedLog.rows(w.held.npub); } };
   assert.deepEqual(a.signed, [{ signedAt: NOW, receivedAt: NOW, asker: w.phone.key, helper: w.box.state.key, op: 'sign', kind: 7, eventId: ev.id, grant: GRANT }]);
   // No grant, no grant field.
   w.tick(5);
@@ -48,7 +49,7 @@ test('message keys: one row, no kind or event id, and close repeats fold into th
   const w = await world();
   const peer = getPublicKey(generateSecretKey());
   await D.conversationKey(w.phone, w.held, peer, w.send, w.now(), GRANT);
-  const a = w.box.only()!;
+  const a = { get signed() { return w.box.signedLog.rows(w.held.npub); } };
   assert.deepEqual(a.signed, [{ signedAt: NOW, receivedAt: NOW, asker: w.phone.key, helper: w.box.state.key, op: 'ecdh', grant: GRANT }]);
   w.tick(30);
   await D.conversationKey(w.phone, w.held, peer, w.send, w.now(), GRANT);
@@ -66,34 +67,58 @@ test('message keys: one row, no kind or event id, and close repeats fold into th
   assert.deepEqual(a.signed!.map((r) => r.op), ['sign', 'ecdh', 'ecdh', 'ecdh']);
 });
 
-test('at most MAX_SIGNED rows, oldest going first; rows stay in signedAt order; saves stay at most once a minute', async () => {
+test('at most MAX_SIGNED rows and SIGNED_DAYS, oldest going first; rows stay in signedAt order', async () => {
   const w = await world();
-  const a = w.box.only()!;
-  // Fill straight into the state, then sign: the oldest goes.
-  a.signed = Array.from({ length: MAX_SIGNED }, (_, n) => ({ signedAt: NOW - 1000 + n, receivedAt: NOW, asker: w.phone.key, helper: w.box.state.key, op: 'sign' as const, eventId: n.toString(16).padStart(64, '0') }));
-  // A late row (as a helper's report would be) goes in its place by signedAt.
-  a.signed.splice(10, 0, { signedAt: NOW + 3600, receivedAt: NOW, asker: w.phone.key, helper: 'ff'.repeat(32), op: 'sign' });
-  a.signed.sort((x, y) => x.signedAt - y.signedAt);
-  w.tick(60);
-  const before = w.saves();
+  const log = w.box.signedLog.rows(w.held.npub);
+  // Fill straight into the log, then sign: the oldest goes.
+  for (let n = 0; n < MAX_SIGNED; n++) log.push({ signedAt: NOW - 20000 + n, receivedAt: NOW, asker: w.phone.key, helper: w.box.state.key, op: 'sign', eventId: n.toString(16).padStart(64, '0') });
+  // A late row (as a helper's report would be) sits at its place by signedAt.
+  log.push({ signedAt: NOW + 1_000_000, receivedAt: NOW, asker: w.phone.key, helper: 'ff'.repeat(32), op: 'sign' });
+  log.sort((x, y) => x.signedAt - y.signedAt);
   for (let n = 0; n < 5; n++) await D.signEvent(w.phone, w.held, w.note(), w.send, w.now());
-  assert.equal(a.signed.length, MAX_SIGNED);
-  assert.equal(a.signed[0].signedAt, NOW - 1000 + 6, 'the six oldest went');
-  assert.ok(a.signed.every((r, k) => k === 0 || a.signed![k - 1].signedAt <= r.signedAt), 'in order');
-  assert.equal(a.signed.at(-1)!.signedAt, NOW + 3600, 'the later one stays last');
-  assert.ok(w.saves() - before <= 1, 'five signatures in one minute, at most one save');
+  assert.equal(log.length, MAX_SIGNED);
+  assert.equal(log[0].signedAt, NOW - 20000 + 6, 'the six oldest went');
+  assert.ok(log.every((r, k) => k === 0 || log[k - 1].signedAt <= r.signedAt), 'in order');
+  assert.equal(log.at(-1)!.signedAt, NOW + 1_000_000, 'the later one stays last');
+  // A month on, everything older than SIGNED_DAYS goes with the next row.
+  w.tick(SIGNED_DAYS * 86400 + 1);
+  await D.signEvent(w.phone, w.held, w.note(), w.send, w.now());
+  assert.deepEqual(log.map((r) => r.signedAt), [NOW + 1_000_000, w.now()].sort((x, y) => x - y));
 });
 
-test('me gives the log newest first with names; a removed asker has none', async () => {
+test('the log is a file beside the state, not in it: written with the state, at most once a minute while signing', async () => {
+  const w = await world();
+  const shelf = new MemoryShelf();
+  const { SignedLog } = await import('../box/signedlog.ts');
+  w.box.signedLog = new SignedLog(shelf);
+  w.tick(60);
+  for (let n = 0; n < 5; n++) { await D.signEvent(w.phone, w.held, w.note(), w.send, w.now()); w.tick(5); }
+  assert.equal(shelf.writes, 1, 'five signatures in one minute, one write');
+  assert.equal(JSON.stringify(w.box.state).includes('signedAt'), false, 'nothing in the state file');
+  assert.equal(JSON.parse(shelf.read(w.held.npub, 'signed.json')!).rows.length, 1);
+  w.tick(60);
+  await D.signEvent(w.phone, w.held, w.note(), w.send, w.now());
+  assert.equal(JSON.parse(shelf.read(w.held.npub, 'signed.json')!).rows.length, 6);
+  // A fresh log on the same shelf (a restart) reads it back.
+  assert.equal(new SignedLog(shelf).rows(w.held.npub).length, 6);
+  w.box.removeAccount(w.held.npub);
+  assert.equal(shelf.read(w.held.npub, 'signed.json'), null, 'removing the account removes its log');
+});
+
+test('me gives the newest SIGNED_SHOWN rows, newest first, with names; a removed asker has none', async () => {
   const w = await world();
   const session = await w.session();
   await D.signEvent(w.phone, w.held, w.note(1), w.send, w.now(), GRANT);
-  const a = w.box.only()!;
-  a.signed!.push({ signedAt: NOW + 1, receivedAt: NOW + 1, asker: 'ee'.repeat(32), helper: w.box.state.key, op: 'ecdh' });
+  w.box.signedLog.rows(w.held.npub).push({ signedAt: NOW + 1, receivedAt: NOW + 1, asker: 'ee'.repeat(32), helper: w.box.state.key, op: 'ecdh' });
   const me = w.page.call({ call: 'me', session }, w.now());
   assert.ok(me.ok);
   assert.deepEqual(me.signed.map((r: any) => [r.op, r.askerName, r.helperName]), [['ecdh', null, null], ['sign', 'Phone', null], ['sign', 'Phone', null]]);
   assert.equal(me.signed[1].grant, GRANT);
+  const log = w.box.signedLog.rows(w.held.npub);
+  for (let n = 0; n < SIGNED_SHOWN + 50; n++) log.push({ signedAt: NOW + 10 + n, receivedAt: NOW, asker: w.phone.key, helper: w.box.state.key, op: 'sign' });
+  const all = w.page.call({ call: 'me', session }, w.now()).signed;
+  assert.equal(all.length, SIGNED_SHOWN);
+  assert.equal(all[0].signedAt, NOW + 10 + SIGNED_SHOWN + 49);
 });
 
 test('the Recent signing line', async () => {

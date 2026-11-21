@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Box, loginOrigin, keptSetsOf, openAccountsOf, HOLD, type BoxState, type Hold } from './box.ts';
 import { Lists, DiskShelf } from './lists.ts';
+import { SignedLog } from './signedlog.ts';
 import { PageApi } from './pageapi.ts';
 import { loginPage, codePage, adminPage } from './page.ts';
 import { randomBytes, bytesToHex, hexToBytes, sha, KeykinError } from '../src/bytes.ts';
@@ -56,6 +57,9 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   // The lists the box compares with, beside the state file. Those of accounts no longer here go.
   box.lists = new Lists(new DiskShelf(join(o.dir, 'lists')));
   box.lists.tidy((a) => !!box.state.accounts[a]);
+  // The signature log, beside it too (SPEC 11.6, Recent signing).
+  box.signedLog = new SignedLog(new DiskShelf(join(o.dir, 'signed')));
+  box.signedLog.tidy((a) => !!box.state.accounts[a]);
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
   const nowS = () => Math.floor(Date.now() / 1000);

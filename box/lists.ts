@@ -52,7 +52,7 @@ export class MemoryShelf implements Shelf {
   names(a: string) { return [...(this.#m.get(a)?.keys() ?? [])]; }
 }
 
-const ACCOUNT = /^[0-9a-f]{64}$/, NAME = /^[0-9]{1,5}(-[0-9a-f]{32})?\.json$|^sets\.json$/;
+const ACCOUNT = /^[0-9a-f]{64}$/, NAME = /^[0-9]{1,5}(-[0-9a-f]{32})?\.json$|^sets\.json$|^signed\.json$/;   // signed.json: box/signedlog.ts
 export class DiskShelf implements Shelf {
   readonly dir: string;
   constructor(dir: string) { this.dir = dir; mkdirSync(dir, { recursive: true, mode: 0o700 }); }

@@ -14,6 +14,8 @@ import { eventId } from '../src/event.ts';
 export const PASSKEY_SECONDS = 90 * 86400, SESSION_SECONDS = 12 * 3600;
 /** Page sessions per account, the least recently used going first. The account's activity says so. */
 export const MAX_SESSIONS = 100;
+/** How many rows of the signature log `me` returns, newest first. The page shows 15, then all of these. */
+export const SIGNED_SHOWN = 200;
 /**
  * Page sessions for accounts this box does not hold, in all (SPEC 11.6). `signin` takes any key, so without
  * this they would only be bounded by how fast sign-ins come. The least recently used goes first. There is no
@@ -399,8 +401,8 @@ export class PageApi {
       passkeys: (a.passkeys ?? []).map((p) => ({ id: p.id, host: p.rpId, added: p.added, last: p.last ?? null })),
       devices: a.members.map((m) => ({ key: m.key, name: m.name, kind: m.kind, blocked: m.blocked, blockedAt: m.blockedAt ?? null, added: m.added, last: m.last ?? null, fingerprint: !!m.chip })),
       log: [...(a.log ?? [])].reverse(),
-      // Who signed with whom, newest first (SPEC 11.6, Recent signing). Names are the list's now; a removed piece has none.
-      signed: [...(a.signed ?? [])].reverse().map((r) => ({ ...r, askerName: a.members.find((m) => m.key === r.asker)?.name ?? null,
+      // Who signed with whom, the newest SIGNED_SHOWN, newest first (SPEC 11.6, Recent signing). Names are the list's now; a removed piece has none.
+      signed: this.box.signedLog.rows(a.npub).slice(-SIGNED_SHOWN).reverse().map((r) => ({ ...r, askerName: a.members.find((m) => m.key === r.asker)?.name ?? null,
         helperName: r.helper === this.box.state.key ? null : a.members.find((m) => m.key === r.helper)?.name ?? null })),
       grants: Object.entries(a.grants ?? {}).flatMap(([key, list]) => list.map((g) => ({ ...g, last: a.used?.[g.id] ?? g.last ?? null, lastKind: a.kinds?.[g.id] ?? null, device: g.device ?? null, deviceKey: key, deviceName: name(key), limit: a.limits?.[g.id] ?? null,
         lists: typeof g.lists === 'boolean' ? g.lists : null, dms: typeof g.dms === 'boolean' ? g.dms : null, want: a.wants?.[g.id] ?? null }))),

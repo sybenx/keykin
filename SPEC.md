@@ -162,7 +162,7 @@ where something can go, and none of them ever refuses a signature. The numbers a
 | Revoked grants, grants' last use, limits | 2000 each | The oldest goes; a grant's last kind goes with its last use | Section 11.5 |
 | Browsers remembered for nostrconnect codes | 20, for 30 days | The oldest goes | Section 11.5 |
 | Activity lines | 60 | The oldest goes | |
-| Rows of the signature log | 200 per account (`MAX_SIGNED`) | The oldest `signedAt` goes | Section 11.6, Recent signing |
+| Rows of the signature log, in `signed/` beside the state file | 30 days (`SIGNED_DAYS`) and 10000 per account (`MAX_SIGNED`) | Older rows go, then the oldest `signedAt` | Section 11.6, Recent signing |
 | Named sets the list store compares | 200, set on the admin page or by `KEYKIN_KEPT_SETS` | Not compared, never refused | The soft cap, above |
 
 What a device that was removed left behind goes at the cycle that removed it (section 8f). The
@@ -1241,8 +1241,8 @@ shorter one.
 the page, blocks, revokes, password changes, notes, a No) and when each device and grant was
 last used. The page shows them.
 
-**Recent signing** (2026-11-21). The box keeps a signature log per account, `signed` in its state:
-which two pieces made each signature or message key. A row is
+**Recent signing** (2026-11-21). The box keeps a signature log per account: which two pieces made
+each signature or message key. A row is
 
 ```
 { "signedAt": <unix s>, "receivedAt": <unix s>, "asker": "<member key>", "helper": "<member key>",
@@ -1250,17 +1250,32 @@ which two pieces made each signature or message key. A row is
 ```
 
 `asker` is the piece that started the round (section 3), `helper` the one that answered. `kind` and
-`eventId` are for `sign` only, `grant` when the request named one. Rows are kept in `signedAt` order,
-at most 200 per account, the oldest going first (section 6, How much the box keeps). Today the box
+`eventId` are for `sign` only, `grant` when the request named one. Rows are kept in `signedAt` order.
+
+**How much, and where.** Rows are kept for 30 days (`SIGNED_DAYS`), and at most 10000 per account
+(`MAX_SIGNED`), the oldest going first (section 6, How much the box keeps). The 30 days is the window
+the relay alarm looks back over (section 11.7): a row has to outlive the 7 days the alarm waits for
+late reports, and then some, or a signature that was reported would be flagged once its row went. The
+10000 is a busy account's month: a row is about 280 bytes, and an active account signs a few
+hundred things a day (notes, reactions, reposts, a relay login for each relay that asks, a seal for
+each direct message sent), so 200 a day fills 30 days with 6000 rows, and 500 a day still keeps 20,
+well past the 7. Message keys fold (below) and do not count much. Past 10000 the window just gets
+shorter, and the alarm says so (section 11.7). That is up to about 3 MB per account, too much for
+the state file, which the box rewrites whole on every change and which is meant to stay small
+(section 6). So the log is a file of its own beside it, like the list store:
+`signed/<account hex>/signed.json`, `{ "rows": [ … ] }`, written to a temporary file and renamed. It
+is written when the state is, so at most about once a minute while signing, and only for accounts
+whose rows changed. Removing an account deletes its folder, and at start the box deletes the folders
+of accounts it no longer holds. Today the box
 writes a row each time it answers a `sign` or an `ecdh`, with itself as `helper` and `signedAt` =
 `receivedAt` = when it answered; a child key's signature (section 8k) is a row like any other, with
 its own event id. A message key for the same asker, helper and grant within 10 minutes of the last
 one (`ECDH_SAME`) replaces that row rather than adding one, since reading a conversation asks for
-many and they would push every signature out. The log is saved with the last-use times, at most
-once a minute, so a box stopped hard can lose the last minute of rows. Rows naming a member that a
+many and they would push every signature out. A box stopped hard can lose the last minute of rows,
+as it can the last-use times. Rows naming a member that a
 cycle removed stay until they age out.
 
-`me` returns `signed`, newest first, each row with `askerName` and `helperName` (the member's name
+`me` returns `signed`, the newest 200 rows (`SIGNED_SHOWN`), newest first, each row with `askerName` and `helperName` (the member's name
 now, or `null` when it was removed; `helperName` is `null` for the box answering). The page shows it
 under Devices as Recent signing, one row each, worded "<device> + your box", then what was made
 ("Signed a reaction for jumble.social", "Made a message key"), when, and the first 8 hex of the
@@ -1380,8 +1395,8 @@ tries again later, so the same row can arrive twice.
 - **Dedupe.** A `sign` row is the same as one already kept with the same `eventId` and `helper`. An
   `ecdh` row is the same as one with the same `asker`, `helper`, `grant` and `signedAt`, and folds
   as in section 11.6 (`ECDH_SAME`). A copy is counted in `took` and not kept again.
-- It goes into the log at its place by `signedAt` (section 11.6). Past the cap of 200 the oldest
-  goes, so a late row older than everything kept on a full log goes at once.
+- It goes into the log at its place by `signedAt` (section 11.6). Past the caps (30 days, 10000 rows)
+  the oldest goes, so a late row older than everything kept on a full log goes at once.
 - `asker` need not be on the list now: a cycle may have removed it since. The page then names it
   "A removed device". When the asker is on the list and blocked, the row stays, and the page marks
   it "asked by a blocked device": a helper that has not heard of a block yet (section 8g) is exactly
@@ -1422,8 +1437,10 @@ talks to none.
   (`signedSince`, set the first time a row is written; for a log begun before it existed, the
   oldest row's `signedAt` when the box first loads it), 30 days ago, and the `signedAt` of the oldest
   row while the log is full (older rows are gone, so older events cannot be told apart). Events
-  dated before the window are not checked. If the window is short because the log is full, the
-  page says so in a line rather than flag what it can no longer see.
+  dated before the window are not checked. If the window is short because the log is full (a
+  10000-row month, section 11.6), the page says so in a line rather than flag what it can no longer
+  see. The page reads the reported ids from a call of its own, not from `me`, which carries only the
+  newest 200 rows.
 - **Waiting for late reports.** A helper reports only when it next reaches the box, which can be
   hours after the box came back. So an unreported event is flagged only once every unblocked member
   other than the box has reached the box since the event's `created_at` plus 5 minutes, or 7 days

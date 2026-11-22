@@ -54,7 +54,9 @@ npm run keykin -- bunker wss://your.relay
 
 `device-rs` builds `keykin`, which makes this Mac a device of your account the way your phone is. Its piece is
 sealed by the Mac's Secure Enclave, and every signature asks for Touch ID. There's no nsec, no bunker link and
-nothing in a plain file that can sign. It needs Xcode's command line tools (`swiftc`) to build.
+nothing in a plain file that can sign. The Touch ID prompt says what is signed (which app, release or file, where
+the event names one) and who asked: a script passes `keykin sign --for "Pinket release" …`, and without `--for` the
+prompt names the calling script. It needs Xcode's command line tools (`swiftc`) to build.
 
 ```bash
 cd device-rs && cargo build --release && mkdir -p ~/.local/bin && cp target/release/keykin ~/.local/bin/

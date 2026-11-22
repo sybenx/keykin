@@ -4,7 +4,7 @@
 // signature asks for Touch ID. No nsec, no bunker link, nothing that signs in a plain file.
 //
 //   keykin join [--name <name>]   add this Mac: Add on your account page, as Marble on Mac signs in
-//   keykin sign ['<event>'|-]     sign an event (JSON; or on stdin) and print it signed
+//   keykin sign [--for <who>] ['<event>'|-]   sign an event (JSON; or on stdin) and print it signed
 //   keykin status                 who this Mac signs as, and where its file is
 //   keykin forget                 delete this Mac's sealed piece
 //
@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 const HELP: &str = "keykin: sign Nostr events from Terminal as your own account.
 
   keykin join [--name <name>]   add this Mac to your account (Add on your account page)
-  keykin sign ['<event>'|-]     sign an event and print it; Touch ID every time
+  keykin sign [--for <who>] ['<event>'|-]
+                                sign an event and print it; Touch ID every time, saying
+                                what it is and who asked (--for, else the calling script)
   keykin status                 who this Mac signs as
   keykin forget                 delete this Mac's sealed piece
 
@@ -218,7 +220,47 @@ fn event_of(text: &str, npub_hex: &str) -> Result<Value, String> {
     Ok(json!({ "created_at": created_at, "kind": kind, "tags": tags, "content": content }))
 }
 
+/// Who asked for a signature, when the caller didn't say with --for: the script or program that ran keykin.
+fn caller() -> Option<String> {
+    let ppid = std::os::unix::process::parent_id();
+    let out = std::process::Command::new("ps").args(["-o", "args=", "-p", &ppid.to_string()]).output().ok()?;
+    caller_name(&String::from_utf8_lossy(&out.stdout))
+}
+/// The name to show for a calling command line: "/bin/bash ./zapstore.sh --x" is "zapstore.sh", not the shell.
+fn caller_name(cmd: &str) -> Option<String> {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let pick = words.iter().skip(1).find(|w| !w.starts_with('-') && w.contains('.') && !w.contains('=')).or(words.first())?;
+    let name = pick.rsplit('/').next()?.trim_start_matches('-').to_string();
+    // Typed in Terminal: the shell itself says nothing about who asked.
+    (!name.is_empty() && !["zsh", "bash", "sh", "fish", "dash", "login"].contains(&name.as_str())).then_some(name)
+}
+
+#[cfg(test)]
+mod caller_tests {
+    #[test]
+    fn the_script_not_the_shell() {
+        assert_eq!(super::caller_name("/bin/bash ./zapstore.sh --release").as_deref(), Some("zapstore.sh"));
+        assert_eq!(super::caller_name("sh /Users/a/src/wisp-release/zapstore.sh").as_deref(), Some("zapstore.sh"));
+        assert_eq!(super::caller_name("-zsh"), None);
+        assert_eq!(super::caller_name("/bin/zsh -il"), None);
+        assert_eq!(super::caller_name("node /x/publish.mjs a=b").as_deref(), Some("publish.mjs"));
+        assert_eq!(super::caller_name(""), None);
+    }
+}
+
 fn sign(args: &[String]) -> Result<(), String> {
+    // --for "<who>": who is asking, said in the Touch ID prompt ("…, for Pinket's release"). Otherwise the caller's name.
+    let mut args = args.to_vec();
+    let mut who = None;
+    if let Some(i) = args.iter().position(|a| a == "--for") {
+        if i + 1 >= args.len() {
+            return Err("--for needs who is asking, for example: keykin sign --for \"Pinket release\" '<event>'".into());
+        }
+        who = Some(args.remove(i + 1).chars().filter(|c| !c.is_control()).take(60).collect::<String>());
+        args.remove(i);
+    }
+    let who = who.filter(|w| !w.trim().is_empty()).or_else(caller);
+    let args = &args[..];
     let mut f = store::load()?.ok_or("This Mac isn’t in an account yet. Run: keykin join")?;
     use std::io::IsTerminal;
     let at_keyboard = std::io::stdin().is_terminal();
@@ -239,7 +281,10 @@ fn sign(args: &[String]) -> Result<(), String> {
     };
     let ev = event_of(&text, &f.account.npub)?;
     // macOS says: “keykin is trying to <this>”.
-    let reason = format!("sign {} as you", kinds::describe(&ev));
+    let reason = match &who {
+        Some(w) => format!("sign {} as you, for {w}", kinds::describe(&ev)),
+        None => format!("sign {} as you", kinds::describe(&ev)),
+    };
     let (me, mut a) = store::open(&f, &reason).map_err(|e| match e {
         OpenErr::No => "Not signed: Touch ID wasn’t confirmed.".to_string(),
         OpenErr::Failed(w) => format!("Not signed: {w}"),

@@ -16,6 +16,7 @@ fn name(kind: u64) -> Option<(&'static str, bool)> {
         7 => ("reaction", false),
         62 => ("request to vanish", false),
         1111 => ("comment", false),
+        1063 | 3063 => ("file", false),
         9734 => ("zap request", false),
         10000 => ("mute list", true),
         10001 => ("pinned notes", true),
@@ -29,9 +30,11 @@ fn name(kind: u64) -> Option<(&'static str, bool)> {
         30000 => ("follow set", false),
         30001 => ("list", false),
         30023 => ("article", false),
+        30063 => ("app release", false),
         30078 => ("app data", false),
         31989 => ("app recommendation", false),
         31990 => ("app handler", false),
+        32267 => ("app listing", false),
         _ => return None,
     })
 }
@@ -55,11 +58,18 @@ pub fn describe(ev: &Value) -> String {
     let content: String = ev["content"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
     // A note's words say what it is; a list's or an app's content is JSON or encrypted, so it says nothing.
     let readable = !content.is_empty() && !content.starts_with(['{', '[']) && matches!(kind, 1 | 1111 | 30023 | 6 | 16 | 7);
-    if !readable {
-        return what;
-    }
-    let short: String = content.chars().take(60).collect();
-    let more = if content.chars().count() > 60 { "…" } else { "" };
+    // Which app, release, file or upload it is about: the part of the event that names it.
+    let tag = |k: &str| ev["tags"].as_array().and_then(|ts| ts.iter().find(|t| t[0].as_str() == Some(k))).and_then(|t| t[1].as_str()).map(str::to_string);
+    let about = match kind {
+        30063 | 32267 => tag("d"),
+        1063 | 3063 => tag("url").map(|u| u.rsplit('/').next().unwrap_or(&u).to_string()).or_else(|| tag("x").map(|x| format!("file {}…", &x[..x.len().min(12)]))),
+        24242 => tag("t").map(|t| match tag("x") { Some(x) => format!("{t} {}…", &x[..x.len().min(12)]), None => t }),
+        _ => None,
+    };
+    let shown = if readable { Some(content) } else { about };
+    let Some(text) = shown.filter(|t| !t.is_empty()) else { return what };
+    let short: String = text.chars().take(60).collect();
+    let more = if text.chars().count() > 60 { "…" } else { "" };
     format!("{what}: “{short}{more}”")
 }
 
@@ -76,5 +86,10 @@ mod tests {
         assert_eq!(describe(&json!({ "kind": 62, "content": "" })), "a request to vanish (kind 62)");
         assert_eq!(describe(&json!({ "kind": 31234, "content": "x" })), "an event of kind 31234");
         assert!(describe(&json!({ "kind": 1, "content": "a".repeat(80) })).ends_with("…”"));
+        // A release, a listing, a file and an upload say which one.
+        assert_eq!(describe(&json!({ "kind": 30063, "content": "", "tags": [["d", "app.pinket@1.4.0"]] })), "an app release (kind 30063): “app.pinket@1.4.0”");
+        assert_eq!(describe(&json!({ "kind": 32267, "content": "{}", "tags": [["d", "app.pinket"]] })), "an app listing (kind 32267): “app.pinket”");
+        assert_eq!(describe(&json!({ "kind": 3063, "content": "", "tags": [["url", "https://cdn.example/a/Pinket.apk"]] })), "a file (kind 3063): “Pinket.apk”");
+        assert_eq!(describe(&json!({ "kind": 24242, "content": "Upload", "tags": [["t", "upload"], ["x", "ab".repeat(32)]] })), "an upload login (kind 24242): “upload abababababab…”");
     }
 }

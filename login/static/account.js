@@ -1099,15 +1099,17 @@
     await refresh(); draw();
   }
 
-  // A site's two switches beside Posts only (SPEC 11.5), where the device that let it in has them. A change
-  // waits at the box until that device picks it up. Posts only already stops both, so they are off then.
+  // A site's two switches beside its limit (SPEC 11.5), where the device that let it in has them. A change
+  // waits at the box until that device picks it up. A limit stops what it does not allow, so those are off then:
+  // Posts only stops both, Posts and messages only stops private lists.
   const SWITCHES = [['lists', 'Private lists', 'Let it read your private lists', 'read your private lists'], ['dms', 'DMs', 'Let it read and send your direct messages', 'read and send DMs']];
   function scopeSwitches(g) {
     if (g.kind !== 'site') return [];
-    const site = g.name.replace(/^https?:\/\//, ''), posts = g.limit === 'posts';
+    const site = g.name.replace(/^https?:\/\//, '');
+    const stopped = (k) => g.limit === 'posts' || (g.limit === 'dms' && k === 'lists');
     return SWITCHES.filter(([k]) => typeof g[k] === 'boolean').map(([k, label, title, what]) =>
-      el('label', { className: 'toggle', title: posts ? 'Posts only is on, so it cannot read anything. Turn Posts only off first.' : title },
-        el('input', { type: 'checkbox', checked: globalThis.KeykinRows.scopeShown(g, k), disabled: posts, ariaLabel: `${label} for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'scopes', { grant: g.id, [k]: e.currentTarget.checked },
+      el('label', { className: 'toggle', title: stopped(k) ? `${g.limit === 'posts' ? 'Posts only' : 'Posts and messages only'} is on, so it cannot ${what}. Set it to Everything first.` : title },
+        el('input', { type: 'checkbox', checked: globalThis.KeykinRows.scopeShown(g, k), disabled: stopped(k), ariaLabel: `${label} for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'scopes', { grant: g.id, [k]: e.currentTarget.checked },
           `${site} can ${e.currentTarget.checked ? '' : 'no longer '}${what} once ${g.deviceName} picks it up.`) } }), label));
   }
 
@@ -1271,15 +1273,20 @@
     box.append(...(input ? (o.stacked ? [input, controls] : [el('div', { className: 'inline' }, input, btn), line]) : [controls]));
     return box;
   }
-  // One row of Sites and apps: what it is, how it came in, Posts only, Revoke. The connect card shows the same row.
+  // A site's limit (SPEC 11.5): everything, posts and messages only (`dms`), or posts only.
+  const LIMITS = [['', 'Everything'], ['dms', 'Posts and messages only'], ['posts', 'Posts only']];
+  const DONE = { '': 'can do everything again.', dms: 'can only post and send messages now.', posts: 'can only post now.' };
+  // One row of Sites and apps: what it is, how it came in, its limit, Revoke. The connect card shows the same row.
   function siteRow(g) {
     const host = g.name.replace(/^https?:\/\//, '');
     return el('div', { className: 'row' },
       el('div', { className: 'grow' }, el('div', { className: 'name' }, host),
         el('div', { className: 'detail' }, globalThis.KeykinRows.siteDetail(g))),
-      el('label', { className: 'toggle', title: 'Let it post, repost and react, and nothing else. It cannot read your messages.' },
-        el('input', { type: 'checkbox', checked: g.limit === 'posts', ariaLabel: `Posts only for ${g.name}`, on: { change: (e) => act(e.currentTarget, 'limit', { grant: g.id, to: e.currentTarget.checked ? 'posts' : null },
-          e.currentTarget.checked ? `${host} can only post now.` : `${host} can do everything again.`) } }), 'Posts only'),
+      el('label', { className: 'toggle', title: 'What it may do. Posts only: post, repost and react, and nothing else. Posts and messages only: that, and read and send your direct messages, but not your private lists.' },
+        'Can do',
+        el('select', { ariaLabel: `Limit for ${g.name}`, on: { change: (e) => { const to = e.currentTarget.value || null;
+          act(e.currentTarget, 'limit', { grant: g.id, to }, `${host} ${DONE[to ?? '']}`); } } },
+          ...LIMITS.map(([v, text]) => el('option', { value: v, selected: (g.limit ?? '') === v }, text)))),
       ...scopeSwitches(g),
       el('button', { className: 'btn danger', ariaLabel: `Revoke ${g.name}`, on: { click: (e) => act(e.currentTarget, 'revoke', { grant: g.id }, `${host} is revoked.`) } }, 'Revoke'));
   }

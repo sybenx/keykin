@@ -563,6 +563,19 @@ test('per-site limits: a grant limited to posting signs posts only and gets no m
   await assert.rejects(D.nip44Decrypt(phone, held, held.npub, 'x', send, NOW, app.id), /not_allowed/);
   assert.deepEqual(limits(), { 'https://jumble.social': null, Amethyst: 'posts' });
   assert.ok(call({ call: 'me', session }).log.some((l: any) => /jumble.social was limited to posting/.test(l.text)));
+  // Posts and messages only, from the page: posts and direct messages sign, and message keys work with
+  // other people's keys, but not with the account's own (its private lists).
+  assert.deepEqual(call({ call: 'limit', session, grant: site.id, to: 'dms' }), { ok: true });
+  assert.deepEqual(limits(), { 'https://jumble.social': 'dms', Amethyst: 'posts' });
+  for (const k of [1, 7, 4, 13, 14, 15, 1059]) assert.ok(valid(await D.signEvent(laptop, lh, ev(k, [['p', 'a'.repeat(64)]]), send, NOW, site.id)), `kind ${k}`);
+  for (const k of [0, 3, 5, 10002, 30000]) await assert.rejects(D.signEvent(laptop, lh, ev(k, [['p', 'a'.repeat(64)]], '{"name":"x"}'), send, NOW, site.id), /not_allowed/, `kind ${k}`);
+  const friend = getPublicKey(randomBytes(32));
+  assert.ok(await D.nip44Encrypt(laptop, lh, friend, 'hello', send, NOW, site.id));
+  await assert.rejects(D.nip44Encrypt(laptop, lh, held.npub, 'my lists', send, NOW, site.id), /not_allowed/);
+  assert.ok(call({ call: 'me', session }).log.some((l: any) => /jumble.social was limited to posts and direct messages/.test(l.text)));
+  assert.deepEqual(call({ call: 'limit', session, grant: site.id, to: null }), { ok: true });
+  assert.deepEqual(limits(), { 'https://jumble.social': null, Amethyst: 'posts' });
+  assert.deepEqual(call({ call: 'limit', session, grant: site.id, to: 'everything' }), { error: 'bad_request' });
   // Bad requests, and a grant the page does not know.
   await assert.rejects(D.limit(phone, held, app.id, 'everything' as any, send, NOW), /bad_request/);
   assert.deepEqual(call({ call: 'limit', session, grant: 'f'.repeat(32), to: 'posts' }), { error: 'gone' });

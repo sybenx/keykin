@@ -89,7 +89,8 @@ echo "a longer message from a script" | keykin dm --for "weekly report" npub1…
 
 It looks up where they read private messages (their DM relay list, else the relays they read from), leaves it
 there, and leaves a copy for you on your own DM relays so it shows in your DM apps. It prints where each copy
-landed. `--relay wss://…` sends both copies there instead. It's NIP-17: the message is sealed and signed as you,
+landed. A relay that wants proof of work, or a login before it takes a message, gets them from the message's
+one-time key, so neither asks for another Touch ID. `--relay wss://…` sends both copies there instead. It's NIP-17: the message is sealed and signed as you,
 then wrapped by a one-time key. `keykin encrypt <npub> '<text>'` and `keykin decrypt <npub> '<text>'` do NIP-44
 alone, for scripts that build their own.
 

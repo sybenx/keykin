@@ -416,11 +416,15 @@ signed. So that one is for tests, servers and box admin, and this one is for a p
   path (section 8g): with the box off, nothing is signed.
 - **`keykin dm <npub> '<text>'`** (2026-11-22) sends a NIP-17 private message as the account, with one Touch ID.
   Before asking, it looks up the reader's name (kind 0) and where they read private messages (kind 10050, else
-  the read relays of their 10002) on a few lookup relays (`KEYKIN_LOOKUP_RELAYS` for others), and refuses with
-  nothing asked if there is nowhere. The prompt names the reader and the first words. Then, for the reader and for
+  the read relays of their 10002): on a few lookup relays (`KEYKIN_LOOKUP_RELAYS` for others), one subscription
+  per person and kind (purplepag.es answered a filter naming several kinds with only some), then on the relays
+  their 10002 says they write to. The newest of each wins. It refuses with nothing asked if there is nowhere. The prompt names the reader and the first words. Then, for the reader and for
   the account itself: the conversation key from the box (`ecdh`, section 8a), the kind 14 message encrypted into
   a kind 13 seal signed through the box like any event, and a kind 1059 wrap encrypted and signed by a key made
-  for that wrap alone. The seal and wrap times are moved up to two days back (NIP-59). The account's copy goes to
+  for that wrap alone. The seal and wrap times are moved up to two days back (NIP-59). A relay that wants proof
+  of work (its NIP-11 `min_pow_difficulty`, or a `pow:` refusal) gets the wrap mined to it (NIP-13, at most 24
+  bits). One that answers `auth-required` gets a login (NIP-42) signed by the wrap's key, then the wrap again.
+  The account never logs in to a relay here, and neither asks for anything. The account's copy goes to
   its own DM relays, so it shows in its DM apps. `--relay` sends both copies to the relays named instead. The
   message is at most 32000 bytes, so the wrap stays under NIP-44's limit. `keykin encrypt` and `keykin decrypt`
   are NIP-44 alone with one key, a Touch ID each.

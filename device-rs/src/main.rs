@@ -417,7 +417,7 @@ fn send_dm(args: &[String]) -> Result<(), String> {
     let rt = rt();
 
     // Who they are and where they read messages, before anything is asked: no Touch ID for a message with nowhere to go.
-    let found = rt.block_on(dm::fetch(&dm::lookup_relays(), json!({ "authors": [to, me_hex], "kinds": [0, 10002, 10050] })));
+    let found = rt.block_on(dm::lookup(&[&to, &me_hex]));
     let (to_relays, my_relays) = if given.is_empty() { (dm::dm_relays(&found, &to), dm::dm_relays(&found, &me_hex)) } else { (given.clone(), given.clone()) };
     let label = if to_me {
         "yourself".to_string()
@@ -440,7 +440,7 @@ fn send_dm(args: &[String]) -> Result<(), String> {
     let (me, mut a) = store::open(&f, &reason).map_err(not_done)?;
     let epoch = a.epoch;
     let readers: Vec<&str> = if to_me { vec![&to] } else { vec![&to, &me_hex] };
-    let made: Result<Vec<serde_json::Value>, String> = rt.block_on(async {
+    let made: Result<Vec<dm::Wrap>, String> = rt.block_on(async {
         let now = core::now();
         let rumor = dm::rumor(&me_hex, &to, &text, now)?;
         let mut wraps = vec![];

@@ -33,6 +33,18 @@
   const scopeShown = (g, k) => (typeof g.want?.[k] === 'boolean' ? g.want[k] : g[k] === true);
   /** "waiting for Pixel 9a" while a want differs from what the device reported, else null. */
   const scopeWaiting = (g) => (SCOPES.some((k) => typeof g.want?.[k] === 'boolean' && typeof g[k] === 'boolean' && g.want[k] !== g[k]) ? `waiting for ${g.deviceName}` : null);
+  // Sites and apps, in order: apps first, then websites. In each, the most recently used first (`last`), then the
+  // ones never used at the bottom, newest sign-in (`since`) first. Ties keep the box's order.
+  const grantOrder = (list) => {
+    const group = (g) => (g.kind === 'app' ? 0 : 1);
+    const num = (v) => (typeof v === 'number' ? v : null);
+    return list.map((g, i) => [g, i]).sort(([a, i], [b, j]) => {
+      if (group(a) !== group(b)) return group(a) - group(b);
+      const la = num(a.last), lb = num(b.last);
+      if ((la === null) !== (lb === null)) return la === null ? 1 : -1;
+      return (lb ?? 0) - (la ?? 0) || (num(b.since) ?? 0) - (num(a.since) ?? 0) || i - j;
+    }).map(([g]) => g);
+  };
   /**
    * One row of Recent signing (SPEC 11.6): r is a row of `me.signed`, boxKey `me.boxKey`, grants `me.grants`.
    * Returns who signed ("Pixel 9a + your box") and the detail line.
@@ -48,5 +60,5 @@
     return { who: `${asker} + ${helper}`, detail: [`${cap(what)}${site}`, ago(r.signedAt, now), id].filter(Boolean).join(' · ') };
   }
   const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
-  globalThis.KeykinRows = { siteDetail, kindWord, when, scopeShown, scopeWaiting, signedRow };
+  globalThis.KeykinRows = { siteDetail, kindWord, when, scopeShown, scopeWaiting, grantOrder, signedRow };
 })();

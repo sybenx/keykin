@@ -167,6 +167,16 @@ export function question(e: UnsignedEvent, prev: UnsignedEvent | null, now: numb
   return noOne;
 }
 
+/**
+ * An app's or a site's write of a kept list when neither the box nor the asking device knows an earlier version: it
+ * may replace a whole list signed elsewhere, and nothing can say what it would lose, so it is asked about (level 1).
+ * Not a named set (a new d tag is a new set) and not the relay lists, which [question] already asks about.
+ */
+export function firstWrite(e: UnsignedEvent): Question | null {
+  if (!KEPT.has(e.kind) || namedSet(e.kind) || REVIEWED.has(e.kind)) return null;
+  return q(`Replace your ${kindName(e.kind)}: there is no earlier version here to compare it with`, 1);
+}
+
 /** The question's words alone, as before levels. */
 export function hold(e: UnsignedEvent, prev: UnsignedEvent | null, now: number): string | null { return question(e, prev, now)?.says ?? null; }
 

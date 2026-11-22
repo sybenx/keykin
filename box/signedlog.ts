@@ -8,12 +8,12 @@ import { MemoryShelf, type Shelf } from './lists.ts';
 /**
  * One signature or message key two pieces made. `asker` and `helper` are member keys: the piece that started
  * it and the one that answered. For a row the box writes as helper, `signedAt` and `receivedAt` are the same.
- * A row a helping device reports later (SPEC 11.7) has `receivedAt` when the box got it. `kind` and `eventId`
+ * A row a helping device reports later (SPEC 11.8) has `receivedAt` when the box got it. `kind` and `eventId`
  * are for `sign` only; `grant` when the request named one.
  */
 export interface SignedRow { signedAt: number; receivedAt: number; asker: string; helper: string; op: 'sign' | 'ecdh'; kind?: number; eventId?: string; grant?: string }
 
-/** How long rows are kept: the window the relay alarm looks back over (SPEC 11.7). */
+/** How long rows are kept: the window the relay alarm looks back over (SPEC 11.8). */
 export const SIGNED_DAYS = 30;
 /** At most this many rows per account, whatever their age; past it the oldest goes. A busy account's month. */
 export const MAX_SIGNED = 10000;

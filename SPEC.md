@@ -383,6 +383,32 @@ readable only by its owner. The piece in it is not encrypted.
   and box key to the new box. It checks that the join text is for this account and that the box at
   that address has that key. The piece is not touched: it catches up on the next request (`stale`).
 
+**The sealed signer** (`device-rs/`, `keykin` in Rust, 2026-11-21): a command-line device with no piece in a
+plain file, for signing from Terminal as the account. Above, the Node device keeps its piece unencrypted. As the
+box signs with any one device, anything running as the person that reads `device.json` gets ordinary events
+signed. So that one is for tests, servers and box admin, and this one is for a person at a Mac.
+
+- **The device side** is Marble on Mac's (`keykin.rs`, with box-authority's reasons), lifted so that one copy
+  serves every desktop device (the 2026-11-20 direction: one device core, library first, the command line on top).
+- **The file**, `~/Library/Application Support/Keykin/device.json` (mode 600, folder 700), holds the account, the
+  box, the device's name, its member key's public half and its index in plain text. The share and the member
+  key's secret are sealed: XChaCha20-Poly1305 under HKDF-SHA256 (salt `keykin-signer-v1`) of an ECDH between a
+  fresh P-256 key and a Secure Enclave key, with the member key as associated data. The chip key is CryptoKit's
+  (`ThisDeviceOnly`, `.privateKeyUsage` and `.userPresence`). Its blob is usable only by this Mac's chip, and
+  needs no keychain entitlement and no Apple developer signing.
+- **Every use asks for the person**: Touch ID, or the login password without a sensor. The prompt names the event
+  in words. Sealing needs only the chip's public key, so saving after a `stale` catch-up asks for nothing.
+- **`keykin join`** signs in as Marble on Mac does (section 11.6, `add=` with PKCE, a loopback listener for ten
+  minutes). The six digits with the page's address, or a phone's join code, can be typed where it waits.
+- **`keykin sign`** never sends `tapped` or the fingerprint. `needs_tap` fails with the box's words and "sign it in
+  Marble or on your phone". Level 2 fails with the box's words and "Do this from your phone." There is no helper
+  path (section 8g): with the box off, nothing is signed.
+- **Not covered:** a program running as the person that gets them to touch once gets the piece until the device is
+  blocked or the keys are cycled. The prompt's words come from whoever asks, so a Touch ID prompt the person did
+  not cause is the warning sign. The chip stops silent reads, copies, backups and a lost disk, not that.
+- **Not built:** Linux (Secret Service) and Windows (DPAPI with Windows Hello). Until then `join` refuses rather
+  than keeping a plain file. Also not built: Marble on Mac using this crate in place of its own copy, and child keys.
+
 ## 8e. The Android app
 
 `android/` is the phone. Kotlin, with the same Rust FROST library as everything else and
@@ -1168,6 +1194,7 @@ relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
 | Another relay list (10006, 10007, 10051, 30002): 2 or more relays removed and at least half, or all of them | asks | 1 | `Change your <kind> from <old> to <new>`, or `Remove every relay from your <kind>: <old>` |
 | Another kept list: 10 or more entries removed, and at least a fifth | asks | 1 | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
 | A follow list with no `p` tag, whatever came before | asks | 2 | `Empty your follow list` |
+| A kept list (not a named set, not the relay list or DM relays) signed for an app or a site (the request names a grant) with no earlier version known, neither the box's nor the device's (Aaron, 2026-11-21) | asks | 1 | `Replace your <kind>: there is no earlier version here to compare it with` |
 
 Where a case sat between the levels, it took level 2: a profile left with only a banner or a website,
 or with a name that is only white space; a first profile with nothing in it, or one that is not a JSON
@@ -1176,7 +1203,10 @@ is a big unfollow, level 1. Emptying a list other than the follow list (mutes, b
 relays) is level 1.
 
 The rows that compare need the earlier version: the last version of that list the box signed, from
-its list store (section 6). With none, they say nothing, as on a new phone, except the relay list
+its list store (section 6), or the one the asking device sends as `prev` with `sign` when that one is newer.
+A device sends the newest version it knows (one it read from relays, say). The box uses it only when it is a
+signed event by the same key, of the same list (kind, and `d` for a named set), older than the change, with
+an id and signature that hold; otherwise it is ignored. It is compared with, never kept. With none, they say nothing, as on a new phone, except the relay list
 and DM relays row, which then asks. A child key's lists (section 8k) are not kept, so only the rows
 that need no earlier version apply to a child, and the relay list and DM relays row does not. The
 kept kinds are 0, 3, 10000 to 10004, 10006, 10007, 10015, 10030, 30000 to 30004, 30015 and 30030.
@@ -1254,14 +1284,14 @@ each signature or message key. A row is
 
 **How much, and where.** Rows are kept for 30 days (`SIGNED_DAYS`), and at most 10000 per account
 (`MAX_SIGNED`), the oldest going first (section 6, How much the box keeps). The 30 days is the window
-the relay alarm looks back over (section 11.7): a row has to outlive the 7 days the alarm waits for
+the relay alarm looks back over (section 11.8): a row has to outlive the 7 days the alarm waits for
 late reports, and then some, or a signature that was reported would be flagged once its row went. The
 10000 is a busy account's month, with room. Measured 2026-11-21 on the one account on Aaron's box:
 128 published events in 14 days, about 9 a day, 43 on the busiest (mostly reactions). Relay logins,
 seals for direct messages and other signatures that are never published come on top and were not
 counted, so take a busy day as 150 rows: that fills 30 days with 4500, and 10000 keeps even 500 a
 day for 20 days, well past the 7. A row is about 280 bytes. Message keys fold (below) and do not count much. Past 10000 the window just gets
-shorter, and the alarm says so (section 11.7). That is up to about 3 MB per account, too much for
+shorter, and the alarm says so (section 11.8). That is up to about 3 MB per account, too much for
 the state file, which the box rewrites whole on every change and which is meant to stay small
 (section 6). So the log is a file of its own beside it, like the list store:
 `signed/<account hex>/signed.json`, `{ "rows": [ … ] }`, written to a temporary file and renamed. It
@@ -1284,7 +1314,7 @@ event id. 15 rows, then Show all.
 
 **Not in the log yet:** signatures two devices make without the box (section 8g, any piece can be
 the helper, section 3). The box never sees them. The page says so in one line under Recent signing.
-How a helping device would report them is section 11.7, not built.
+How a helping device would report them is section 11.8, not built.
 
 **Possible later: tiered sign-in strength (not adopted).** An idea from 2026-11-18, kept for
 later. A passkey or a scan would be strong and a password alone weak:
@@ -1341,7 +1371,64 @@ at a time, so a note reaches it within about a second (a bunker note was answere
 seconds on an emulator, 2026-11-19, with the screen off and in forced Doze), and still checks every 30 seconds as before (that
 check also keeps the device list and grants fresh, and is all it does with an older box).
 
-### 11.7 Helpers report what they sign (not built)
+### 11.7 The Shared home section (2026-11-22)
+
+Where the owner and admins of a DMs home manage it, when the home has a box. The home is bothy (mailbox,
+members, invite tree); the box keeps its files in Keykin Storage. Agreed with the DMs coordinating session,
+2026-11-22. A home with no box keeps bothy's own admin page.
+
+**Settings on Keykin Login.** `KEYKIN_HOME_URL` (the home, `https://<host>/`) and `KEYKIN_STORAGE_URL` (its file
+server, optional). Each must be https (http only on this machine, for tests), with no user, query or fragment, or
+Keykin Login will not start. With a home set, `me` returns `home: { url, storage }` for an account the box holds,
+and the page's `connect-src` names exactly those two origins beside its relays, never all of `https:`. With no home
+set there is no section and the headers are as before.
+
+**Signing.** The page calls the home (NIP-86) and the file server (`POST <storage>/manage`, the same shape) itself.
+Every call is a NIP-98 kind 27235 (`u`, `method` POST, `payload`), signed by the signer a scan left here (section
+11.6, `kk=account`). Keykin Login and the box sign and pass on nothing. A password or passkey session cannot sign, so
+the section asks for a scan, once each visit ("Changes here are signed by your phone, so this page asks for a scan
+each visit."). No longer-lived signer is kept to avoid that.
+
+**Who.** The home's NIP-11 `pubkey` is its owner; anyone else asks `myrole`, and only `owner` or `admin` sees the
+section. An admin signs in with their own Keykin account. Where a person's Keykin key and messenger key differ, the
+Keykin key is the one the owner makes an admin.
+
+**What it shows** (plain words; keys, addresses and file hashes only in one Advanced card at the end):
+
+- **People:** the invite tree from `listmembers`, the owner on top, each person under whoever let them in (under the
+  owner when the inviter is unknown), names and photos from kind 0 on the home (with NIP-42 if the home asks). Each
+  row: space used, "Admin", the switch "Sees where photos were taken" (`setclose`; the page only toggles, bothy
+  sets the defaults) and Remove (`unallowpubkey`). Removing someone who invited people offers both choices with the
+  count and names, "Keep the N people they invited" and "Remove them too", neither styled as the dangerous one.
+  The page offers only what bothy takes: no Remove for the owner or yourself, and an admin gets none for an admin.
+  "Recently removed" offers "Let back in" (`allowpubkey`).
+- **Rows people can tell apart** (2026-11-22, after Aaron's first look): names from the home, then from the
+  account's own relays for anyone still nameless. Each row says how they came in from `source` ("Added by",
+  "Invited by", "Asked to join, let in by"), when they joined, what they store or "Nothing stored", and, once
+  bothy v0.29 sends them, `lastSeen` (a UTC day number, floor(unix / 86400), shown as that UTC day: "Last here 3
+  Sep"; a value over 100000 is read as seconds; null is "Never signed in", or "No sign-in since 21 Nov
+  2026" for someone who joined before bothy kept sign-in days), `waiting` ("2 messages waiting", also on a recently removed row, where it is the only one of these that means
+  anything) and `push` (under Advanced). A row with no name shows the last six characters of its key. Rows whose inviter is not known (bothy
+  v0.29 `inviterUnknown: true`, or a null `invitedBy`) sit under "Added before invites" with no inviter words; members with no name,
+  no photo, nothing stored and nobody under them sit under "No name yet", oldest first.
+- **File servers are a list** (`KEYKIN_STORAGE_URL` may name several, comma-separated; `me.home.files`), so a
+  second box is one more entry. Space leads with what the home stores ("Photos and files: 1.2 MB") and then the
+  room left on each box, never the disk's other contents.
+- **Space and Bin** (with a file server): storage `usage` and `bin`, the bin by person with Restore (`restore`)
+  and, for the owner, Erase now (`erase`, after a confirm). A removed person's files say they come back if they are
+  let back in before the date. Until bothy's `memberkeys` lists admins and storage reads it, storage answers only
+  the owner, and an admin sees a line saying so.
+- **File server** (owner only): `GET <storage>/manage/info` gives its key and the home it follows. Linking
+  (`setstorage [url, key]`) first shows the key as an npub to check against the one Keykin Storage prints at start (its logs, or `home key`), and is refused on the page if
+  the file server follows another home. Unlinking is under Advanced.
+
+**Built:** `login/server.ts`, `login/static/home.js` (rules and calls, also loaded by the tests), the section in
+`login/static/account.js`. Tested against stand-ins that follow the contracts (`test/home-fakes.ts`; bothy v0.28.0
+calls, storage `/manage` as agreed) in `test/home.test.ts`, and in a browser with a stand-in phone in
+`test/home-page.test.ts`. Not yet tried against a real bothy or Keykin Storage, neither of which has these calls
+deployed.
+
+### 11.8 Helpers report what they sign (not built)
 
 Proposed 2026-11-21, agreed with Aaron as a design to build later. Nothing in this section is built:
 no device queues reports and the box has no `signed` op. Recent signing (section 11.6) lists only
@@ -1468,7 +1555,7 @@ whenever they are published.
 ## 9. Not built yet
 
 - **A background service for the phone's site signer** (section 8j).
-- **Helpers reporting signatures made without the box, and the relay alarm** (section 11.7).
+- **Helpers reporting signatures made without the box, and the relay alarm** (section 11.8).
   Recent signing lists only what the box helped with, and nothing compares it with the relays.
 - **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
   `state.json`, start it, and read the new secret from its output.
@@ -1495,7 +1582,7 @@ whenever they are published.
 ## 10. Known weak spots
 
 - A thief who can pass the fingerprint check on a stolen phone can form the nsec.
-- **Two pieces in one hand sign off the record** (section 11.7). Neither reports, and both can even
+- **Two pieces in one hand sign off the record** (section 11.8). Neither reports, and both can even
   report the signature as if it were fine. Only a signature with one honest piece is sure to be
   logged, and only a published one can raise the alarm.
 - **A password is now worth the whole account.** Whoever has it can add a device of their own, and from

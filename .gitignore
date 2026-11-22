@@ -4,3 +4,4 @@ dist/
 box-data/
 ext/dist/
 *.apk
+device-rs/target/

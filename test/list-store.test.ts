@@ -220,3 +220,30 @@ test('the command line never signs level 2, and says in plain words that it is d
     assert.equal(await sign({ kind: 1, content: 'gm' }), 'signed');
   } finally { await b.close(); rmSync(home, { recursive: true, force: true }); }
 });
+
+test('a list the box never signed: an app\'s write is asked about, and a device can send the version it knows', async () => {
+  const box = new Box();
+  const send = local(box);
+  const a = await account(send, box.qr('http://box')!);
+  const app = 'ab'.repeat(16);   // an app's grant
+  const bm = (n: number, t = NOW) => ({ created_at: t, kind: 10003, tags: Array.from({ length: n }, (_, i) => ['e', pk(i + 1)]), content: '' });
+  const as = (e: any, o: { grant?: string; tapped?: boolean; prev?: object } = {}) =>
+    D.signEvent(a.phone, a.held, { ...e, pubkey: a.held.npub }, send, NOW, o.grant, o.tapped, undefined, undefined, o.prev).then(() => 'signed', (err) => `${err.code}${err.why ? ': ' + err.why : ''}`);
+  // 20 bookmarks signed elsewhere (here, then forgotten by the box), so the box has nothing to compare with.
+  const full = await D.signEvent(a.phone, a.held, { ...bm(20, NOW - 50), pubkey: a.held.npub }, send, NOW);
+  box.lists = new Lists();
+  // An app writing it with nothing to compare: asked. The device's own write is not.
+  assert.equal(await as(bm(3), { grant: app }), 'needs_tap: Replace your bookmarks: there is no earlier version here to compare it with');
+  assert.equal(await as(bm(3), { grant: app, tapped: true }), 'signed');
+  box.lists = new Lists();
+  // With the version the device knows, the change is compared with it, as if the box had signed it.
+  assert.equal(await as(bm(3, NOW + 1), { grant: app, prev: full }), 'needs_tap: Remove 17 of your 20 bookmarks');
+  assert.equal(await as(bm(19, NOW + 1), { grant: app, prev: full }), 'signed', 'a small change against it is not asked about');
+  box.lists = new Lists();
+  // A version that is not really that list, or not signed by this key, is ignored.
+  for (const bad of [{ ...full, sig: '00'.repeat(64) }, { ...full, tags: [] }, { ...full, kind: 10000 }, { ...full, created_at: NOW + 5 }, 'nope'])
+    assert.match(await as(bm(3, NOW + 2), { grant: app, prev: bad as object }), /^needs_tap: Replace your bookmarks/);
+  // Named sets and the device's own writes are never asked only for having nothing to compare.
+  assert.equal(await as(set('new', 2, NOW + 3), { grant: app }), 'signed');
+  assert.equal(await as(bm(1, NOW + 4)), 'signed');
+});

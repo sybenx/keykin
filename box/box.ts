@@ -7,7 +7,7 @@ import { answer, type Piece } from '../src/round.ts';
 import { childPiece, tweakOf } from '../src/child.ts';
 import { ecdhPart } from '../src/ecdh.ts';
 import { eventId, type UnsignedEvent } from '../src/event.ts';
-import { judge, KEPT, AHEAD } from '../src/destructive.ts';
+import { judge, firstWrite, keyOf, KEPT, AHEAD } from '../src/destructive.ts';
 import { Lists, KEPT_SETS } from './lists.ts';
 import { open, fingerprintOk, newMemberKey, type Signed, MAX_SKEW } from '../src/member.ts';
 import { sealTo, openFrom } from '../src/seal.ts';
@@ -815,7 +815,14 @@ export class Box {
     // Level 2 is never done by accident: it needs the fingerprint, checked as for an account change, and `tapped`
     // alone is not enough. A child's lists are not kept here, so its changes are judged on their own.
     const mine = body.child === undefined && KEPT.has(ev.kind);
-    const j = judge(ev, mine ? this.lists.latest(s.npub, ev) : null, now, body.child !== undefined);
+    // The earlier version: the last one this box signed, or a newer one the asking device knows (a list signed elsewhere
+    // that the device read), when it is really that list, signed by this key, and older than the change.
+    const kept = mine ? this.lists.latest(s.npub, ev) : null;
+    const told = mine ? priorFrom(body.prev, ev) : null;
+    const prev = told && (!kept || told.created_at > kept.created_at) ? told : kept;
+    let j = judge(ev, prev, now, body.child !== undefined);
+    // An app's or a site's write of a kept list that nothing can compare: it may replace a whole list signed elsewhere.
+    if (j.decision === 'sign' && mine && !prev && isGrant(body.grant)) { const f = firstWrite(ev); if (f) j = { decision: 'ask', says: f.says, level: f.level }; }
     if (j.decision === 'refuse') refuseWhy('dated_ahead', j.says!);
     if (j.decision === 'ask' && j.level === 2) {
       if (!from.chip) refuseWhy('no_chip_key', j.says!);
@@ -1013,4 +1020,22 @@ export class Box {
     this.#needFingerprint(from, req);
     return { ok: true, i: s.i, share: sealTo(this.state.sk, from.key, 'reveal', s.share) };
   }
+}
+
+/** A grant id as a request names one: an app's or a site's, not the device's own. */
+const isGrant = (g: unknown) => typeof g === 'string' && /^[0-9a-f]{32}$/.test(g);
+/**
+ * The earlier version a device sends with a list (`prev`): used only when it is a signed event by the same key, of the
+ * same list (kind, and d for a named set), older than the change, and its id and signature hold. Otherwise ignored.
+ */
+function priorFrom(p: any, ev: UnsignedEvent): UnsignedEvent | null {
+  try {
+    if (!p || typeof p !== 'object' || p.pubkey !== ev.pubkey || p.kind !== ev.kind || !Array.isArray(p.tags) || typeof p.content !== 'string') return null;
+    if (!Number.isInteger(p.created_at) || p.created_at >= ev.created_at || keyOf(p) !== keyOf(ev)) return null;
+    if (!p.tags.every((t: unknown) => Array.isArray(t) && t.every((x) => typeof x === 'string'))) return null;
+    const e: UnsignedEvent = { pubkey: p.pubkey, created_at: p.created_at, kind: p.kind, tags: p.tags, content: p.content };
+    const id = eventId(e);
+    if (p.id !== id || typeof p.sig !== 'string' || !schnorr.verify(hexToBytes(p.sig), hexToBytes(id), hexToBytes(p.pubkey))) return null;
+    return e;
+  } catch { return null; }
 }

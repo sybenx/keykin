@@ -1193,6 +1193,7 @@ relay list, bookmarks, bookmark set and so on, else `kind <n> event`):
 | Another relay list (10006, 10007, 10051, 30002): 2 or more relays removed and at least half, or all of them | asks | 1 | `Change your <kind> from <old> to <new>`, or `Remove every relay from your <kind>: <old>` |
 | Another kept list: 10 or more entries removed, and at least a fifth | asks | 1 | `Remove <r> of your <n> <items>s` (and ` (and add <a>)`) |
 | A follow list with no `p` tag, whatever came before | asks | 2 | `Empty your follow list` |
+| A kept list (not a named set, not the relay list or DM relays) signed for an app or a site (the request names a grant) with no earlier version known, neither the box's nor the device's (Aaron, 2026-11-21) | asks | 1 | `Replace your <kind>: there is no earlier version here to compare it with` |
 
 Where a case sat between the levels, it took level 2: a profile left with only a banner or a website,
 or with a name that is only white space; a first profile with nothing in it, or one that is not a JSON
@@ -1201,7 +1202,10 @@ is a big unfollow, level 1. Emptying a list other than the follow list (mutes, b
 relays) is level 1.
 
 The rows that compare need the earlier version: the last version of that list the box signed, from
-its list store (section 6). With none, they say nothing, as on a new phone, except the relay list
+its list store (section 6), or the one the asking device sends as `prev` with `sign` when that one is newer.
+A device sends the newest version it knows (one it read from relays, say). The box uses it only when it is a
+signed event by the same key, of the same list (kind, and `d` for a named set), older than the change, with
+an id and signature that hold; otherwise it is ignored. It is compared with, never kept. With none, they say nothing, as on a new phone, except the relay list
 and DM relays row, which then asks. A child key's lists (section 8k) are not kept, so only the rows
 that need no earlier version apply to a child, and the relay list and DM relays row does not. The
 kept kinds are 0, 3, 10000 to 10004, 10006, 10007, 10015, 10030, 30000 to 30004, 30015 and 30030.

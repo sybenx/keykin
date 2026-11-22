@@ -1,7 +1,7 @@
 // The box's admin page, over real HTTP.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startBox } from '../box/server.ts';
@@ -29,6 +29,7 @@ test('the admin page: owner login, first setup, a second account, block, unblock
     // Not logged in: the login form, and nothing else.
     let page = await (await anon.get('/')).text();
     assert.match(page, /Owner secret/); assert.doesNotMatch(page, /<svg/);
+    assert.match(page, /reset-owner/);
     assert.equal((await anon.get('/admin/state')).status, 401);
     const bad = await anon.post('/login', { secret: 'nope' });
     assert.equal(bad.headers.get('location'), '/?e=1'); assert.equal(bad.headers.get('set-cookie'), null);
@@ -109,6 +110,52 @@ test('the admin page: someone asks for an account, the admin approves', async ()
     const id2 = await D.askBox(dave, 'make', '', c.send);
     await c.post('/admin/refuse', { id: id2, csrf });
     assert.equal(await D.asked(dave, id2, c.send), 'refused');
+  } finally { await b.close(); }
+});
+
+test('a reset-owner file beside the state replaces a lost owner secret once, on the next start', async () => {
+  const d = dir();
+  let b = await startBox({ dir: d, port: 0, log: () => {} });
+  const old = b.ownerSecret!;
+  await b.close();
+  // A plain restart keeps the secret and shows nothing.
+  b = await startBox({ dir: d, port: b.port, log: () => {} });
+  assert.equal(b.ownerSecret, null);
+  await b.close();
+
+  writeFileSync(join(d, 'reset-owner'), '');
+  const said: string[] = [];
+  b = await startBox({ dir: d, port: b.port, log: (s) => said.push(s) });
+  const c = client(`http://127.0.0.1:${b.port}`);
+  try {
+    const fresh = b.ownerSecret!;
+    assert.ok(fresh); assert.notEqual(fresh, old);
+    assert.ok(said.some((s) => s.includes(fresh)));
+    assert.equal(readFileSync(join(d, 'owner-secret.txt'), 'utf8').trim(), fresh);
+    assert.equal(existsSync(join(d, 'reset-owner')), false);
+    assert.equal((await c.post('/login', { secret: old })).headers.get('location'), '/?e=1');
+    assert.match((await c.post('/login', { secret: fresh })).headers.get('set-cookie')!, /^kk=/);
+  } finally { await b.close(); }
+
+  // Done once: the next start keeps the new secret.
+  b = await startBox({ dir: d, port: 0, log: () => {} });
+  const c2 = client(`http://127.0.0.1:${b.port}`);
+  try {
+    assert.equal(b.ownerSecret, null);
+    assert.match((await c2.post('/login', { secret: readFileSync(join(d, 'owner-secret.txt'), 'utf8').trim() })).headers.get('set-cookie')!, /^kk=/);
+  } finally { await b.close(); }
+});
+
+test('behind another login, a reset-owner file makes no secret and is cleared', async () => {
+  const d = dir();
+  writeFileSync(join(d, 'reset-owner'), '');
+  const said: string[] = [];
+  const b = await startBox({ dir: d, port: 0, behindLogin: true, log: (s) => said.push(s) });
+  try {
+    assert.equal(b.ownerSecret, null); assert.equal(b.box.state.owner, undefined);
+    assert.equal(existsSync(join(d, 'reset-owner')), false);
+    assert.equal(existsSync(join(d, 'owner-secret.txt')), false);
+    assert.ok(said.some((s) => s.includes('reset-owner ignored')));
   } finally { await b.close(); }
 });
 

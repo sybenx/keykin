@@ -159,3 +159,6 @@ a.linkbtn:hover { color:var(--on); }
 .detail.mono { white-space:pre-wrap; font-size:12px; }
 .idtail { font:400 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--dim); margin-left:8px; }
 .oldhead { padding:18px 0 6px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:2px; }
+/* Technical lines behind Advanced: wrap at spaces, and break a long key only where it must. */
+.detail.tech { font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; word-break:normal; overflow-wrap:anywhere; }
+.row .name, .row .detail { overflow-wrap:anywhere; }

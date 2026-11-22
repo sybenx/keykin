@@ -859,22 +859,22 @@
       const c = (m, p) => K.call(signer, h.url, m, p);
       const role = mine ? 'owner' : (await c('myrole', [])).role;
       if (role !== 'owner' && role !== 'admin') { house = { ...house, phase: 'none', info, role }; return draw(); }
-      const s = h.storage, m = s && K.manageUrl(s);
+      // File servers are a list (one today, more boxes later), each with its own usage, bin and key.
       const quiet = (p) => p.catch((x) => ({ failed: x }));
-      const [list, linked, usage, bin, sinfo] = await Promise.all([
+      const urls = houseFiles();
+      const [list, linked, ...per] = await Promise.all([
         c('listmembers', []),
         role === 'owner' ? quiet(c('getstorage', [])) : null,
-        s ? quiet(K.call(signer, m, 'usage', [])) : null,
-        s ? quiet(K.call(signer, m, 'bin', [])) : null,
-        s ? quiet(K.storageInfo(s)) : null,
+        ...urls.map((u) => Promise.all([quiet(K.call(signer, K.manageUrl(u), 'usage', [])), quiet(K.call(signer, K.manageUrl(u), 'bin', [])), quiet(K.storageInfo(u))])),
       ]);
+      const files = urls.map((url, i) => { const [usage, bin, sinfo] = per[i]; return { url, usage, bin, sinfo }; });
       const t = K.tree(owner, list);
-      house = { ...house, phase: 'ready', info, role, owner, list, tree: t, linked, usage, bin, sinfo, names: house.names ?? {} };
+      house = { ...house, phase: 'ready', info, role, owner, list, tree: t, linked, files, names: house.names ?? {} };
       draw();
       // Names and photos come after, from the home itself: a home may ask the phone to sign in to read them.
       // Then, for anyone still nameless, the relays this page reads the account's own profile from (wss only, inside
       // the page's CSP). What was found is kept for the visit, and nobody is looked up twice.
-      const all = [...new Set([owner, ...K.everyone(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...K.binByPerson(bin?.failed ? null : bin).map((g) => g.pubkey).filter(Boolean)])];
+      const all = [...new Set([owner, ...K.everyone(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...files.flatMap((f) => K.binByPerson(f.bin?.failed ? null : f.bin).map((g) => g.pubkey)).filter(Boolean)])];
       const looked = house.looked ?? (house.looked = new Set());
       const pks = all.filter((pk) => !looked.has(pk));
       if (!pks.length) return;
@@ -910,7 +910,23 @@
     window.scrollTo(0, 0);
   }
   const bothy = (m, p) => K.call(houseSigner(), me.home.url, m, p);
-  const store_ = (m, p) => K.call(houseSigner(), K.manageUrl(me.home.storage), m, p);
+  const store_ = (url, m, p) => K.call(houseSigner(), K.manageUrl(url), m, p);
+  /** The home's file servers: a list, so a second box is one more entry. */
+  const houseFiles = () => me.home.files ?? (me.home.storage ? [me.home.storage] : []);
+  /** What each person stores, over every file server that answered: {pubkey: {used, blobs}}. */
+  function storedBy() {
+    const out = {};
+    for (const f of house.files ?? []) for (const [pk, a] of Object.entries(K.usedBy(f.usage?.failed ? null : f.usage))) out[pk] = { used: (out[pk]?.used ?? 0) + (a.used ?? 0), blobs: (out[pk]?.blobs ?? 0) + (a.blobs ?? 0) };
+    return out;
+  }
+  const anyUsage = () => (house.files ?? []).some((f) => f.usage && !f.usage.failed);
+  /** The last time someone was here, once bothy says (lastSeen: unix seconds or a YYYY-MM-DD day, null for never). */
+  function seenWords(n) {
+    if (!('lastSeen' in n)) return null;
+    if (n.lastSeen === null || n.lastSeen === 0) return 'Never signed in';
+    const t = typeof n.lastSeen === 'number' ? n.lastSeen : Date.parse(n.lastSeen + 'T00:00:00Z') / 1000;
+    return isFinite(t) ? `Last here ${day(t)}` : null;
+  }
 
   function face(pk) {
     const pic = house.names?.[pk]?.picture, n = nameOf(pk);
@@ -918,15 +934,15 @@
       : el('div', { className: 'avatar small', ariaHidden: 'true' }, (n === 'Someone' ? '?' : n).charAt(0).toUpperCase());
   }
   function personRow({ node: n, depth }) {
-    const pk = n.pubkey, used = K.usedBy(house.usage?.failed ? null : house.usage)[pk];
+    const pk = n.pubkey, used = storedBy()[pk];
     const can = K.removal(n, me.npub, house.role), kids = K.below(n).length;
     const asking = house.ask?.pk === pk;
-    const usage = house.usage?.failed ? null : house.usage;
     const by = n.invitedBy && n.invitedBy !== n.pubkey && K.find(house.tree, n.invitedBy) ? withName(n.invitedBy) : null;
-    const bits = [K.howCame(n, by), n.joinedAt ? `joined ${day(n.joinedAt)}` : null, kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
-      n.role === 'owner' && !used ? null : used?.used ? `${K.size(used.used)} stored` : usage ? 'Nothing stored' : null].filter(Boolean);
+    const waiting = typeof n.waitingMail === 'number' && n.waitingMail > 0 ? `${K.plural(n.waitingMail, 'message')} waiting` : null;
+    const bits = [K.howCame(n, by), n.joinedAt ? `joined ${day(n.joinedAt)}` : null, seenWords(n), kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
+      n.role === 'owner' && !used ? null : used?.used ? `${K.size(used.used)} stored` : anyUsage() ? 'Nothing stored' : null, waiting].filter(Boolean);
     const named = pk === me.npub || !!house.names?.[pk]?.name;
-    const adv = house.adv ? el('div', { className: 'detail mono' }, `${K.npub(pk)} · ${pk}${n.source ? ` · joined by ${n.source}` : ''}${n.joinedAt ? ` · ${day(n.joinedAt)}` : ''}${used ? ` · ${used.blobs} files` : ''}`) : null;
+    const adv = house.adv ? el('div', { className: 'detail tech' }, [K.npub(pk), n.source ? `source ${n.source}` : null, used ? `${used.blobs} files` : null, typeof n.hasPush === 'boolean' ? (n.hasPush ? 'has notifications' : 'no notifications') : null].filter(Boolean).join(' · ')) : null;
     const sw = n.role === 'owner' ? null : el('label', { className: 'toggle', title: 'Sees where photos were taken' },
       el('input', { type: 'checkbox', checked: !!n.close, ariaLabel: `${nameOf(pk)} sees where photos were taken`, on: { change: (e) => { const on = e.currentTarget.checked; houseDo(e.currentTarget, () => bothy('setclose', [pk, on]), `${nameOf(pk)} ${on ? 'now sees' : 'no longer sees'} where photos were taken.`); } } }),
       'Sees where photos were taken');
@@ -962,76 +978,106 @@
     if (house.phase === 'error') return [top, card(el('p', { className: 'err', role: 'alert' }, house.line), el('div', {}, el('button', { className: 'btn', on: { click: () => loadHouse() } }, 'Try again')))];
     if (house.phase === 'none') return [top, card(el('div', { className: 'sub', id: 'housenone' }, 'This account is not the owner or an admin of this home, so there is nothing to manage here.'))];
 
-    const t = house.tree, people = [...K.flat(t), ...(t.old ?? []).flatMap((n) => K.flat(n, 1))], usage = house.usage?.failed ? null : house.usage, bin = house.bin?.failed ? null : house.bin;
-    const removed = house.list.removed ?? [], now = Date.now() / 1000;
-    const storageNote = house.role === 'admin' && (house.usage?.failed?.status === 401) ? 'Space and the bin show here for the owner. The file server does not know the admins yet.' : house.usage?.failed ? 'The file server cannot be reached right now.' : null;
-    const sub = [K.plural(people.length, 'person', 'people'), usage ? `${K.size(usage.total?.bytes ?? 0)} of photos and files` : null].filter(Boolean).join(' · ');
+    const t = house.tree, files = house.files ?? [], stored = storedBy(), now = Date.now() / 1000;
+    const all = [...K.flat(t), ...(t.old ?? []).flatMap((n) => K.flat(n, 1))];
+    // No name yet: people with no name or photo anywhere, nothing stored and nobody under them, once their names were
+    // looked for. They sit apart, oldest first, so the people Aaron knows are easy to read.
+    const looked = house.looked ?? new Set();
+    const nameless = (n) => n.role === 'member' && !n.kids.length && looked.has(n.pubkey) && !house.names?.[n.pubkey]?.name && !house.names?.[n.pubkey]?.picture && !(stored[n.pubkey]?.used > 0);
+    const quiet = all.filter((r) => nameless(r.node)).map((r) => ({ node: r.node, depth: 1 })).sort((a, b) => (a.node.joinedAt ?? 0) - (b.node.joinedAt ?? 0));
+    const hide = new Set(quiet.map((r) => r.node.pubkey));
+    const tree = K.flat(t).filter((r) => !hide.has(r.node.pubkey)), old = (t.old ?? []).flatMap((n) => K.flat(n, 1)).filter((r) => !hide.has(r.node.pubkey));
+    const removed = house.list.removed ?? [];
+    const answered = files.filter((f) => f.usage && !f.usage.failed);
+    const homeBytes = answered.reduce((s, f) => s + (f.usage.total?.bytes ?? 0), 0);
+    const denied = files.some((f) => f.usage?.failed?.status === 401), down = files.some((f) => f.usage?.failed && f.usage.failed.status !== 401);
+    const storageNote = house.role === 'admin' && denied ? 'Space and the bin show here for the owner. The file server does not know the admins yet.' : down ? 'The file server cannot be reached right now.' : null;
+    const sub = [K.plural(all.length, 'person', 'people'), answered.length ? `${K.size(homeBytes)} of photos and files` : null].filter(Boolean).join(' · ');
     const out = [head(house.info.name || 'Shared home', sub)];
+    const heading = (id, title, line) => el('div', { className: 'oldhead', id }, el('h3', {}, title), el('div', { className: 'detail' }, line));
 
-    // People: the invite tree.
-    const old = (t.old ?? []).flatMap((n) => K.flat(n, 1));
-    out.push(el('div', { className: 'card rows', id: 'housepeople' }, el('h2', { style: 'padding:16px 0 4px' }, 'People'), K.flat(t).map(personRow),
-      old.length ? el('div', { className: 'oldhead', id: 'houseold' }, el('h3', {}, 'Added before invites'), el('div', { className: 'detail' }, 'They joined before the home kept who invited whom.')) : null,
-      old.map(personRow)));
+    // People: the invite tree, then rows from before it, then people with no name yet.
+    out.push(el('div', { className: 'card rows', id: 'housepeople' }, el('h2', { style: 'padding:16px 0 4px' }, 'People'), tree.map(personRow),
+      old.length ? heading('houseold', 'Added before invites', 'They joined before the home kept who invited whom.') : null, old.map(personRow),
+      quiet.length ? heading('housequiet', 'No name yet', `${K.plural(quiet.length, 'person', 'people')} with no name or photo, who have stored nothing. Oldest first.`) : null, quiet.map(personRow)));
     const back = removed.filter((r) => !r.deletesAt || r.deletesAt > now);
     if (back.length) out.push(card(el('h2', {}, 'Recently removed'),
       el('div', { className: 'sub' }, 'They can come back with their messages and files until the date shown.'),
       el('div', { className: 'rows', id: 'houseremoved' }, back.map((r) => el('div', { className: 'row wrap' }, face(r.pubkey),
         el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(r.pubkey)), el('div', { className: 'detail' }, `Removed ${day(r.removedAt)}${r.deletesAt ? `, gone after ${day(r.deletesAt)}` : ''}`),
-          house.adv ? el('div', { className: 'detail mono' }, K.npub(r.pubkey)) : null),
+          house.adv ? el('div', { className: 'detail tech' }, K.npub(r.pubkey)) : null),
         el('button', { className: 'btn', ariaLabel: `Let ${nameOf(r.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [r.pubkey]), `${nameOf(r.pubkey)} is back in the home.`) } }, 'Let back in'))))));
 
-    // Space and the bin, from the file server.
-    if (h.storage) {
-      if (usage) {
-        const d = usage.disk ?? {}, all = (d.used ?? 0) + (d.free ?? 0), pct = all ? Math.min(100, Math.round(100 * (d.used ?? 0) / all)) : 0;
-        const by = [...(usage.accounts ?? [])].filter((a) => a.used > 0).sort((a, b) => b.used - a.used);
-        out.push(card(el('h2', {}, 'Space'),
-          el('div', { className: 'sub', id: 'housespace' }, all ? `${K.size(d.used)} used, ${K.size(d.free)} free on your box.` : `${K.size(usage.total?.bytes ?? 0)} of photos and files.`),
-          all ? el('div', { className: 'bar', role: 'img', ariaLabel: `${pct}% used` }, el('div', { style: `width:${pct}%` })) : null,
-          el('div', { className: 'rows' }, by.map((a) => el('div', { className: 'row' }, face(a.pubkey), el('div', { className: 'grow' }, nameOf(a.pubkey)), el('div', { className: 'detail' }, K.size(a.used)))))));
-      }
-      if (bin) {
-        const groups = K.binByPerson(bin), parked = bin.parked ?? [];
-        const owner = house.role === 'owner';
-        out.push(card(el('h2', {}, 'Bin'), el('div', { className: 'sub' }, 'Files people deleted or left behind are kept 30 days, then erased.'),
-          !groups.length && !parked.length ? el('div', { className: 'detail', id: 'housebinempty' }, 'The bin is empty.') : null,
-          el('div', { className: 'rows', id: 'housebin' },
-            groups.map((g) => el('div', { className: 'row wrap' }, g.pubkey ? face(g.pubkey) : el('div', { className: 'avatar small' }, '?'),
-              el('div', { className: 'grow' }, el('div', { className: 'name' }, g.pubkey ? nameOf(g.pubkey) : 'People no longer here'),
-                el('div', { className: 'detail' }, `${K.plural(g.items.length, 'file')}, ${K.size(g.bytes)}${g.erasesAt ? `, erased on ${day(g.erasesAt)}` : ''}${g.pubkey ? '' : '. Restoring gives them to you.'}`),
-                house.adv ? el('div', { className: 'detail mono' }, g.items.map((x) => `${x.sha256} ${K.size(x.size)}`).join('\n')) : null),
-              el('button', { className: 'btn', ariaLabel: `Restore ${nameOf(g.pubkey)}'s files`, on: { click: (e) => houseDo(e.currentTarget, async () => { let n = 0; for (const c of K.chunks(g.items.map((x) => x.sha256))) n += (await store_('restore', [c]))?.restored ?? 0; return n; }, (n) => `${K.plural(n, 'file')} restored.`) } }, 'Restore'),
-              owner ? el('button', { className: 'btn', ariaLabel: `Erase ${nameOf(g.pubkey)}'s files now`, on: { click: (e) => { if (confirm(`Erase ${K.plural(g.items.length, 'file')} now? This cannot be undone.`)) houseDo(e.currentTarget, async () => { let n = 0; for (const c of K.chunks(g.items.map((x) => x.sha256))) n += (await store_('erase', [c]))?.erased ?? 0; return n; }, (n) => `${K.plural(n, 'file')} erased.`); } } }, 'Erase now') : null)),
-            parked.map((p) => el('div', { className: 'row wrap' }, face(p.pubkey), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(p.pubkey)),
-              el('div', { className: 'detail' }, `${K.plural(p.blobs ?? 0, 'file')}, ${K.size(p.bytes ?? 0)}. ${p.reason === 'erased' ? 'They deleted their account.' : `Comes back if you let ${nameOf(p.pubkey)} back in${p.erasesAt ? ` before ${day(p.erasesAt)}` : ''}.`}`)),
-              p.reason === 'erased' ? null : el('button', { className: 'btn', ariaLabel: `Let ${nameOf(p.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [p.pubkey]), `${nameOf(p.pubkey)} is back in the home. Their files come back within a few minutes.`) } }, 'Let back in'))))));
-      }
-      if (bin?.more) out.push(card(el('div', { className: 'sub', id: 'housebinmore' }, 'The bin holds more files than this page shows. These are the newest.')));
-      if (storageNote) out.push(card(el('div', { className: 'sub', id: 'housestoragenote' }, storageNote)));
+    // Space: what the home stores first, then the room left on each box. Never the disk's other contents.
+    if (answered.length) {
+      const free = answered.map((f) => ({ f, free: f.usage.disk?.free })).filter((x) => typeof x.free === 'number');
+      const room = free.reduce((s, x) => s + x.free, 0), pct = homeBytes + room ? Math.max(homeBytes ? 1 : 0, Math.round(100 * homeBytes / (homeBytes + room))) : 0;
+      const by = Object.entries(stored).filter(([, a]) => a.used > 0).sort((a, b) => b[1].used - a[1].used);
+      const host = (u) => { try { return new URL(u).host; } catch { return u; } };
+      out.push(card(el('h2', {}, 'Space'),
+        el('div', { className: 'sub', id: 'housespace' }, el('strong', {}, `Photos and files: ${K.size(homeBytes)}`)),
+        free.length ? el('div', { className: 'detail', id: 'housefree' }, free.length === 1 ? `${K.size(free[0].free)} free on your box.` : free.map((x) => `${K.size(x.free)} free on ${host(x.f.url)}`).join(' · ')) : null,
+        free.length ? el('div', { className: 'bar', role: 'img', ariaLabel: `Photos and files use ${pct}% of the room they have` }, el('div', { style: `width:${pct}%` })) : null,
+        el('div', { className: 'rows' }, by.map(([pk, a]) => el('div', { className: 'row' }, face(pk), el('div', { className: 'grow' }, nameOf(pk)), el('div', { className: 'detail' }, K.size(a.used)))))));
     }
 
-    // File server: the owner links it to the home, after seeing its key.
-    if (house.role === 'owner' && h.storage) {
-      const si = house.sinfo?.failed ? null : house.sinfo, ln = house.linked?.failed ? null : house.linked;
-      const linked = !!(ln && si && ln.pubkey === si.pubkey && ln.url?.replace(/\/+$/, '') === h.storage);
-      const follows = si && (!si.home || K.sameHome(si.home, h.url));
+    // The bin, from each file server that answered.
+    const owner = house.role === 'owner';
+    const bins = files.filter((f) => f.bin && !f.bin.failed);
+    if (bins.length) {
+      const rows = bins.flatMap((f) => {
+        const groups = K.binByPerson(f.bin), parked = f.bin.parked ?? [];
+        const run = (m, list) => async () => { let n = 0; for (const c of K.chunks(list)) n += (await store_(f.url, m, [c]))?.[m === 'restore' ? 'restored' : 'erased'] ?? 0; return n; };
+        return [
+          ...groups.map((g) => el('div', { className: 'row wrap' }, g.pubkey ? face(g.pubkey) : el('div', { className: 'avatar small' }, '?'),
+            el('div', { className: 'grow' }, el('div', { className: 'name' }, g.pubkey ? nameOf(g.pubkey) : 'People no longer here'),
+              el('div', { className: 'detail' }, `${K.plural(g.items.length, 'file')}, ${K.size(g.bytes)}${g.erasesAt ? `, erased on ${day(g.erasesAt)}` : ''}${g.pubkey ? '' : '. Restoring gives them to you.'}`),
+              house.adv ? el('div', { className: 'detail tech' }, g.items.map((x) => `${x.sha256} ${K.size(x.size)}`).join('\n')) : null),
+            el('button', { className: 'btn', ariaLabel: `Restore ${nameOf(g.pubkey)}'s files`, on: { click: (e) => houseDo(e.currentTarget, run('restore', g.items.map((x) => x.sha256)), (n) => `${K.plural(n, 'file')} restored.`) } }, 'Restore'),
+            owner ? el('button', { className: 'btn', ariaLabel: `Erase ${nameOf(g.pubkey)}'s files now`, on: { click: (e) => { if (confirm(`Erase ${K.plural(g.items.length, 'file')} now? This cannot be undone.`)) houseDo(e.currentTarget, run('erase', g.items.map((x) => x.sha256)), (n) => `${K.plural(n, 'file')} erased.`); } } }, 'Erase now') : null)),
+          ...parked.map((p) => el('div', { className: 'row wrap' }, face(p.pubkey), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(p.pubkey)),
+            el('div', { className: 'detail' }, `${K.plural(p.blobs ?? 0, 'file')}, ${K.size(p.bytes ?? 0)}. ${p.reason === 'erased' ? 'They deleted their account.' : `Comes back if you let ${nameOf(p.pubkey)} back in${p.erasesAt ? ` before ${day(p.erasesAt)}` : ''}.`}`)),
+            p.reason === 'erased' ? null : el('button', { className: 'btn', ariaLabel: `Let ${nameOf(p.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [p.pubkey]), `${nameOf(p.pubkey)} is back in the home. Their files come back within a few minutes.`) } }, 'Let back in'))),
+        ];
+      });
+      out.push(card(el('h2', {}, 'Bin'), el('div', { className: 'sub' }, 'Files people deleted or left behind are kept 30 days, then erased.'),
+        rows.length ? null : el('div', { className: 'detail', id: 'housebinempty' }, 'The bin is empty.'),
+        el('div', { className: 'rows', id: 'housebin' }, rows),
+        bins.some((f) => f.bin.more) ? el('div', { className: 'detail', id: 'housebinmore' }, 'The bin holds more files than this page shows. These are the newest.') : null));
+    }
+    if (storageNote) out.push(card(el('div', { className: 'sub', id: 'housestoragenote' }, storageNote)));
+
+    // File server: the owner links a box's file server to the home, after seeing its key. Plain when all is well.
+    const ln = house.linked?.failed ? null : house.linked;
+    const isLinked = (f) => { const si = f.sinfo?.failed ? null : f.sinfo; return !!(ln && si && ln.pubkey === si.pubkey && ln.url?.replace(/\/+$/, '') === f.url); };
+    if (owner && files.length) {
       const parts = [el('h2', {}, 'File server')];
-      if (linked) parts.push(el('div', { className: 'sub', id: 'houselinked' }, 'Photos and files are kept on your box.'));
-      else if (!si) parts.push(el('div', { className: 'sub' }, 'Your box’s file server cannot be reached right now.'));
-      else if (!follows) parts.push(el('div', { className: 'sub err', id: 'housewronghome' }, 'Your box’s file server is set up for a different home, so it cannot be linked to this one. Its home setting needs changing on your box first.'));
-      else if (house.ask?.link) parts.push(el('div', { className: 'subcard', id: 'houselinkask' },
-        el('div', {}, 'Your box’s file server has this key:'), el('div', { className: 'mono', id: 'housekey' }, K.npub(si.pubkey)),
-        el('div', { className: 'detail' }, 'Check it matches the key Keykin Storage printed when it started (in its logs on your box), then link it.'),
-        el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'houselinkgo', on: { click: (e) => houseDo(e.currentTarget, () => bothy('setstorage', [h.storage, si.pubkey]), 'Linked. Photos and files are kept on your box.') } }, 'Link'),
-          el('button', { className: 'btn', on: { click: () => { house.ask = null; draw(); } } }, 'Cancel'))));
-      else parts.push(el('div', { className: 'sub' }, ln?.url ? 'Your home keeps photos and files somewhere else.' : 'Photos and files are not kept on your box yet.'),
-        el('div', {}, el('button', { className: 'btn go', id: 'houselink', on: { click: () => { house.ask = { link: true }; draw(); } } }, 'Keep photos and files on your box')));
-      if (house.adv) parts.push(el('div', { className: 'detail mono' }, `File server: ${h.storage}${si ? ` · key ${si.pubkey} · follows ${si.home ?? 'no home'}` : ''}${ln?.url ? ` · the home names ${ln.url} with key ${ln.pubkey}` : ''}`),
-        ln?.url ? el('div', {}, el('button', { className: 'btn', id: 'houseunlink', on: { click: (e) => { if (confirm('Unlink the file server? Apps stop saving photos and files there.')) houseDo(e.currentTarget, () => bothy('setstorage', ['']), 'Unlinked.'); } } }, 'Unlink file server')) : null);
+      if (files.some(isLinked)) parts.push(el('div', { className: 'sub', id: 'houselinked' }, 'Photos and files are kept on your box.'));
+      else for (const f of files) {
+        const si = f.sinfo?.failed ? null : f.sinfo, follows = si && (!si.home || K.sameHome(si.home, me.home.url));
+        if (!si) parts.push(el('div', { className: 'sub' }, 'Your box’s file server cannot be reached right now.'));
+        else if (!follows) parts.push(el('div', { className: 'sub err', id: 'housewronghome' }, 'Your box’s file server is set up for a different home, so it cannot be linked to this one. Its home setting needs changing on your box first.'));
+        else if (house.ask?.link === f.url) parts.push(el('div', { className: 'subcard', id: 'houselinkask' },
+          el('div', {}, 'Your box’s file server has this key:'), el('div', { className: 'mono', id: 'housekey' }, K.npub(si.pubkey)),
+          el('div', { className: 'detail' }, 'Check it matches the key Keykin Storage printed when it started (in its logs on your box), then link it.'),
+          el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'houselinkgo', on: { click: (e) => houseDo(e.currentTarget, () => bothy('setstorage', [f.url, si.pubkey]), 'Linked. Photos and files are kept on your box.') } }, 'Link'),
+            el('button', { className: 'btn', on: { click: () => { house.ask = null; draw(); } } }, 'Cancel'))));
+        else parts.push(el('div', { className: 'sub' }, ln?.url ? 'Your home keeps photos and files somewhere else.' : 'Photos and files are not kept on your box yet.'),
+          el('div', {}, el('button', { className: 'btn go', id: 'houselink', on: { click: () => { house.ask = { link: f.url }; draw(); } } }, 'Keep photos and files on your box')));
+      }
       out.push(card(...parts));
     }
-    if (house.adv) out.push(card(el('h2', {}, 'Advanced'), el('div', { className: 'detail mono', id: 'houseaddr' }, `Home: ${h.url} · owner ${K.npub(house.owner)} · you are ${house.role}`)));
+
+    // Advanced: everything technical, in one place, and unlinking.
+    if (house.adv) {
+      const lines = [`Home: ${me.home.url}`, `Owner: ${K.npub(house.owner)}`, `You are the ${house.role}.`,
+        ...files.map((f) => { const si = f.sinfo?.failed ? null : f.sinfo; return `File server: ${f.url}${si ? `, key ${K.npub(si.pubkey)}, follows ${si.home ?? 'no home'}` : ', not answering'}`; }),
+        ...(owner ? [ln?.url ? `The home names ${ln.url} as its file server, key ${K.npub(ln.pubkey)}.` : 'The home names no file server.'] : [])];
+      out.push(card(el('h2', {}, 'Advanced'), el('div', { className: 'detail tech', id: 'houseaddr' }, lines.join('\n')),
+        owner && ln?.url ? el('div', {}, el('button', { className: 'btn', id: 'houseunlink', on: { click: (e) => {
+          if (confirm('Unlink the file server from the home? New photos and files then go only to the public mirror. Nothing already stored is deleted, and you can link it again.')) houseDo(e.currentTarget, () => bothy('setstorage', ['']), 'Unlinked. New photos and files go only to the public mirror.');
+        } } }, 'Unlink file server')) : null));
+    }
     out.push(el('div', {}, advBtn));
     return out;
   }

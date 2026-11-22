@@ -8,7 +8,8 @@
 //   KEYKIN_LOGIN_PORT   port (default 7470)
 //   KEYKIN_HOME_URL     the DMs home (bothy) this box is the back room of, for example https://home.example/.
 //                       Unset: no Home section, and the page's headers are as before.
-//   KEYKIN_STORAGE_URL  that home's file server (Keykin Storage), for example https://files.example. Optional.
+//   KEYKIN_STORAGE_URL  that home's file server (Keykin Storage), for example https://files.example. Optional. A
+//                       second box's file server can follow after a comma.
 //
 // With a home set, the page calls the home and its file server itself, signed by the person's phone (the signer a
 // scan leaves). This server only names those two hosts in the page's connect-src; it signs and passes on nothing.
@@ -63,10 +64,12 @@ export function placeOf(raw: string | undefined, what: 'home' | 'storage'): { ur
 export function startLogin(o: { box: string; addr?: string; port?: number; relays?: string[]; home?: string; storage?: string; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   const relays = o.relays?.length ? o.relays : RELAYS;
-  const home = placeOf(o.home, 'home'), storage = home ? placeOf(o.storage, 'storage') : null;
-  // The two extra hosts the page may call, and only with a home set: the home (its http side, for NIP-86) and its file server.
-  const homeHosts = [home?.origin, storage?.origin].filter((x): x is string => !!x && !relays.some((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '') === x));
-  const homeInfo = home ? { url: home.url, storage: storage?.url ?? null } : null;
+  const home = placeOf(o.home, 'home');
+  const files = home ? (o.storage ?? '').split(',').map((x) => placeOf(x, 'storage')).filter((x): x is { url: string; origin: string } => !!x) : [];
+  // The extra hosts the page may call, and only with a home set: the home (its http side, for NIP-86) and its file servers.
+  const homeHosts = [home?.origin, ...files.map((f) => f.origin)].filter((x): x is string => !!x && !relays.some((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '') === x));
+  // `storage` is the first file server, for pages that know only one; `files` is the list.
+  const homeInfo = home ? { url: home.url, storage: files[0]?.url ?? null, files: [...new Set(files.map((f) => f.url))] } : null;
   const hits = new Map<string, number[]>();
   const tooFast = (req: IncomingMessage) => {
     const who = String(req.headers['cf-connecting-ip'] ?? req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
@@ -182,7 +185,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
   return new Promise<{ server: typeof server; port: number; close: () => Promise<void> }>((resolve) => {
     server.listen(o.port ?? 7470, o.addr ?? '127.0.0.1', () => {
       const port = (server.address() as any).port;
-      log(`keykin login: account page on port ${port}, box at ${o.box}${home ? `, home ${home.url}${storage ? `, file server ${storage.url}` : ''}` : ''}`);
+      log(`keykin login: account page on port ${port}, box at ${o.box}${home ? `, home ${home.url}${files.length ? `, file servers ${files.map((f) => f.url).join(' ')}` : ''}` : ''}`);
       resolve({ server, port, close: () => new Promise<void>((done) => { server.close(() => done()); server.closeAllConnections(); }) });
     });
   });

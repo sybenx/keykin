@@ -97,8 +97,8 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   const P = (n: string) => people[n].pk;
   const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: homeRelay.port, members: [
     { pubkey: P('ana'), role: 'admin' }, { pubkey: P('ben'), invitedBy: P('ana'), source: 'member' }, { pubkey: P('cleo'), invitedBy: P('ben'), close: false, source: 'member' },
-    { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner' },
-    { pubkey: P('finn'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001 }] }); shut.push(() => home.close());
+    { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner', lastSeen: 1_762_000_000 },
+    { pubkey: P('finn'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001, lastSeen: null }] }); shut.push(() => home.close());
   for (const n of ['ana', 'ben', 'cleo', 'dev', 'eve']) await toRelay(homeRelay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: n[0].toUpperCase() + n.slice(1) }) }, people[n].sk));
   await toRelay(relay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: 'Finn' }) }, people.finn.sk));
   const files = await fakeStorage({ owner: account, admins: [P('ana')], home: home.url, blobs: [
@@ -138,14 +138,16 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     assert.deepEqual(rows, [['You', 0], ['AnaAdmin', 1], ['Ben', 2], ['Cleo', 3], ['Dev', 3], ['Eve', 1], ['Finn', 1], ['Someone' + tail, 1]]);
     // Rows from before the invite tree sit apart, under their own heading, after the tree.
     assert.match((await page.textContent('#houseold'))!, /Added before invites/);
+    // No name, no photo, nothing stored: apart again, under No name yet.
+    assert.match((await page.textContent('#housequiet'))!, /No name yet1 person with no name or photo, who have stored nothing\. Oldest first\./);
     const detail = async (name: string) => (await page.locator('#housepeople .row.person', { hasText: name }).first().locator('.grow > .detail').first().textContent())!;
     assert.match(await detail('Cleo'), /^Invited by Ben · joined .* · 50 MB stored$/);
     assert.match(await detail('Dev'), /^Asked to join, let in by Ben · joined .* · Nothing stored$/);
-    assert.match(await detail('Eve'), /^Added by you · joined /);
-    assert.match(await detail(tail), /^Added by hand · joined Nov 14, 2023 · Nothing stored$/);
+    assert.match(await detail('Eve'), /^Added by you · joined .* · Last here Nov 1, 2025 · Nothing stored$/);
+    assert.match(await detail(tail), /^Added by hand · joined Nov 14, 2023 · Never signed in · Nothing stored$/);
     assert.match((await page.textContent('h1'))!, /The Herbst home/);
     // KEYKIN_SHOTS=<folder> saves what the section looks like, for a person to look at.
-    const shot = async (name: string, width = 390) => { if (!process.env.KEYKIN_SHOTS) return; await page.setViewportSize({ width, height: 860 }); await page.screenshot({ path: join(process.env.KEYKIN_SHOTS, `${name}-${width}.png`), fullPage: true }); await page.setViewportSize({ width: 390, height: 860 }); };
+    const shot = async (name: string, width = 390) => { if (!process.env.KEYKIN_SHOTS) return; await page.setViewportSize({ width, height: 860 }); await page.locator('main').screenshot({ path: join(process.env.KEYKIN_SHOTS, `${name}-${width}.png`) }); await page.setViewportSize({ width: 390, height: 860 }); };
     await shot('home'); await shot('home', 1280);
     assert.match((await page.textContent('.head .dim'))!, /8 people · 2\.3 GB of photos and files/);
     // Plain words only: nothing technical until Advanced.
@@ -178,7 +180,9 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     assert.ok(home.members.has(P('ben')));
 
     // Space and the bin, by person. Restore Ana's files; erase Cleo's (owner only, after a confirm).
-    assert.match((await page.textContent('#housespace'))!, /40 GB used, 960 GB free on your box\./);
+    // Space leads with what the home stores; the box's room comes after, and its other contents are never counted.
+    assert.equal(await page.textContent('#housespace'), 'Photos and files: 2.3 GB');
+    assert.equal(await page.textContent('#housefree'), '960 GB free on your box.');
     assert.match((await page.textContent('#housebin'))!, /Ana2 files, 220 MB, erased on/);
     await page.click('[aria-label="Restore Ana\'s files"]');
     await page.waitForSelector('#status >> text=2 files restored.');
@@ -201,7 +205,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     // Advanced: the technical detail, and unlinking.
     await page.click('#houseadv');
     await page.waitForSelector('#houseaddr');
-    await shot('advanced', 1280);
+    await shot('advanced', 1280); await shot('advanced');
     assert.match((await page.textContent('#housepeople'))!, new RegExp(npubEncode(P('ana'))));
     await page.click('#houseunlink');
     await page.waitForSelector('#houselink');

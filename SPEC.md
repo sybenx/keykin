@@ -1347,7 +1347,7 @@ each visit."). No longer-lived signer is kept to avoid that.
 section. An admin signs in with their own Keykin account. Where a person's Keykin key and messenger key differ, the
 Keykin key is the one the owner makes an admin.
 
-**What it shows** (plain words; keys, addresses, how people joined and file hashes only under Advanced):
+**What it shows** (plain words; keys, addresses and file hashes only in one Advanced card at the end):
 
 - **People:** the invite tree from `listmembers`, the owner on top, each person under whoever let them in (under the
   owner when the inviter is unknown), names and photos from kind 0 on the home (with NIP-42 if the home asks). Each
@@ -1356,6 +1356,15 @@ Keykin key is the one the owner makes an admin.
   count and names, "Keep the N people they invited" and "Remove them too", neither styled as the dangerous one.
   The page offers only what bothy takes: no Remove for the owner or yourself, and an admin gets none for an admin.
   "Recently removed" offers "Let back in" (`allowpubkey`).
+- **Rows people can tell apart** (2026-11-22, after Aaron's first look): names from the home, then from the
+  account's own relays for anyone still nameless. Each row says how they came in from `source` ("Added by",
+  "Invited by", "Asked to join, let in by"), when they joined, what they store or "Nothing stored", and, once
+  bothy sends them, `lastSeen` ("Last here 3 Sep", "Never signed in") and `waitingMail`. A row with no name shows
+  the last six characters of its key. Rows with no inviter sit under "Added before invites"; members with no name,
+  no photo, nothing stored and nobody under them sit under "No name yet", oldest first.
+- **File servers are a list** (`KEYKIN_STORAGE_URL` may name several, comma-separated; `me.home.files`), so a
+  second box is one more entry. Space leads with what the home stores ("Photos and files: 1.2 MB") and then the
+  room left on each box, never the disk's other contents.
 - **Space and Bin** (with a file server): storage `usage` and `bin`, the bin by person with Restore (`restore`)
   and, for the owner, Erase now (`erase`, after a confirm). A removed person's files say they come back if they are
   let back in before the date. Until bothy's `memberkeys` lists admins and storage reads it, storage answers only

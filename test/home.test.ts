@@ -139,6 +139,9 @@ test('Keykin Login: the home settings, and the page may reach exactly those two 
   const both = await csp({ home: 'https://home.example', storage: 'https://files.example' });
   assert.match(both, /connect-src 'self' wss: https:\/\/relay\.example https:\/\/home\.example https:\/\/files\.example;/);
   assert.doesNotMatch(both, /connect-src[^;]* https:[ ;]/, 'never all of https');
+  // A second box's file server after a comma: both named, nothing else.
+  const two = await csp({ home: 'https://home.example', storage: 'https://files.example, https://files2.example/' });
+  assert.match(two, /connect-src 'self' wss: https:\/\/relay\.example https:\/\/home\.example https:\/\/files\.example https:\/\/files2\.example;/);
   // A file server without a home is no Home section, and no extra host.
   assert.equal(await csp({ storage: 'https://files.example' }), plain);
   // home.js is served beside the page's other scripts.

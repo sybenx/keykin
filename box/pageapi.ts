@@ -67,6 +67,7 @@ export class PageApi {
     box.onNoteRefused = (account, id) => {
       const list = this.#notes.get(account) ?? [];
       if (!list.some((x) => x.id === id && x.result === undefined)) return false;
+      this.box.trace?.(`note ${id.slice(0, 8)} refused on a device (No)`);
       this.#notes.set(account, list.filter((x) => x.id !== id));
       const by = this.#noteBy.get(id); if (by) this.#end(by);      // No ends that browser's session
       this.#noteBy.delete(id);
@@ -77,7 +78,9 @@ export class PageApi {
       const n = (this.#notes.get(account) ?? []).find((x) => x.id === id);
       if (!n || n.result !== undefined) return false;
       if (n.kind === 'nostrconnect' && n.weak && this.weakSiteLimit) this.box.limitNextSiteOf(account, device, Math.floor(Date.now() / 1000) + NOTE_SECONDS, this.weakSiteLimit);
-      n.result = result; return true;
+      n.result = result;
+      this.box.trace?.(`note ${id.slice(0, 8)} ${n.kind} answered by ${this.box.nameOf(account, device)} after ${Math.floor(Date.now() / 1000) - n.at}s`);
+      return true;
     };
   }
 
@@ -194,6 +197,7 @@ export class PageApi {
             ...(body.kind === 'bunker' || body.kind === 'nostrconnect' ? { lists: body.lists === true, dms: body.dms === true } : {}),
             ...(body.kind === 'nostrconnect' && !strong && this.weakSiteLimit ? { weak: true } : {}) };
           this.#notes.set(a.npub, [...list, note]); this.#noteBy.set(note.id, hash);
+          this.box.trace?.(`note ${note.id.slice(0, 8)} ${note.kind} put by the account page`);
           this.box.noteCame(a.npub);         // a device holding a notes_wait hears of it now
           if (body.kind === 'nostrconnect') this.box.rememberConnect(a, body.text, this.#all()[hash]?.agent, now);
           this.box.happened(a.npub, { nostrconnect: 'A site sign-in was started from the account page', invite: 'Adding a device was started from the account page', bunker: 'A bunker link was asked for from the account page', cycle: 'Removing blocked devices was asked for from the account page', pointer: 'Publishing the sign-in page was asked for from the account page' }[body.kind as Note['kind']], now);
@@ -317,7 +321,7 @@ export class PageApi {
     for (const [c, l] of this.#logins) if (l.until < now) this.#logins.delete(c);
     for (const [c, until] of this.#challenges) if (until < now) this.#challenges.delete(c);
     for (const id of this.#noteBy.keys()) if (![...this.#notes.values()].some((l) => l.some((n) => n.id === id))) this.#noteBy.delete(id);
-    for (const [a, list] of this.#notes) { const keep = list.filter((n) => now - n.at < NOTE_SECONDS); if (keep.length) this.#notes.set(a, keep); else this.#notes.delete(a); }
+    for (const [a, list] of this.#notes) { for (const n of list) if (now - n.at >= NOTE_SECONDS && n.result === undefined) this.box.trace?.(`note ${n.id.slice(0, 8)} ${n.kind} ran out unanswered after ${NOTE_SECONDS}s`); const keep = list.filter((n) => now - n.at < NOTE_SECONDS); if (keep.length) this.#notes.set(a, keep); else this.#notes.delete(a); }
   }
   // ---- Page sessions (SPEC 11.6) ------------------------------------------------------------------------
   // Kept in the box's state, so they live through a restart, by SHA-256 of the token: the state file alone

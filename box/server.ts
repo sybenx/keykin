@@ -64,6 +64,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   box.signedLog.tidy((a) => !!box.state.accounts[a]);
   const save = (s: BoxState) => { writeFileSync(file + '.tmp', JSON.stringify(s, null, 2), { mode: 0o600 }); renameSync(file + '.tmp', file); };
   box.onChange = save;
+  if (process.env.KEYKIN_QUIET !== '1') box.trace = (line) => log(`keykin box: ${line}`);
   const nowS = () => Math.floor(Date.now() / 1000);
   const where = (): string => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
   const page = new PageApi(box, () => o.url || where(), () => !!o.open, o.policy ?? {});
@@ -129,12 +130,15 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
     if (hold) {
       // A notes_wait with nothing new: checked and signed for once, above. Hold the reply until a note comes,
       // the wait runs out or the device goes away, then read the notes again.
-      const gone = new AbortController(), away = () => gone.abort();
+      const gone = new AbortController(), away = () => gone.abort(), started = Date.now();
       res.on('close', away);
       await box.waitForNote(hold.account, hold.seconds * 1000, gone.signal);
       res.off('close', away);
-      if (gone.signal.aborted || res.destroyed) return true;
-      json(res, 200, box.heldNotes(hold));
+      const held = Math.round((Date.now() - started) / 1000), who = box.nameOf(hold.account, hold.member);
+      if (gone.signal.aborted || res.destroyed) { box.trace?.(`device notes_wait from ${who}: let go after ${held}s (it hung up)`); return true; }
+      const out = box.heldNotes(hold);
+      box.trace?.(`device notes_wait from ${who}: answered after ${held}s, ${out.error ?? (out.notes!.length ? out.notes!.map((n: any) => `${n.id.slice(0, 8)} ${n.kind}`).join(', ') : 'no notes')}`);
+      json(res, 200, out);
       return true;
     }
     json(res, 200, r);

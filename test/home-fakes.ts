@@ -114,7 +114,7 @@ export async function fakeBothy(o: { owner: string; name?: string; members?: Par
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   url = `http://127.0.0.1:${(server.address() as any).port}/`;
-  return { url, members, removed, calls, get storage() { return storage; }, close: () => new Promise<void>((r) => { server.close(() => r()); server.closeAllConnections(); }) };
+  return { url, members, removed, calls, get storage() { return storage; }, set storage(v) { storage = v; }, close: () => new Promise<void>((r) => { server.close(() => r()); server.closeAllConnections(); }) };
 }
 
 type Blob = { sha256: string; size: number; type: string; owners: Set<string>; charged: string | null; binnedAt: number | null };

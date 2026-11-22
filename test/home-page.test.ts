@@ -194,6 +194,14 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     await page.waitForSelector('#houselink');
     assert.equal(home.storage, null);
 
+    // Linked before this page existed, the way the live home was (setstorage with a trailing slash): it reads as linked.
+    home.storage = { url: files.url + '/', pubkey: files.key };
+    await page.click('#houseadv');
+    await page.click('nav >> text=Devices'); await page.click('nav >> text=Shared home');
+    await page.waitForSelector('#houselinked');
+    assert.equal(await page.textContent('#houselinked'), 'Photos and files are kept on your box.');
+    assert.equal(await page.locator('#houselink, #houselinkask, #housewronghome').count(), 0);
+
     // Everything was signed by the phone, as the account: NIP-98 only (no NIP-42 needed on this home).
     assert.ok(ph.kinds.length >= 10 && ph.kinds.every((k) => k === 27235), String(ph.kinds));
     assert.ok(files.calls.every((c) => c.by === account));

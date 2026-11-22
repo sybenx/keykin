@@ -872,10 +872,26 @@
       house = { ...house, phase: 'ready', info, role, owner, list, tree: t, linked, usage, bin, sinfo, names: house.names ?? {} };
       draw();
       // Names and photos come after, from the home itself: a home may ask the phone to sign in to read them.
-      const pks = [owner, ...K.below(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...K.binByPerson(bin?.failed ? null : bin).map((g) => g.pubkey).filter(Boolean)];
+      // Then, for anyone still nameless, the relays this page reads the account's own profile from (wss only, inside
+      // the page's CSP). What was found is kept for the visit, and nobody is looked up twice.
+      const all = [...new Set([owner, ...K.everyone(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...K.binByPerson(bin?.failed ? null : bin).map((g) => g.pubkey).filter(Boolean)])];
+      const looked = house.looked ?? (house.looked = new Set());
+      const pks = all.filter((pk) => !looked.has(pk));
+      if (!pks.length) return;
+      const redraw = () => { if (house?.phase === 'ready' && section === 'house' && !document.querySelector('[data-busy]')) draw(); };
       const relay = K.relayOf(h.url);
-      const events = await K.readProfiles(relay, [...new Set(pks)], (ch) => signer.signEvent(K.authFor(relay, ch)));
-      if (house?.phase === 'ready') { house.names = { ...house.names, ...K.profiles(events) }; if (section === 'house' && !document.querySelector('[data-busy]')) draw(); }
+      const fromHome = K.profiles(await K.readProfiles(relay, pks, (ch) => signer.signEvent(K.authFor(relay, ch))));
+      if (house?.phase !== 'ready') return;
+      house.names = { ...house.names, ...fromHome }; redraw();
+      const missing = pks.filter((pk) => !house.names[pk]?.name);
+      const elsewhere = (me.relays ?? []).filter((r) => /^wss:\/\//.test(r) || /^ws:\/\/(127\.0\.0\.1|localhost)[:/]/.test(r));
+      if (missing.length && elsewhere.length) {
+        const found = K.profiles((await Promise.all(elsewhere.map((r) => K.readProfiles(r, missing, null)))).flat());
+        if (house?.phase !== 'ready') return;
+        for (const [pk, p] of Object.entries(found)) if (!house.names[pk]?.name || (!house.names[pk]?.picture && p.picture)) house.names[pk] = { name: house.names[pk]?.name || p.name, picture: house.names[pk]?.picture || p.picture };
+      }
+      pks.forEach((pk) => looked.add(pk));
+      redraw();
     } catch (x) {
       house = { ...house, phase: 'error', line: houseFail(x) };
       draw();
@@ -905,8 +921,11 @@
     const pk = n.pubkey, used = K.usedBy(house.usage?.failed ? null : house.usage)[pk];
     const can = K.removal(n, me.npub, house.role), kids = K.below(n).length;
     const asking = house.ask?.pk === pk;
-    const bits = [n.role === 'owner' ? 'Owner' : n.invitedBy ? `Invited by ${withName(n.invitedBy)}` : null, kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
-      used ? `${K.size(used.used)} of photos and files` : null].filter(Boolean);
+    const usage = house.usage?.failed ? null : house.usage;
+    const by = n.invitedBy && n.invitedBy !== n.pubkey && K.find(house.tree, n.invitedBy) ? withName(n.invitedBy) : null;
+    const bits = [K.howCame(n, by), n.joinedAt ? `joined ${day(n.joinedAt)}` : null, kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
+      n.role === 'owner' && !used ? null : used?.used ? `${K.size(used.used)} stored` : usage ? 'Nothing stored' : null].filter(Boolean);
+    const named = pk === me.npub || !!house.names?.[pk]?.name;
     const adv = house.adv ? el('div', { className: 'detail mono' }, `${K.npub(pk)} · ${pk}${n.source ? ` · joined by ${n.source}` : ''}${n.joinedAt ? ` · ${day(n.joinedAt)}` : ''}${used ? ` · ${used.blobs} files` : ''}`) : null;
     const sw = n.role === 'owner' ? null : el('label', { className: 'toggle', title: 'Sees where photos were taken' },
       el('input', { type: 'checkbox', checked: !!n.close, ariaLabel: `${nameOf(pk)} sees where photos were taken`, on: { change: (e) => { const on = e.currentTarget.checked; houseDo(e.currentTarget, () => bothy('setclose', [pk, on]), `${nameOf(pk)} ${on ? 'now sees' : 'no longer sees'} where photos were taken.`); } } }),
@@ -914,7 +933,7 @@
     const rm = can.remove ? el('button', { className: 'btn', ariaLabel: `Remove ${nameOf(pk)}`, on: { click: () => { house.ask = { pk }; draw(); } } }, 'Remove')
       : can.why ? el('span', { className: 'detail', title: can.why }, can.why) : null;
     const row = el('div', { className: 'row person', style: `padding-left:${Math.min(depth, 6) * 24}px` },
-      face(pk), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(pk), n.role === 'admin' ? el('span', { className: 'tag' }, 'Admin') : null), el('div', { className: 'detail' }, bits.join(' · ')), adv),
+      face(pk), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(pk), named || house.adv ? null : el('span', { className: 'idtail', title: 'The end of their key' }, K.tail(pk)), n.role === 'admin' ? el('span', { className: 'tag' }, 'Admin') : null), el('div', { className: 'detail' }, bits.join(' · ')), adv),
       sw, asking ? null : rm);
     row.dataset.pk = pk;
     if (!asking) return row;
@@ -943,14 +962,17 @@
     if (house.phase === 'error') return [top, card(el('p', { className: 'err', role: 'alert' }, house.line), el('div', {}, el('button', { className: 'btn', on: { click: () => loadHouse() } }, 'Try again')))];
     if (house.phase === 'none') return [top, card(el('div', { className: 'sub', id: 'housenone' }, 'This account is not the owner or an admin of this home, so there is nothing to manage here.'))];
 
-    const t = house.tree, people = K.flat(t), usage = house.usage?.failed ? null : house.usage, bin = house.bin?.failed ? null : house.bin;
+    const t = house.tree, people = [...K.flat(t), ...(t.old ?? []).flatMap((n) => K.flat(n, 1))], usage = house.usage?.failed ? null : house.usage, bin = house.bin?.failed ? null : house.bin;
     const removed = house.list.removed ?? [], now = Date.now() / 1000;
     const storageNote = house.role === 'admin' && (house.usage?.failed?.status === 401) ? 'Space and the bin show here for the owner. The file server does not know the admins yet.' : house.usage?.failed ? 'The file server cannot be reached right now.' : null;
     const sub = [K.plural(people.length, 'person', 'people'), usage ? `${K.size(usage.total?.bytes ?? 0)} of photos and files` : null].filter(Boolean).join(' · ');
     const out = [head(house.info.name || 'Shared home', sub)];
 
     // People: the invite tree.
-    out.push(el('div', { className: 'card rows', id: 'housepeople' }, el('h2', { style: 'padding:16px 0 4px' }, 'People'), people.map(personRow)));
+    const old = (t.old ?? []).flatMap((n) => K.flat(n, 1));
+    out.push(el('div', { className: 'card rows', id: 'housepeople' }, el('h2', { style: 'padding:16px 0 4px' }, 'People'), K.flat(t).map(personRow),
+      old.length ? el('div', { className: 'oldhead', id: 'houseold' }, el('h3', {}, 'Added before invites'), el('div', { className: 'detail' }, 'They joined before the home kept who invited whom.')) : null,
+      old.map(personRow)));
     const back = removed.filter((r) => !r.deletesAt || r.deletesAt > now);
     if (back.length) out.push(card(el('h2', {}, 'Recently removed'),
       el('div', { className: 'sub' }, 'They can come back with their messages and files until the date shown.'),

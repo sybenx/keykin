@@ -157,3 +157,5 @@ a.linkbtn:hover { color:var(--on); }
 /* The two removal choices carry the count and names, so on a phone they wrap inside their buttons. */
 #houseask .btn { white-space:normal; height:auto; min-height:44px; padding:10px 18px; text-align:left; }
 .detail.mono { white-space:pre-wrap; font-size:12px; }
+.idtail { font:400 12px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--dim); margin-left:8px; }
+.oldhead { padding:18px 0 6px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:2px; }

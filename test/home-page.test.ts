@@ -81,6 +81,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   const shut: (() => unknown)[] = [];
   try {
   const relay = await nakRelay(); shut.push(relay.kill);
+  const homeRelay = await nakRelay(); shut.push(homeRelay.kill);       // the home's own relay; `relay` is the account's
   const port = await freePort();
   const box = await startBox({ dir: mkdtempSync(join(tmpdir(), 'kk-box-')), port: 0, sidePort: 0, behindLogin: true, url: `http://127.0.0.1:${port}`, log: () => {} }); shut.push(() => box.close());
   const mac = mkdtempSync(join(tmpdir(), 'kk-mac-'));
@@ -91,12 +92,15 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   await first.close();
 
   // The home: Ana (an admin) let in Ben, Ben let in Cleo and Dev; Eve came in by the owner. Each has a name on the home.
-  const people = Object.fromEntries(['ana', 'ben', 'cleo', 'dev', 'eve'].map((n) => { const sk = generateSecretKey(); return [n, { sk, pk: getPublicKey(sk) }]; }));
+  // From before the invite tree (no inviter): Finn, whose name is only on the account's relays, and one with no name anywhere.
+  const people = Object.fromEntries(['ana', 'ben', 'cleo', 'dev', 'eve', 'finn', 'nameless'].map((n) => { const sk = generateSecretKey(); return [n, { sk, pk: getPublicKey(sk) }]; }));
   const P = (n: string) => people[n].pk;
-  const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: relay.port, members: [
-    { pubkey: P('ana'), role: 'admin' }, { pubkey: P('ben'), invitedBy: P('ana') }, { pubkey: P('cleo'), invitedBy: P('ben'), close: false },
-    { pubkey: P('dev'), invitedBy: P('ben'), close: false }, { pubkey: P('eve') }] }); shut.push(() => home.close());
-  for (const [n, p] of Object.entries(people)) await toRelay(relay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: n[0].toUpperCase() + n.slice(1) }) }, p.sk));
+  const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: homeRelay.port, members: [
+    { pubkey: P('ana'), role: 'admin' }, { pubkey: P('ben'), invitedBy: P('ana'), source: 'member' }, { pubkey: P('cleo'), invitedBy: P('ben'), close: false, source: 'member' },
+    { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner' },
+    { pubkey: P('finn'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001 }] }); shut.push(() => home.close());
+  for (const n of ['ana', 'ben', 'cleo', 'dev', 'eve']) await toRelay(homeRelay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: n[0].toUpperCase() + n.slice(1) }) }, people[n].sk));
+  await toRelay(relay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: 'Finn' }) }, people.finn.sk));
   const files = await fakeStorage({ owner: account, admins: [P('ana')], home: home.url, blobs: [
     { sha256: 'a1'.repeat(32), size: 120e6, owner: P('ana'), binned: true }, { sha256: 'a2'.repeat(32), size: 100e6, owner: P('ana'), binned: true },
     { sha256: 'b1'.repeat(32), size: 2e9, owner: P('ben') }, { sha256: 'c1'.repeat(32), size: 50e6, owner: P('cleo'), binned: true }] }); shut.push(() => files.close());
@@ -128,13 +132,22 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
 
     // The phone answers: the home loads. The owner, then each person under whoever let them in, with their names.
     await page.waitForSelector('#housepeople .row.person >> text=Cleo', { timeout: 30_000 }).catch(async (x) => { throw new Error(`${x.message}\npage: ${await page.textContent('main')}\nerrors: ${errors.join('; ')}\nphone signed: ${ph!.kinds}`); });
+    await page.waitForSelector('#housepeople .row.person >> text=Finn');
     const rows = await page.$$eval('#housepeople .row.person', (rs) => rs.map((r) => [r.querySelector('.name')!.textContent, parseInt((r as HTMLElement).style.paddingLeft) / 24]));
-    assert.deepEqual(rows, [['You', 0], ['AnaAdmin', 1], ['Ben', 2], ['Cleo', 3], ['Dev', 3], ['Eve', 1]]);
+    const tail = P('nameless').slice(-6);
+    assert.deepEqual(rows, [['You', 0], ['AnaAdmin', 1], ['Ben', 2], ['Cleo', 3], ['Dev', 3], ['Eve', 1], ['Finn', 1], ['Someone' + tail, 1]]);
+    // Rows from before the invite tree sit apart, under their own heading, after the tree.
+    assert.match((await page.textContent('#houseold'))!, /Added before invites/);
+    const detail = async (name: string) => (await page.locator('#housepeople .row.person', { hasText: name }).first().locator('.grow > .detail').first().textContent())!;
+    assert.match(await detail('Cleo'), /^Invited by Ben · joined .* · 50 MB stored$/);
+    assert.match(await detail('Dev'), /^Asked to join, let in by Ben · joined .* · Nothing stored$/);
+    assert.match(await detail('Eve'), /^Added by you · joined /);
+    assert.match(await detail(tail), /^Added by hand · joined Nov 14, 2023 · Nothing stored$/);
     assert.match((await page.textContent('h1'))!, /The Herbst home/);
     // KEYKIN_SHOTS=<folder> saves what the section looks like, for a person to look at.
     const shot = async (name: string, width = 390) => { if (!process.env.KEYKIN_SHOTS) return; await page.setViewportSize({ width, height: 860 }); await page.screenshot({ path: join(process.env.KEYKIN_SHOTS, `${name}-${width}.png`), fullPage: true }); await page.setViewportSize({ width: 390, height: 860 }); };
     await shot('home'); await shot('home', 1280);
-    assert.match((await page.textContent('.head .dim'))!, /6 people · 2\.3 GB of photos and files/);
+    assert.match((await page.textContent('.head .dim'))!, /8 people · 2\.3 GB of photos and files/);
     // Plain words only: nothing technical until Advanced.
     const plain = (await page.textContent('main'))!;
     for (const word of ['npub', 'pubkey', 'relay', 'blob', 'NIP', 'sha256', '—']) assert.ok(!plain.includes(word), word);

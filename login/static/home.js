@@ -113,30 +113,49 @@
 
   // ---- The invite tree --------------------------------------------------------------------------------
   /**
-   * The tree from `listmembers` and the owner: {pubkey, role, close, source, joinedAt, kids:[...]}, the owner at
-   * the root. Anyone whose inviter is missing (rows from before invitedBy, or an inviter not in the list) hangs
-   * under the owner. A key listed twice is shown once. Children are in join order.
+   * The tree from `listmembers` and the owner: {pubkey, role, close, source, joinedAt, kids:[...], old:[...]}, the owner
+   * at the root. People with no inviter (rows from before the invite tree, which bothy's contract gives as
+   * `invitedBy: null`, or an inviter no longer listed) go in `old`, each with whoever they invited under them, so the
+   * real tree stays readable. A key listed twice is shown once. Children are in join order.
    */
   function tree(owner, list) {
     const rows = new Map();
     for (const m of list?.members ?? []) if (isHex(m?.pubkey) && m.pubkey !== owner && !rows.has(m.pubkey)) rows.set(m.pubkey, { ...m, kids: [] });
-    const root = { pubkey: owner, role: 'owner', close: true, source: 'owner', joinedAt: null, invitedBy: null, kids: [] };
-    const parentOf = (n) => (n.invitedBy && rows.has(n.invitedBy) && n.invitedBy !== n.pubkey ? rows.get(n.invitedBy) : root);
-    // A loop (it should never come from bothy) is cut at the owner, so every row is shown once.
+    const root = { pubkey: owner, role: 'owner', close: true, source: 'owner', joinedAt: null, invitedBy: null, kids: [], old: [] };
+    const OLD = { kids: root.old };
+    const parentOf = (n) => (n.invitedBy === owner ? root : n.invitedBy && rows.has(n.invitedBy) && n.invitedBy !== n.pubkey ? rows.get(n.invitedBy) : OLD);
+    // A loop (it should never come from bothy) is cut and put with the old rows, so every row is shown once.
     for (const n of rows.values()) {
-      let p = parentOf(n), seen = new Set([n.pubkey]);
-      while (p !== root && !seen.has(p.pubkey)) { seen.add(p.pubkey); p = parentOf(p); }
-      (p === root ? parentOf(n) : root).kids.push(n);
+      let p = parentOf(n); const seen = new Set([n.pubkey]);
+      while (p !== root && p !== OLD && !seen.has(p.pubkey)) { seen.add(p.pubkey); p = parentOf(p); }
+      (p === root || p === OLD ? parentOf(n) : OLD).kids.push(n);
     }
-    const order = (n) => { n.kids.sort((a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0) || (a.pubkey < b.pubkey ? -1 : 1)); n.kids.forEach(order); };
-    order(root);
+    const byJoin = (a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0) || (a.pubkey < b.pubkey ? -1 : 1);
+    const order = (n) => { n.kids.sort(byJoin); n.kids.forEach(order); };
+    order(root); root.old.sort(byJoin); root.old.forEach(order);
     return root;
   }
   /** Everyone under `n`, not counting `n`. */
   const below = (n) => n.kids.flatMap((k) => [k, ...below(k)]);
   /** Depth-first, with each row's depth, for an indented list. */
   const flat = (n, depth = 0) => [{ node: n, depth }, ...n.kids.flatMap((k) => flat(k, depth + 1))];
-  const find = (n, pk) => (n.pubkey === pk ? n : n.kids.map((k) => find(k, pk)).find(Boolean) ?? null);
+  const find = (n, pk) => (n.pubkey === pk ? n : [...n.kids, ...(n.old ?? [])].map((k) => find(k, pk)).find(Boolean) ?? null);
+  /** Everyone in the home but the owner: the tree and the old rows. */
+  const everyone = (t) => [...below(t), ...(t.old ?? []).flatMap((n) => [n, ...below(n)])];
+  /**
+   * How someone came in, in plain words, from bothy's `source` (allowed_pubkeys.source): "owner" is let in by hand
+   * (allowpubkey, and every row from before sources), "member" came with an invite code, "request" asked to join and
+   * was let in, "invite" is an older invite. `by` is the inviter's name ("you" for the person looking), or null.
+   */
+  function howCame(n, by) {
+    if (n.role === 'owner') return 'Owner';
+    if (!by) return n.source === 'request' ? 'Asked to join' : n.source === 'member' || n.source === 'invite' ? 'Came with an invite' : 'Added by hand';
+    if (n.source === 'request') return `Asked to join, let in by ${by}`;
+    if (n.source === 'member' || n.source === 'invite') return `Invited by ${by}`;
+    return `Added by ${by}`;
+  }
+  /** The last six characters of a key, for telling nameless people apart. */
+  const tail = (hex) => (isHex(hex) ? hex.slice(-6) : '');
 
   /**
    * What `me` (role owner or admin) may do about removing `n`, the way bothy decides it, so the page offers
@@ -193,5 +212,5 @@
     };
   }
 
-  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, tree, below, flat, find, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
+  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, tree, below, flat, find, everyone, howCame, tail, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
 })();

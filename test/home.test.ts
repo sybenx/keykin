@@ -22,20 +22,36 @@ test('npub and sizes read the way the rest of Keykin writes them', () => {
   assert.ok(K.sameHome('https://h.example', 'https://h.example/')); assert.ok(!K.sameHome('https://h.example/', 'https://other.example/'));
 });
 
-test('the invite tree: the owner on top, each person under whoever let them in, every key once', () => {
-  const O = pk('0'), A = pk('a'), B = pk('b'), C = pk('c'), D = pk('d'), E = pk('e'), F = pk('f');
+test('the invite tree: the owner on top, each person under whoever let them in, rows with no inviter apart, every key once', () => {
+  const O = pk('0'), A = pk('a'), B = pk('b'), C = pk('c'), D = pk('d'), E = pk('e'), F = pk('f'), G = pk('1');
   const t = K.tree(O, { members: [
     { pubkey: B, invitedBy: A, joinedAt: 3, role: 'member' }, { pubkey: A, invitedBy: O, joinedAt: 1, role: 'admin' },
-    { pubkey: C, invitedBy: B, joinedAt: 4 }, { pubkey: D, invitedBy: null, joinedAt: 2 },          // from before invitedBy: under the owner
-    { pubkey: E, invitedBy: pk('9'), joinedAt: 5 },                                               // inviter not listed: under the owner
+    { pubkey: C, invitedBy: B, joinedAt: 4 }, { pubkey: D, invitedBy: null, joinedAt: 2 },          // from before the invite tree: apart
+    { pubkey: E, invitedBy: pk('9'), joinedAt: 5 },                                               // inviter not listed: apart
     { pubkey: A, invitedBy: O, joinedAt: 9 },                                                     // listed twice: once
-    { pubkey: F, invitedBy: F, joinedAt: 6 },                                                     // its own inviter: under the owner
+    { pubkey: F, invitedBy: F, joinedAt: 6 },                                                     // its own inviter: apart
+    { pubkey: G, invitedBy: D, joinedAt: 7 },                                                     // invited by an old row: under it
     { pubkey: O, invitedBy: null }] });                                                           // the owner in the list: only at the root
-  assert.deepEqual(K.flat(t).map((r: any) => [r.node.pubkey[0], r.depth]), [['0', 0], ['a', 1], ['b', 2], ['c', 3], ['d', 1], ['e', 1], ['f', 1]]);
+  assert.deepEqual(K.flat(t).map((r: any) => [r.node.pubkey[0], r.depth]), [['0', 0], ['a', 1], ['b', 2], ['c', 3]]);
+  assert.deepEqual(t.old.flatMap((n: any) => K.flat(n, 1)).map((r: any) => [r.node.pubkey[0], r.depth]), [['d', 1], ['1', 2], ['e', 1], ['f', 1]]);
   assert.deepEqual(K.below(K.find(t, A)).map((n: any) => n.pubkey[0]), ['b', 'c']);
+  assert.equal(K.find(t, G).pubkey, G);
+  assert.equal(K.everyone(t).length, 7);
   // A loop never comes from bothy, but if it did each row still shows once.
   const loop = K.tree(O, { members: [{ pubkey: A, invitedBy: B }, { pubkey: B, invitedBy: A }] });
-  assert.equal(K.flat(loop).length, 3);
+  assert.equal(K.everyone(loop).length, 2);
+});
+
+test('how someone came in, in plain words, and the end of their key', () => {
+  assert.equal(K.howCame({ role: 'owner' }, null), 'Owner');
+  assert.equal(K.howCame({ source: 'owner' }, 'you'), 'Added by you');
+  assert.equal(K.howCame({ source: 'member' }, 'Robin'), 'Invited by Robin');
+  assert.equal(K.howCame({ source: 'invite' }, 'Robin'), 'Invited by Robin');
+  assert.equal(K.howCame({ source: 'request' }, 'you'), 'Asked to join, let in by you');
+  assert.equal(K.howCame({ source: 'owner' }, null), 'Added by hand');
+  assert.equal(K.howCame({ source: 'request' }, null), 'Asked to join');
+  assert.equal(K.howCame({ source: 'member' }, null), 'Came with an invite');
+  assert.equal(K.tail('ab'.repeat(29) + 'c0ffee'), 'c0ffee');
 });
 
 test('removal: the page offers only what bothy takes', () => {

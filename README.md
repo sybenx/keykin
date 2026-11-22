@@ -79,6 +79,20 @@ hard to undo. keykin never says Yes for you: what the box asks about is signed i
 what is never done by accident only on your phone. `keykin status` shows who this Mac signs as, and
 `keykin forget` deletes its sealed piece (block it on your phone too).
 
+A private message needs no bunker and no other app. It's one Touch ID, and the prompt says who it's for and how
+it starts ("send a private message to Alice (npub1…): “hi, are you…”"):
+
+```bash
+keykin dm npub1… 'hi, are you around this week?'
+echo "a longer message from a script" | keykin dm --for "weekly report" npub1… -
+```
+
+It looks up where they read private messages (their DM relay list, else the relays they read from), leaves it
+there, and leaves a copy for you on your own DM relays so it shows in your DM apps. It prints where each copy
+landed. `--relay wss://…` sends both copies there instead. It's NIP-17: the message is sealed and signed as you,
+then wrapped by a one-time key. `keykin encrypt <npub> '<text>'` and `keykin decrypt <npub> '<text>'` do NIP-44
+alone, for scripts that build their own.
+
 Linux and Windows aren't done yet: `keykin join` says so rather than keeping a piece in a plain file.
 
 ## The Android app

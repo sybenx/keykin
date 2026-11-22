@@ -237,13 +237,25 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     await page.waitForSelector('text=App on Pixel 9a');
     await shot('sites');
     // Posts only: the site may still post, and nothing else.
-    await page.check('input[aria-label="Posts only for https://jumble.social"]');
+    const jl = 'select[aria-label="Limit for https://jumble.social"]';
+    assert.equal(await page.inputValue(jl), '');
+    assert.deepEqual(await page.locator(`${jl} option`).allTextContents(), ['Everything', 'Posts and messages only', 'Posts only']);
+    await page.selectOption(jl, 'posts');
     await page.waitForSelector('text=jumble.social can only post now.');
-    assert.ok(await page.isChecked('input[aria-label="Posts only for https://jumble.social"]'));
+    assert.equal(await page.inputValue(jl), 'posts');
     const follows = { pubkey: held.npub, created_at: 1700000000, kind: 3, tags: [['p', 'a'.repeat(64)]], content: '' };
+    const dm = { ...follows, kind: 14, content: 'hello' };
     await assert.rejects(D.signEvent(work, wh, follows, w.send, undefined, jumble.id), /not_allowed/);
+    await assert.rejects(D.signEvent(work, wh, dm, w.send, undefined, jumble.id), /not_allowed/);
     assert.ok(verifyEvent(await D.signEvent(work, wh, note(held.npub), w.send, undefined, jumble.id)));
-    await page.uncheck('input[aria-label="Posts only for https://jumble.social"]');
+    // Posts and messages only: direct messages sign too, a follow list still does not.
+    await page.selectOption(jl, 'dms');
+    await page.waitForSelector('text=jumble.social can only post and send messages now.');
+    assert.equal(await page.inputValue(jl), 'dms');
+    assert.equal(w.box.box.only()!.limits![jumble.id], 'dms');
+    assert.ok(verifyEvent(await D.signEvent(work, wh, dm, w.send, undefined, jumble.id)));
+    await assert.rejects(D.signEvent(work, wh, follows, w.send, undefined, jumble.id), /not_allowed/);
+    await page.selectOption(jl, '');
     await page.waitForSelector('text=jumble.social can do everything again.');
     assert.ok(verifyEvent(await D.signEvent(work, wh, follows, w.send, undefined, jumble.id)));
     // A site with the phone's two switches: DMs turned on here waits for the phone, which picks it up when it reports.
@@ -260,7 +272,12 @@ test('the account page in a browser: sign in, devices, sites and apps, security,
     const got = await D.syncGrants(phone, held, [amethyst, chat], w.send);
     assert.deepEqual(got.scopes, { [chat.id]: { dms: true } });
     await D.reportGrants(phone, held, [amethyst, { ...chat, dms: true }], w.send);
-    await page.check('input[aria-label="Posts only for https://chat.nostr.com"]');
+    // Posts and messages only leaves DMs on and greys out private lists; Posts only greys out both.
+    const cl = 'select[aria-label="Limit for https://chat.nostr.com"]';
+    await page.selectOption(cl, 'dms');
+    await page.waitForSelector('text=chat.nostr.com can only post and send messages now.');
+    assert.ok(!(await page.isDisabled(dms))); assert.ok(await page.isDisabled(lists));
+    await page.selectOption(cl, 'posts');
     await page.waitForSelector('text=chat.nostr.com can only post now.');
     assert.ok(await page.isDisabled(dms)); assert.ok(await page.isDisabled(lists));
     assert.equal(await page.locator('text=waiting for Pixel 9a').count(), 0);

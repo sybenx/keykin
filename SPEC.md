@@ -869,9 +869,11 @@ each device tells the box what it has let in.
   treats the grant as revoked: it answers `revoked` and lists it in `revoked`. The account page shows
   each grant's last use, and the activity list records "<site> signed out after 90 days unused".
 
-**Limiting a grant to posting.** The person can let a site or app post and do nothing else.
+**Limiting a grant to posting.** The person can let a site or app post and do nothing else, or
+post and use direct messages and nothing else.
 
-- `{ op: "limit", account, grant, to: "posts" }` from any device sets it, and `to: null` lifts it.
+- `{ op: "limit", account, grant, to: "posts" }` from any device sets it, `to: "dms"` sets posts and
+  messages only, and `to: null` lifts it.
   The account page's call is `limit { grant, to }`, for a grant on its list (`gone` otherwise).
   Neither needs a fingerprint: limiting takes power away, and a device can always sign for itself
   without naming a grant.
@@ -880,10 +882,14 @@ each device tells the box what it has let in.
   requests, media posts and relay logins) and answers `not_allowed` to anything else, so a profile,
   a follow list, a delete or a zap receipt (9735) is refused. It answers `not_allowed` to every
   `ecdh` naming it: a limited site cannot read or write messages.
+- For a grant limited to `dms` it also allows the direct message kinds 4, 13, 14, 15 and 1059, and
+  an `ecdh` with anyone's key but the account's own: it can read and send DMs, but not the private
+  lists.
 - Revoking a grant removes its limit too.
-- The page's `me` view gives each grant's `limit`: `"posts"` or `null`.
+- The page's `me` view gives each grant's `limit`: `"posts"`, `"dms"` or `null`.
 
-**Built:** the box, the account page (a "Posts only" switch on each row of Sites and apps), and
+**Built:** the box, the account page (a "Can do" choice on each row of Sites and apps: Everything,
+Posts and messages only, or Posts only), and
 `reportGrants` / `revoke` / `limit` / the `grant` field in both device cores. The command-line
 signer and the browser extension report each site they let in and name it on every request. The
 Kotlin core's site signer (`SiteSigner`) gives each site a grant and names it. The Android app (Marble)
@@ -924,10 +930,10 @@ them on the phone. The account page can turn them on or off; the box only carrie
    for a grant no device lists any more goes, and revoking a grant (from anywhere, or after 90 days
    unused) drops its want.
 4. The page's `me` gives each grant `lists` and `dms` (as reported, or `null`) and `want` (or
-   `null`). Sites and apps shows "Private lists" and "DMs" switches beside Posts only for a site
+   `null`). Sites and apps shows "Private lists" and "DMs" switches beside its "Can do" choice for a site
    that has them, showing the want while there is one, and adds "waiting for Pixel 9a" to the line
    while the want and the device differ. With Posts only on, both are greyed out: that limit already
-   refuses every message key.
+   refuses every message key. With Posts and messages only on, Private lists is greyed out.
 
 **Built (2026-11-19), the switches:** on the box (`wants`, `scopes` in the `grants` answer), the page
 call and `me` (`box/pageapi.ts`, passed through by Keykin Login), the account page
@@ -1125,7 +1131,7 @@ happen differently:
 |---|---|---|
 | See devices, grants, activity | Add a device (`invite` note) | Remove blocked devices for good (`cycle` note) |
 | Block and unblock a device | Become a site's signer (`nostrconnect` note) | Publish the sign-in-page pointer naming the box's login page (`pointer` note, section 11.1) |
-| Revoke a grant, or limit it to posting (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
+| Revoke a grant, or limit it to posts only or to posts and messages only (`limit`) | Hand out a `bunker://` link (`bunker` note) | |
 | Set or change the password (`pw_set`; it is never removed, section 11.3) | | |
 | End its own session, or all page sessions | | |
 
@@ -1291,7 +1297,8 @@ today) and `WEAK_SITE_LIMIT` is null. A weak session asking for a strong call wo
 `need_strong`, and the page would then offer to confirm with a passkey or the phone (`pk_login` or
 `signin` made while signed in swaps the session for a stronger one). A box owner can switch rows on
 with `KEYKIN_POLICY`. The `dms` limit exists for this: it signs posts and DM kinds (4, 13, 14, 15,
-1059) and computes message keys with other people's keys only. **Not built:** the page's
+1059) and computes message keys with other people's keys only. The account page also offers it to the person, as
+Posts and messages only (section 11.5). **Not built:** the page's
 "Confirm with a passkey or your phone" prompt, since nothing asks for it today.
 
 **Built (2026-11-19), sessions and the click before a site:** on the box, in Keykin Login and on the
@@ -1345,7 +1352,6 @@ check also keeps the device list and grants fresh, and is all it does with an ol
 - **NIP-04** (old-style messages) and the other NIP-46 methods.
 - **Screens for moving an account to another box.** Built in the device cores and on the command
   line only.
-- **Limits other than posting only, on the page.** The box also knows `dms` (posts and direct messages, section 11.6), but the page offers only posts only.
 - **Paper backup and undo.** Not decided.
 - **QRST sign-in to the account page.** It signs in by Keykin's own device login or a password.
 - **Firefox and Safari.** The extension is Chromium only.

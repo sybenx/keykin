@@ -97,7 +97,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   const P = (n: string) => people[n].pk;
   const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: homeRelay.port, members: [
     { pubkey: P('ana'), role: 'admin' }, { pubkey: P('ben'), invitedBy: P('ana'), source: 'member' }, { pubkey: P('cleo'), invitedBy: P('ben'), close: false, source: 'member' },
-    { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner', lastSeen: 1_762_000_000 },
+    { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner', lastSeen: 20779 },
     { pubkey: P('finn'), inviterUnknown: true, source: 'invite', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001, lastSeen: null }] }); shut.push(() => home.close());
   for (const n of ['ana', 'ben', 'cleo', 'dev', 'eve']) await toRelay(homeRelay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: n[0].toUpperCase() + n.slice(1) }) }, people[n].sk));
   await toRelay(relay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: 'Finn' }) }, people.finn.sk));
@@ -143,7 +143,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     const detail = async (name: string) => (await page.locator('#housepeople .row.person', { hasText: name }).first().locator('.grow > .detail').first().textContent())!;
     assert.match(await detail('Cleo'), /^Invited by Ben · joined .* · 50 MB stored$/);
     assert.match(await detail('Dev'), /^Asked to join, let in by Ben · joined .* · Nothing stored$/);
-    assert.match(await detail('Eve'), /^Added by you · joined .* · Last here Nov 1, 2025 · Nothing stored$/);
+    assert.match(await detail('Eve'), /^Added by you · joined .* · Last here Nov 22, 2026 · Nothing stored$/);
     assert.match(await detail(tail), /^Joined Nov 14, 2023 · No sign-in since Nov 21, 2026 · Nothing stored$/);
     assert.match(await detail('Finn'), /^Joined Nov 14, 2023 · Nothing stored$/);        // inviter unknown: never "Invited by you" 
     assert.match((await page.textContent('h1'))!, /The Herbst home/);

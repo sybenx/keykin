@@ -920,17 +920,6 @@
     return out;
   }
   const anyUsage = () => (house.files ?? []).some((f) => f.usage && !f.usage.failed);
-  /**
-   * The last time someone was here, once bothy says (v0.29 `lastSeen`: unix seconds or a YYYY-MM-DD day, null if never).
-   * bothy began keeping sign-in days on 2026-11-21, so for someone who joined before then null only means not since.
-   */
-  const SEEN_FROM = new Date(2026, 10, 21).getTime() / 1000;
-  function seenWords(n) {
-    if (!('lastSeen' in n)) return null;
-    if (n.lastSeen === null || n.lastSeen === 0) return n.joinedAt && n.joinedAt < SEEN_FROM ? `No sign-in since ${day(SEEN_FROM)}` : 'Never signed in';
-    const t = typeof n.lastSeen === 'number' ? n.lastSeen : Date.parse(n.lastSeen + 'T00:00:00Z') / 1000;
-    return isFinite(t) ? `Last here ${day(t)}` : null;
-  }
 
   function face(pk) {
     const pic = house.names?.[pk]?.picture, n = nameOf(pk);
@@ -943,7 +932,7 @@
     const asking = house.ask?.pk === pk;
     const by = n.invitedBy && n.invitedBy !== n.pubkey && K.find(house.tree, n.invitedBy) ? withName(n.invitedBy) : null;
     const waiting = typeof n.waiting === 'number' && n.waiting > 0 ? `${K.plural(n.waiting, 'message')} waiting` : null;
-    const bits = [K.howCame(n, by), n.joinedAt ? `${n.legacy ? 'Joined' : 'joined'} ${day(n.joinedAt)}` : null, seenWords(n), kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
+    const bits = [K.howCame(n, by), n.joinedAt ? `${n.legacy ? 'Joined' : 'joined'} ${day(n.joinedAt)}` : null, K.seenWords(n), kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
       n.role === 'owner' && !used ? null : used?.used ? `${K.size(used.used)} stored` : anyUsage() ? 'Nothing stored' : null, waiting].filter(Boolean);
     const named = pk === me.npub || !!house.names?.[pk]?.name;
     const adv = house.adv ? el('div', { className: 'detail tech' }, [K.npub(pk), n.source ? `source ${n.source}` : null, used ? `${used.blobs} files` : null, typeof n.push === 'boolean' ? (n.push ? 'has notifications' : 'no notifications') : null].filter(Boolean).join(' · ')) : null;
@@ -1008,7 +997,7 @@
     if (back.length) out.push(card(el('h2', {}, 'Recently removed'),
       el('div', { className: 'sub' }, 'They can come back with their messages and files until the date shown.'),
       el('div', { className: 'rows', id: 'houseremoved' }, back.map((r) => el('div', { className: 'row wrap' }, face(r.pubkey),
-        el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(r.pubkey)), el('div', { className: 'detail' }, `Removed ${day(r.removedAt)}${r.deletesAt ? `, gone after ${day(r.deletesAt)}` : ''}`),
+        el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(r.pubkey)), el('div', { className: 'detail' }, `Removed ${day(r.removedAt)}${r.deletesAt ? `, gone after ${day(r.deletesAt)}` : ''}${typeof r.waiting === 'number' && r.waiting > 0 ? ` · ${K.plural(r.waiting, 'message')} waiting` : ''}`),
           house.adv ? el('div', { className: 'detail tech' }, K.npub(r.pubkey)) : null),
         el('button', { className: 'btn', ariaLabel: `Let ${nameOf(r.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [r.pubkey]), `${nameOf(r.pubkey)} is back in the home.`) } }, 'Let back in'))))));
 

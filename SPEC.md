@@ -1359,9 +1359,10 @@ Keykin key is the one the owner makes an admin.
 - **Rows people can tell apart** (2026-11-22, after Aaron's first look): names from the home, then from the
   account's own relays for anyone still nameless. Each row says how they came in from `source` ("Added by",
   "Invited by", "Asked to join, let in by"), when they joined, what they store or "Nothing stored", and, once
-  bothy v0.29 sends them, `lastSeen` ("Last here 3 Sep"; null is "Never signed in", or "No sign-in since 21 Nov
-  2026" for someone who joined before bothy kept sign-in days), `waiting` ("2 messages waiting") and `push` (under
-  Advanced). A row with no name shows the last six characters of its key. Rows whose inviter is not known (bothy
+  bothy v0.29 sends them, `lastSeen` (a UTC day number, floor(unix / 86400), shown as that UTC day: "Last here 3
+  Sep"; a value over 100000 is read as seconds; null is "Never signed in", or "No sign-in since 21 Nov
+  2026" for someone who joined before bothy kept sign-in days), `waiting` ("2 messages waiting", also on a recently removed row, where it is the only one of these that means
+  anything) and `push` (under Advanced). A row with no name shows the last six characters of its key. Rows whose inviter is not known (bothy
   v0.29 `inviterUnknown: true`, or a null `invitedBy`) sit under "Added before invites" with no inviter words; members with no name,
   no photo, nothing stored and nobody under them sit under "No name yet", oldest first.
 - **File servers are a list** (`KEYKIN_STORAGE_URL` may name several, comma-separated; `me.home.files`), so a

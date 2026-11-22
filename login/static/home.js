@@ -157,6 +157,21 @@
     if (n.source === 'member' || n.source === 'invite') return `Invited by ${by}`;
     return `Added by ${by}`;
   }
+  /**
+   * When someone was last here, in words, from bothy v0.29's `lastSeen`: a UTC day number (floor(unix / 86400)), null if
+   * never. bothy began writing it on 2026-11-21 (day 20778), so for someone who joined before then null means "not
+   * since". A value too big to be a day (over 100000) is read as seconds, so a change of units cannot print the year
+   * 50000. Absent: null, nothing said. The day is shown in UTC, as bothy counts it, never with a time.
+   */
+  const SEEN_FROM_DAY = 20778;
+  const utcDay = (d) => new Date(d * 86400000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  function seenWords(n) {
+    if (!n || !('lastSeen' in n)) return null;
+    const v = n.lastSeen;
+    if (v === null || v === 0) return typeof n.joinedAt === 'number' && n.joinedAt < SEEN_FROM_DAY * 86400 ? `No sign-in since ${utcDay(SEEN_FROM_DAY)}` : 'Never signed in';
+    if (typeof v !== 'number' || !isFinite(v) || v < 0) return null;
+    return `Last here ${utcDay(v > 100000 ? Math.floor(v / 86400) : Math.floor(v))}`;
+  }
   /** The last six characters of a key, for telling nameless people apart. */
   const tail = (hex) => (isHex(hex) ? hex.slice(-6) : '');
 
@@ -215,5 +230,5 @@
     };
   }
 
-  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, tree, below, flat, find, everyone, howCame, tail, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
+  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, tree, below, flat, find, everyone, howCame, tail, seenWords, utcDay, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
 })();

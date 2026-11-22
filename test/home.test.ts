@@ -58,6 +58,17 @@ test('how someone came in, in plain words, and the end of their key', () => {
   assert.equal(K.tail('ab'.repeat(29) + 'c0ffee'), 'c0ffee');
 });
 
+test('last here: bothy v0.29 lastSeen is a UTC day number, shown as that UTC day', () => {
+  assert.equal(K.seenWords({ lastSeen: 20779 }), 'Last here Nov 22, 2026');                                // 2026-11-22
+  assert.equal(K.seenWords({ lastSeen: 20778 }), 'Last here Nov 21, 2026');
+  assert.equal(K.seenWords({ lastSeen: 20779 * 86400 + 5000 }), 'Last here Nov 22, 2026', 'seconds by mistake: still that day, never the year 50000');
+  assert.equal(K.seenWords({ lastSeen: null, joinedAt: 1_756_000_000 }), 'No sign-in since Nov 21, 2026'); // joined before bothy kept days
+  assert.equal(K.seenWords({ lastSeen: null, joinedAt: 20779 * 86400 }), 'Never signed in');
+  assert.equal(K.seenWords({ lastSeen: null }), 'Never signed in');
+  assert.equal(K.seenWords({}), null);                                                                     // an older bothy says nothing
+  for (const odd of ['2026-11-22', -1, NaN, true]) assert.equal(K.seenWords({ lastSeen: odd }), null, String(odd));
+});
+
 test('removal: the page offers only what bothy takes', () => {
   const O = pk('0'), A = pk('a'), B = pk('b'), C = pk('c'), M = pk('d');
   const t = K.tree(O, { members: [{ pubkey: A, invitedBy: O, role: 'admin' }, { pubkey: B, invitedBy: O, role: 'member' }, { pubkey: C, invitedBy: B, role: 'admin' }, { pubkey: M, invitedBy: A, role: 'member' }] });

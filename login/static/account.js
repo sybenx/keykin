@@ -920,10 +920,14 @@
     return out;
   }
   const anyUsage = () => (house.files ?? []).some((f) => f.usage && !f.usage.failed);
-  /** The last time someone was here, once bothy says (lastSeen: unix seconds or a YYYY-MM-DD day, null for never). */
+  /**
+   * The last time someone was here, once bothy says (v0.29 `lastSeen`: unix seconds or a YYYY-MM-DD day, null if never).
+   * bothy began keeping sign-in days on 2026-11-21, so for someone who joined before then null only means not since.
+   */
+  const SEEN_FROM = new Date(2026, 10, 21).getTime() / 1000;
   function seenWords(n) {
     if (!('lastSeen' in n)) return null;
-    if (n.lastSeen === null || n.lastSeen === 0) return 'Never signed in';
+    if (n.lastSeen === null || n.lastSeen === 0) return n.joinedAt && n.joinedAt < SEEN_FROM ? `No sign-in since ${day(SEEN_FROM)}` : 'Never signed in';
     const t = typeof n.lastSeen === 'number' ? n.lastSeen : Date.parse(n.lastSeen + 'T00:00:00Z') / 1000;
     return isFinite(t) ? `Last here ${day(t)}` : null;
   }
@@ -938,11 +942,11 @@
     const can = K.removal(n, me.npub, house.role), kids = K.below(n).length;
     const asking = house.ask?.pk === pk;
     const by = n.invitedBy && n.invitedBy !== n.pubkey && K.find(house.tree, n.invitedBy) ? withName(n.invitedBy) : null;
-    const waiting = typeof n.waitingMail === 'number' && n.waitingMail > 0 ? `${K.plural(n.waitingMail, 'message')} waiting` : null;
-    const bits = [K.howCame(n, by), n.joinedAt ? `joined ${day(n.joinedAt)}` : null, seenWords(n), kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
+    const waiting = typeof n.waiting === 'number' && n.waiting > 0 ? `${K.plural(n.waiting, 'message')} waiting` : null;
+    const bits = [K.howCame(n, by), n.joinedAt ? `${n.legacy ? 'Joined' : 'joined'} ${day(n.joinedAt)}` : null, seenWords(n), kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
       n.role === 'owner' && !used ? null : used?.used ? `${K.size(used.used)} stored` : anyUsage() ? 'Nothing stored' : null, waiting].filter(Boolean);
     const named = pk === me.npub || !!house.names?.[pk]?.name;
-    const adv = house.adv ? el('div', { className: 'detail tech' }, [K.npub(pk), n.source ? `source ${n.source}` : null, used ? `${used.blobs} files` : null, typeof n.hasPush === 'boolean' ? (n.hasPush ? 'has notifications' : 'no notifications') : null].filter(Boolean).join(' · ')) : null;
+    const adv = house.adv ? el('div', { className: 'detail tech' }, [K.npub(pk), n.source ? `source ${n.source}` : null, used ? `${used.blobs} files` : null, typeof n.push === 'boolean' ? (n.push ? 'has notifications' : 'no notifications') : null].filter(Boolean).join(' · ')) : null;
     const sw = n.role === 'owner' ? null : el('label', { className: 'toggle', title: 'Sees where photos were taken' },
       el('input', { type: 'checkbox', checked: !!n.close, ariaLabel: `${nameOf(pk)} sees where photos were taken`, on: { change: (e) => { const on = e.currentTarget.checked; houseDo(e.currentTarget, () => bothy('setclose', [pk, on]), `${nameOf(pk)} ${on ? 'now sees' : 'no longer sees'} where photos were taken.`); } } }),
       'Sees where photos were taken');

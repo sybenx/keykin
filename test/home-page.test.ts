@@ -98,7 +98,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: homeRelay.port, members: [
     { pubkey: P('ana'), role: 'admin' }, { pubkey: P('ben'), invitedBy: P('ana'), source: 'member' }, { pubkey: P('cleo'), invitedBy: P('ben'), close: false, source: 'member' },
     { pubkey: P('dev'), invitedBy: P('ben'), close: false, source: 'request' }, { pubkey: P('eve'), source: 'owner', lastSeen: 1_762_000_000 },
-    { pubkey: P('finn'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001, lastSeen: null }] }); shut.push(() => home.close());
+    { pubkey: P('finn'), inviterUnknown: true, source: 'invite', joinedAt: 1_700_000_000 }, { pubkey: P('nameless'), invitedBy: null, source: 'owner', joinedAt: 1_700_000_001, lastSeen: null }] }); shut.push(() => home.close());
   for (const n of ['ana', 'ben', 'cleo', 'dev', 'eve']) await toRelay(homeRelay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: n[0].toUpperCase() + n.slice(1) }) }, people[n].sk));
   await toRelay(relay.url, finalizeEvent({ kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: JSON.stringify({ name: 'Finn' }) }, people.finn.sk));
   const files = await fakeStorage({ owner: account, admins: [P('ana')], home: home.url, blobs: [
@@ -144,7 +144,8 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
     assert.match(await detail('Cleo'), /^Invited by Ben · joined .* · 50 MB stored$/);
     assert.match(await detail('Dev'), /^Asked to join, let in by Ben · joined .* · Nothing stored$/);
     assert.match(await detail('Eve'), /^Added by you · joined .* · Last here Nov 1, 2025 · Nothing stored$/);
-    assert.match(await detail(tail), /^Added by hand · joined Nov 14, 2023 · Never signed in · Nothing stored$/);
+    assert.match(await detail(tail), /^Joined Nov 14, 2023 · No sign-in since Nov 21, 2026 · Nothing stored$/);
+    assert.match(await detail('Finn'), /^Joined Nov 14, 2023 · Nothing stored$/);        // inviter unknown: never "Invited by you" 
     assert.match((await page.textContent('h1'))!, /The Herbst home/);
     // KEYKIN_SHOTS=<folder> saves what the section looks like, for a person to look at.
     const shot = async (name: string, width = 390) => { if (!process.env.KEYKIN_SHOTS) return; await page.setViewportSize({ width, height: 860 }); await page.locator('main').screenshot({ path: join(process.env.KEYKIN_SHOTS, `${name}-${width}.png`) }); await page.setViewportSize({ width: 390, height: 860 }); };

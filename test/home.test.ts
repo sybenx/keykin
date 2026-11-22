@@ -31,12 +31,15 @@ test('the invite tree: the owner on top, each person under whoever let them in, 
     { pubkey: A, invitedBy: O, joinedAt: 9 },                                                     // listed twice: once
     { pubkey: F, invitedBy: F, joinedAt: 6 },                                                     // its own inviter: apart
     { pubkey: G, invitedBy: D, joinedAt: 7 },                                                     // invited by an old row: under it
+    { pubkey: pk('2'), invitedBy: O, inviterUnknown: true, joinedAt: 8 },                       // bothy v0.29: the owner named, but not known
     { pubkey: O, invitedBy: null }] });                                                           // the owner in the list: only at the root
   assert.deepEqual(K.flat(t).map((r: any) => [r.node.pubkey[0], r.depth]), [['0', 0], ['a', 1], ['b', 2], ['c', 3]]);
-  assert.deepEqual(t.old.flatMap((n: any) => K.flat(n, 1)).map((r: any) => [r.node.pubkey[0], r.depth]), [['d', 1], ['1', 2], ['e', 1], ['f', 1]]);
+  assert.deepEqual(t.old.flatMap((n: any) => K.flat(n, 1)).map((r: any) => [r.node.pubkey[0], r.depth]), [['d', 1], ['1', 2], ['e', 1], ['f', 1], ['2', 1]]);
+  assert.deepEqual(t.old.map((n: any) => n.legacy), [true, true, true, true]);
+  assert.equal(K.find(t, G).legacy, undefined);
   assert.deepEqual(K.below(K.find(t, A)).map((n: any) => n.pubkey[0]), ['b', 'c']);
   assert.equal(K.find(t, G).pubkey, G);
-  assert.equal(K.everyone(t).length, 7);
+  assert.equal(K.everyone(t).length, 8);
   // A loop never comes from bothy, but if it did each row still shows once.
   const loop = K.tree(O, { members: [{ pubkey: A, invitedBy: B }, { pubkey: B, invitedBy: A }] });
   assert.equal(K.everyone(loop).length, 2);
@@ -51,6 +54,7 @@ test('how someone came in, in plain words, and the end of their key', () => {
   assert.equal(K.howCame({ source: 'owner' }, null), 'Added by hand');
   assert.equal(K.howCame({ source: 'request' }, null), 'Asked to join');
   assert.equal(K.howCame({ source: 'member' }, null), 'Came with an invite');
+  assert.equal(K.howCame({ source: 'invite', legacy: true }, 'you'), null);
   assert.equal(K.tail('ab'.repeat(29) + 'c0ffee'), 'c0ffee');
 });
 

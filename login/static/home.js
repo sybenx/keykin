@@ -114,16 +114,17 @@
   // ---- The invite tree --------------------------------------------------------------------------------
   /**
    * The tree from `listmembers` and the owner: {pubkey, role, close, source, joinedAt, kids:[...], old:[...]}, the owner
-   * at the root. People with no inviter (rows from before the invite tree, which bothy's contract gives as
-   * `invitedBy: null`, or an inviter no longer listed) go in `old`, each with whoever they invited under them, so the
-   * real tree stays readable. A key listed twice is shown once. Children are in join order.
+   * at the root. People whose inviter is not known go in `old`, marked `legacy`, each with whoever they invited under
+   * them, so the real tree stays readable: bothy (v0.29) marks them `inviterUnknown: true` while still naming the owner
+   * in `invitedBy`; a null `invitedBy` or an inviter no longer listed counts the same. A key listed twice is shown
+   * once. Children are in join order.
    */
   function tree(owner, list) {
     const rows = new Map();
     for (const m of list?.members ?? []) if (isHex(m?.pubkey) && m.pubkey !== owner && !rows.has(m.pubkey)) rows.set(m.pubkey, { ...m, kids: [] });
     const root = { pubkey: owner, role: 'owner', close: true, source: 'owner', joinedAt: null, invitedBy: null, kids: [], old: [] };
     const OLD = { kids: root.old };
-    const parentOf = (n) => (n.invitedBy === owner ? root : n.invitedBy && rows.has(n.invitedBy) && n.invitedBy !== n.pubkey ? rows.get(n.invitedBy) : OLD);
+    const parentOf = (n) => (n.inviterUnknown === true ? OLD : n.invitedBy === owner ? root : n.invitedBy && rows.has(n.invitedBy) && n.invitedBy !== n.pubkey ? rows.get(n.invitedBy) : OLD);
     // A loop (it should never come from bothy) is cut and put with the old rows, so every row is shown once.
     for (const n of rows.values()) {
       let p = parentOf(n); const seen = new Set([n.pubkey]);
@@ -133,6 +134,7 @@
     const byJoin = (a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0) || (a.pubkey < b.pubkey ? -1 : 1);
     const order = (n) => { n.kids.sort(byJoin); n.kids.forEach(order); };
     order(root); root.old.sort(byJoin); root.old.forEach(order);
+    for (const n of root.old) n.legacy = true;
     return root;
   }
   /** Everyone under `n`, not counting `n`. */
@@ -149,6 +151,7 @@
    */
   function howCame(n, by) {
     if (n.role === 'owner') return 'Owner';
+    if (n.legacy) return null;                    // nobody knows who let them in: say nothing rather than guess
     if (!by) return n.source === 'request' ? 'Asked to join' : n.source === 'member' || n.source === 'invite' ? 'Came with an invite' : 'Added by hand';
     if (n.source === 'request') return `Asked to join, let in by ${by}`;
     if (n.source === 'member' || n.source === 'invite') return `Invited by ${by}`;

@@ -8,7 +8,7 @@ import { connect } from 'node:net';
 import { createHash } from 'node:crypto';
 import { verifyEvent } from 'nostr-tools/pure';
 
-type Member = { pubkey: string; invitedBy: string | null; joinedAt: number; source: string; role: 'admin' | 'member'; close: boolean; lastSeen?: number | null };
+type Member = { pubkey: string; invitedBy: string | null; joinedAt: number; source: string; role: 'admin' | 'member'; close: boolean; lastSeen?: number | null; inviterUnknown?: boolean };
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'Authorization, Content-Type, Accept' };
 
 const body = (req: IncomingMessage) => new Promise<string>((ok) => { const c: Buffer[] = []; req.on('data', (b) => c.push(b)); req.on('end', () => ok(Buffer.concat(c).toString('utf8'))); });

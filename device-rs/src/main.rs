@@ -5,6 +5,8 @@
 //
 //   keykin join [--name <name>]   add this Mac: Add on your account page, as Marble on Mac signs in
 //   keykin sign [--for <who>] ['<event>'|-]   sign an event (JSON; or on stdin) and print it signed
+//   keykin dm [--for <who>] <npub> ['<text>'|-]   send a private message (NIP-17), one Touch ID
+//   keykin encrypt / decrypt <npub> ['<text>'|-]   NIP-44 with someone, as the account
 //   keykin status                 who this Mac signs as, and where its file is
 //   keykin forget                 delete this Mac's sealed piece
 //
@@ -17,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use keykin_device::core::{self, Failure};
 use keykin_device::store::{self, OpenErr};
-use keykin_device::{chip, kinds, signin};
+use keykin_device::{chip, dm, kinds, signin};
 use serde_json::{json, Value};
 
 const HELP: &str = "keykin: sign Nostr events from Terminal as your own account.
@@ -26,11 +28,19 @@ const HELP: &str = "keykin: sign Nostr events from Terminal as your own account.
   keykin sign [--for <who>] ['<event>'|-]
                                 sign an event and print it; Touch ID every time, saying
                                 what it is and who asked (--for, else the calling script)
+  keykin dm [--for <who>] [--relay <url>]... <npub> ['<text>'|-]
+                                send a private message as you, with one Touch ID. It goes to
+                                the relays they read messages on, and a copy to yours
+  keykin encrypt [--for <who>] <npub> ['<text>'|-]
+  keykin decrypt [--for <who>] <npub> ['<text>'|-]
+                                encrypt for someone, or read what they encrypted for you
+                                (NIP-44), and print it; Touch ID every time
   keykin status                 who this Mac signs as
   keykin forget                 delete this Mac's sealed piece
 
 An event is JSON with any of kind, content, tags and created_at; the rest is filled in.
-Publish it with nak, for example:  keykin sign '{\"kind\":1,\"content\":\"hi\"}' | nak event wss://relay.example";
+Publish it with nak, for example:  keykin sign '{\"kind\":1,\"content\":\"hi\"}' | nak event wss://relay.example
+A private message needs nothing else:  keykin dm npub1… 'hi'";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,6 +54,9 @@ fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("join") => join(&args[1..]),
         Some("sign") => sign(&args[1..]),
+        Some("dm") => send_dm(&args[1..]),
+        Some("encrypt") => crypt(&args[1..], true),
+        Some("decrypt") => crypt(&args[1..], false),
         Some("status") => status(),
         Some("forget") => forget(),
         Some("help" | "--help" | "-h") | None => {
@@ -248,18 +261,23 @@ mod caller_tests {
     }
 }
 
-fn sign(args: &[String]) -> Result<(), String> {
-    // --for "<who>": who is asking, said in the Touch ID prompt ("…, for Pinket's release"). Otherwise the caller's name.
+/// --for "<who>": who is asking, said in the Touch ID prompt ("…, for Pinket's release"). Otherwise the caller's name.
+/// Returns the other arguments, and who.
+fn take_for(args: &[String], example: &str) -> Result<(Vec<String>, Option<String>), String> {
     let mut args = args.to_vec();
     let mut who = None;
     if let Some(i) = args.iter().position(|a| a == "--for") {
         if i + 1 >= args.len() {
-            return Err("--for needs who is asking, for example: keykin sign --for \"Pinket release\" '<event>'".into());
+            return Err(format!("--for needs who is asking, for example: {example}"));
         }
         who = Some(args.remove(i + 1).chars().filter(|c| !c.is_control()).take(60).collect::<String>());
         args.remove(i);
     }
-    let who = who.filter(|w| !w.trim().is_empty()).or_else(caller);
+    Ok((args, who.filter(|w| !w.trim().is_empty()).or_else(caller)))
+}
+
+fn sign(args: &[String]) -> Result<(), String> {
+    let (args, who) = take_for(args, "keykin sign --for \"Pinket release\" '<event>'")?;
     let args = &args[..];
     let mut f = store::load()?.ok_or("This Mac isn’t in an account yet. Run: keykin join")?;
     use std::io::IsTerminal;
@@ -304,6 +322,195 @@ fn sign(args: &[String]) -> Result<(), String> {
         }
         Err(fail) => Err(format!("Not signed: {}", words(&fail))),
     }
+}
+
+// --- dm, encrypt, decrypt -----------------------------------------------------------------------------
+
+/// Someone's key as hex, from an npub or 64 hex digits.
+fn key_of(s: &str) -> Result<String, String> {
+    let s = s.trim().trim_start_matches("nostr:");
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(s.to_lowercase());
+    }
+    match bech32::decode(s) {
+        Ok((hrp, data)) if hrp.as_str() == "npub" && data.len() == 32 => Ok(hex::encode(data)),
+        _ => Err(format!("“{s}” isn’t someone’s npub (or their key as 64 hex digits).")),
+    }
+}
+
+/// "npub1syjmjy0d…9wf6wl": enough to tell one key from another.
+fn short_npub(hex_key: &str) -> String {
+    let n = npub(hex_key);
+    format!("{}…{}", &n[..13.min(n.len())], &n[n.len().saturating_sub(6)..])
+}
+
+/// The first words of a message, on one line, for the Touch ID prompt.
+fn first_words(text: &str) -> String {
+    let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = t.chars().take(50).collect();
+    if t.chars().count() > 50 { format!("{short}…") } else { short }
+}
+
+/// The text to send or read: given, or on stdin ("-", or nothing with stdin not at the keyboard).
+fn text_arg(given: Option<&String>, example: &str) -> Result<String, String> {
+    use std::io::IsTerminal;
+    let at_keyboard = std::io::stdin().is_terminal();
+    let text = match given.map(String::as_str) {
+        None if at_keyboard => return Err(format!("Give the text, for example:\n  {example}\nor pipe it in.")),
+        None | Some("-") => {
+            if at_keyboard {
+                eprintln!("Type or paste it, then press Ctrl-D.");
+            }
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
+            // What `echo` and a file end with isn't part of the message.
+            s.trim_end_matches(['\n', '\r']).to_string()
+        }
+        Some(t) => t.to_string(),
+    };
+    if text.trim().is_empty() {
+        return Err("There’s nothing to send: the text is empty.".into());
+    }
+    Ok(text)
+}
+
+fn not_done(e: OpenErr) -> String {
+    match e {
+        OpenErr::No => "Not sent: Touch ID wasn’t confirmed.".to_string(),
+        OpenErr::Failed(w) => format!("Not sent: {w}"),
+    }
+}
+
+/// The box moved this Mac to a new epoch (the keys were cycled while it was away): keep that, sealed afresh.
+fn keep_epoch(f: &mut store::File, me: &core::Me, a: &core::Account, before: u64) {
+    if a.epoch != before {
+        if let Err(e) = store::resave(f, me, a) {
+            eprintln!("keykin couldn’t save the new keys: {e}");
+        }
+    }
+}
+
+/// The longest message keykin sends: what still fits, wrapped twice, in what relays take (NIP-44 stops at 64 KB).
+const DM_MAX: usize = 32_000;
+
+fn send_dm(args: &[String]) -> Result<(), String> {
+    let example = "keykin dm npub1… 'hello'";
+    let (mut args, who) = take_for(args, "keykin dm --for \"weekly report\" npub1… 'hello'")?;
+    // --relay <url>, as many as wanted: send there instead of where the lists say (both copies).
+    let mut given = vec![];
+    while let Some(i) = args.iter().position(|a| a == "--relay") {
+        let u = args.get(i + 1).cloned().ok_or("--relay needs a relay’s address, for example: --relay wss://relay.example")?;
+        given.push(dm::relay_url(&u).ok_or(format!("“{u}” isn’t a relay’s address (wss://…)."))?);
+        args.drain(i..i + 2);
+    }
+    let to = key_of(args.first().ok_or(format!("Say who it is for, for example:\n  {example}"))?)?;
+    if args.len() > 2 {
+        return Err(format!("Put the message in quotes, for example:\n  {example}"));
+    }
+    let text = text_arg(args.get(1), example)?;
+    if text.len() > DM_MAX {
+        return Err(format!("That message is {} bytes; a private message from keykin is at most {DM_MAX}.", text.len()));
+    }
+    let mut f = store::load()?.ok_or("This Mac isn’t in an account yet. Run: keykin join")?;
+    let me_hex = f.account.npub.clone();
+    let to_me = to == me_hex;
+    let rt = rt();
+
+    // Who they are and where they read messages, before anything is asked: no Touch ID for a message with nowhere to go.
+    let found = rt.block_on(dm::lookup(&[&to, &me_hex]));
+    let (to_relays, my_relays) = if given.is_empty() { (dm::dm_relays(&found, &to), dm::dm_relays(&found, &me_hex)) } else { (given.clone(), given.clone()) };
+    let label = if to_me {
+        "yourself".to_string()
+    } else {
+        match dm::display_name(&found, &to) {
+            Some(n) => format!("{n} ({})", short_npub(&to)),
+            None => short_npub(&to),
+        }
+    };
+    if to_relays.is_empty() {
+        return Err(format!("Not sent: {label} lists no relays for private messages, so there is nowhere they would read it. To send it anyway, name one with --relay wss://…"));
+    }
+
+    // macOS says: “keykin is trying to <this>”.
+    let what = format!("send a private message to {label}: “{}”", first_words(&text));
+    let reason = match &who {
+        Some(w) => format!("{what}, for {w}"),
+        None => what,
+    };
+    let (me, mut a) = store::open(&f, &reason).map_err(not_done)?;
+    let epoch = a.epoch;
+    let readers: Vec<&str> = if to_me { vec![&to] } else { vec![&to, &me_hex] };
+    let made: Result<Vec<dm::Wrap>, String> = rt.block_on(async {
+        let now = core::now();
+        let rumor = dm::rumor(&me_hex, &to, &text, now)?;
+        let mut wraps = vec![];
+        for reader in &readers {
+            let ck = core::conversation_key(&me, &mut a, reader).await.map_err(|f| words(&f))?;
+            let seal = core::sign_event(&me, &mut a, &dm::seal_unsigned(&ck, &rumor, now)?, false).await.map_err(|f| words(&f))?;
+            wraps.push(dm::wrap(&seal, reader, now)?);
+        }
+        Ok(wraps)
+    });
+    keep_epoch(&mut f, &me, &a, epoch);
+    let wraps = made.map_err(|e| format!("Not sent: {e}"))?;
+
+    let (theirs, mine) = rt.block_on(async {
+        let mine = async {
+            match wraps.get(1) {
+                Some(w) if !my_relays.is_empty() => dm::publish(&my_relays, w).await,
+                _ => vec![],
+            }
+        };
+        futures_util::future::join(dm::publish(&to_relays, &wraps[0]), mine).await
+    });
+    let report = |who: &str, rs: &[(String, Result<(), String>)]| -> bool {
+        let ok: Vec<&str> = rs.iter().filter(|(_, r)| r.is_ok()).map(|(u, _)| u.as_str()).collect();
+        println!("{who}: {}", if ok.is_empty() { "on no relay".to_string() } else { ok.join(", ") });
+        for (u, r) in rs {
+            if let Err(e) = r {
+                println!("  {u} didn’t take it: {e}");
+            }
+        }
+        !ok.is_empty()
+    };
+    let landed = report(&format!("Sent to {label}"), &theirs);
+    if !to_me {
+        if my_relays.is_empty() {
+            println!("Your copy: not kept, as your account lists no relays for private messages.");
+        } else {
+            report("Your copy", &mine);
+        }
+    }
+    if !landed {
+        return Err("Not sent: no relay took the message.".into());
+    }
+    Ok(())
+}
+
+/// `keykin encrypt <npub> <text>` and `keykin decrypt <npub> <payload>`: NIP-44 with that key, as the account.
+fn crypt(args: &[String], encrypting: bool) -> Result<(), String> {
+    let cmd = if encrypting { "encrypt" } else { "decrypt" };
+    let example = format!("keykin {cmd} npub1… '{}'", if encrypting { "hello" } else { "Ag…" });
+    let (args, who) = take_for(args, &format!("keykin {cmd} --for \"my script\" npub1… '…'"))?;
+    let peer = key_of(args.first().ok_or(format!("Say whose key, for example:\n  {example}"))?)?;
+    let text = text_arg(args.get(1), &example)?;
+    let mut f = store::load()?.ok_or("This Mac isn’t in an account yet. Run: keykin join")?;
+    let what = if encrypting {
+        format!("encrypt a private message to {}: “{}”", short_npub(&peer), first_words(&text))
+    } else {
+        format!("read a private message from {}", short_npub(&peer))
+    };
+    let reason = match &who {
+        Some(w) => format!("{what}, for {w}"),
+        None => what,
+    };
+    let (me, mut a) = store::open(&f, &reason).map_err(|e| not_done(e).replace("Not sent", if encrypting { "Not encrypted" } else { "Not read" }))?;
+    let epoch = a.epoch;
+    let ck = rt().block_on(core::conversation_key(&me, &mut a, &peer));
+    keep_epoch(&mut f, &me, &a, epoch);
+    let ck = ck.map_err(|f| words(&f))?;
+    println!("{}", if encrypting { dm::encrypt(&ck, &text)? } else { dm::decrypt(&ck, &text)? });
+    Ok(())
 }
 
 /// A failure in words for Terminal. keykin never says Yes for you (no `tapped`, no fingerprint).
@@ -365,6 +572,20 @@ mod tests {
         // nak's output, signed by its own key: taken, and its id, pubkey and sig left behind.
         let e = event_of(&format!(r#"{{"kind":1,"id":"{0}","pubkey":"{1}","created_at":7,"tags":[],"content":"hi","sig":"{0}{0}"}}"#, "ee".repeat(32), "cd".repeat(32)), &n).unwrap();
         assert_eq!(e, json!({ "created_at": 7, "kind": 1, "tags": [], "content": "hi" }));
+    }
+
+    #[test]
+    fn keys_and_first_words() {
+        let hex = "8125b911ed0e94dbe3008a0be48cfe5cd0c0b05923cfff917ae7e87da84008830";
+        let hex = &hex[..64];
+        let n = npub(hex);
+        assert_eq!(key_of(&n).unwrap(), hex);
+        assert_eq!(key_of(&format!("nostr:{n}")).unwrap(), hex);
+        assert_eq!(key_of(&hex.to_uppercase()).unwrap(), hex);
+        assert!(key_of("npub1nope").is_err());
+        assert!(short_npub(hex).starts_with("npub1") && short_npub(hex).contains('…'));
+        assert_eq!(first_words("hi\n  there"), "hi there");
+        assert!(first_words(&"a ".repeat(60)).ends_with('…'));
     }
 
     #[test]

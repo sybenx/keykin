@@ -103,7 +103,7 @@ pub fn comp_hex(p: &ProjectivePoint) -> R<String> {
     }
     Ok(hex::encode(e.as_bytes()))
 }
-fn x_of(p: &ProjectivePoint) -> R<[u8; 32]> {
+pub fn x_of(p: &ProjectivePoint) -> R<[u8; 32]> {
     let h = comp_hex(p)?;
     unhex::<32>(&h[2..], "x")
 }

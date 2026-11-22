@@ -148,3 +148,12 @@ a.linkbtn:hover { color:var(--on); }
 .stickcard a#stickback { align-self:flex-start; font-weight:500; }
 @media (max-width:820px) { .stick { --end:104px; } }
 @media (max-width:420px) { .stick { --end:96px; } }
+
+/* Shared home: the space bar, and people indented under whoever let them in. */
+.bar { height:8px; border-radius:4px; background:var(--off); border:1px solid var(--line); overflow:hidden; }
+.bar > div { height:100%; background:var(--accent); }
+.row.person .toggle { flex:none; }
+@media (max-width:520px) { .row.person, .row.wrap { flex-wrap:wrap; row-gap:10px; } .row.person > .grow, .row.wrap > .grow { flex-basis:calc(100% - 60px); } }
+/* The two removal choices carry the count and names, so on a phone they wrap inside their buttons. */
+#houseask .btn { white-space:normal; height:auto; min-height:44px; padding:10px 18px; text-align:left; }
+.detail.mono { white-space:pre-wrap; font-size:12px; }

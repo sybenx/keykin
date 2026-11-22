@@ -6,6 +6,12 @@
 //   KEYKIN_BOX          the box's side door, for example http://keykin-box_server_1:7461
 //   KEYKIN_LOGIN_ADDR   address to listen on (default 127.0.0.1)
 //   KEYKIN_LOGIN_PORT   port (default 7470)
+//   KEYKIN_HOME_URL     the DMs home (bothy) this box is the back room of, for example https://home.example/.
+//                       Unset: no Home section, and the page's headers are as before.
+//   KEYKIN_STORAGE_URL  that home's file server (Keykin Storage), for example https://files.example. Optional.
+//
+// With a home set, the page calls the home and its file server itself, signed by the person's phone (the signer a
+// scan leaves). This server only names those two hosts in the page's connect-src; it signs and passes on nothing.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -22,6 +28,7 @@ const FILES: Record<string, [string, string]> = {
   '/account.css': ['account.css', 'text/css; charset=utf-8'],
   '/signin.js': ['signin.js', 'text/javascript; charset=utf-8'],
   '/pointer.js': ['pointer.js', 'text/javascript; charset=utf-8'],         // the login-page pointer's rules (SPEC 11.1)          // sign-in by a scanned code, the same widget any site uses (site/signin.ts)
+  '/home.js': ['home.js', 'text/javascript; charset=utf-8'],               // the Home section's calls and rules: the DMs home and its file server
 };
 // The only calls the page may make. A signed-in page has the person's authority (SPEC 11.6), but it still
 // holds no piece: anything that needs a signature is left as a note for a device to do.
@@ -36,9 +43,30 @@ const PER_MINUTE = 240;          // requests from one address, both paths togeth
 // under the reverse proxy's read timeout (often 60 seconds).
 const DEVICE_MS = 35_000, PAGE_MS = 20_000;
 
-export function startLogin(o: { box: string; addr?: string; port?: number; relays?: string[]; log?: (s: string) => void }) {
+/**
+ * A home or file server address from the settings: https (or http on this machine, for tests), no user, query or
+ * fragment. The home keeps its path with one trailing slash, since NIP-98's `u` must be that exact URL; the file
+ * server is an origin plus an optional path, without the trailing slash. Throws on anything else, so a typo stops
+ * the start instead of quietly leaving the page without its Home section.
+ */
+export function placeOf(raw: string | undefined, what: 'home' | 'storage'): { url: string; origin: string } | null {
+  if (!raw?.trim()) return null;
+  let u: URL;
+  try { u = new URL(raw.trim()); } catch { throw new Error(`${what}: not a URL: ${raw}`); }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) throw new Error(`${what}: must be https: ${raw}`);
+  if (u.username || u.password || u.search || u.hash) throw new Error(`${what}: no user, query or fragment: ${raw}`);
+  const path = u.pathname.replace(/\/+$/, '');
+  return { url: what === 'home' ? `${u.origin}${path}/` : `${u.origin}${path}`, origin: u.origin };
+}
+
+export function startLogin(o: { box: string; addr?: string; port?: number; relays?: string[]; home?: string; storage?: string; log?: (s: string) => void }) {
   const log = o.log ?? console.log;
   const relays = o.relays?.length ? o.relays : RELAYS;
+  const home = placeOf(o.home, 'home'), storage = home ? placeOf(o.storage, 'storage') : null;
+  // The two extra hosts the page may call, and only with a home set: the home (its http side, for NIP-86) and its file server.
+  const homeHosts = [home?.origin, storage?.origin].filter((x): x is string => !!x && !relays.some((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '') === x));
+  const homeInfo = home ? { url: home.url, storage: storage?.url ?? null } : null;
   const hits = new Map<string, number[]>();
   const tooFast = (req: IncomingMessage) => {
     const who = String(req.headers['cf-connecting-ip'] ?? req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
@@ -81,7 +109,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
     if (method === 'GET' && FILES[path]) {
       const [file, type] = FILES[path];
       // The page reaches its relays, and asks each what it is over http(s) first (NIP-11). Nothing else.
-      const local = ' ' + relays.map((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '')).join(' ') + (relays.some((r) => r.startsWith('ws://')) ? ' ws:' : '');
+      const local = ' ' + relays.map((r) => r.replace(/^ws/, 'http').replace(/\/+$/, '')).join(' ') + (relays.some((r) => r.startsWith('ws://')) ? ' ws:' : '') + [...new Set(homeHosts)].map((h) => ' ' + h).join('');
       res.writeHead(200, {
         'content-type': type, 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
         'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss:${local}; img-src 'self' data: https:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
@@ -142,7 +170,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
       if (!session) return json(res, 200, { error: 'login' });
       const { call: _c, session: _s, browser: _b, agent: _a, ...rest } = body;
       const r = await toBox('/page', { ...rest, call, session, ...(call.startsWith('pk_') ? { origin } : {}) });
-      if (call === 'me' && r.ok) { r.npubText = npubEncode(r.npub); r.relays = relays; }
+      if (call === 'me' && r.ok) { r.npubText = npubEncode(r.npub); r.relays = relays; if (homeInfo && r.held !== false) r.home = homeInfo; }
       if (call === 'protect' && r.ok) { const qr = qrcode(0, 'M'); qr.addData(r.text); qr.make(); r.svg = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
       const gone = call === 'logout' || call === 'logout_all' || (call === 'logout_browser' && r.this === true) || r.error === 'login';
       const renew = call === 'me' && r.ok && r.how === 'passkey';
@@ -154,7 +182,7 @@ export function startLogin(o: { box: string; addr?: string; port?: number; relay
   return new Promise<{ server: typeof server; port: number; close: () => Promise<void> }>((resolve) => {
     server.listen(o.port ?? 7470, o.addr ?? '127.0.0.1', () => {
       const port = (server.address() as any).port;
-      log(`keykin login: account page on port ${port}, box at ${o.box}`);
+      log(`keykin login: account page on port ${port}, box at ${o.box}${home ? `, home ${home.url}${storage ? `, file server ${storage.url}` : ''}` : ''}`);
       resolve({ server, port, close: () => new Promise<void>((done) => { server.close(() => done()); server.closeAllConnections(); }) });
     });
   });
@@ -164,5 +192,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const e = process.env;
   if (!e.KEYKIN_BOX) { console.error('Set KEYKIN_BOX to the box\'s side door, for example http://127.0.0.1:7461'); process.exit(1); }
   startLogin({ box: e.KEYKIN_BOX.replace(/\/+$/, ''), addr: e.KEYKIN_LOGIN_ADDR, port: Number(e.KEYKIN_LOGIN_PORT ?? 7470),
-    relays: e.KEYKIN_RELAYS?.split(',').map((r) => r.trim()).filter(Boolean) });
+    relays: e.KEYKIN_RELAYS?.split(',').map((r) => r.trim()).filter(Boolean), home: e.KEYKIN_HOME_URL, storage: e.KEYKIN_STORAGE_URL });
 }

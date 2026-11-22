@@ -1321,6 +1321,51 @@ at a time, so a note reaches it within about a second (a bunker note was answere
 seconds on an emulator, 2026-11-19, with the screen off and in forced Doze), and still checks every 30 seconds as before (that
 check also keeps the device list and grants fresh, and is all it does with an older box).
 
+### 11.7 The Shared home section (2026-11-22)
+
+Where the owner and admins of a DMs home manage it, when the home has a box. The home is bothy (mailbox,
+members, invite tree); the box keeps its files in Keykin Storage. Agreed with the DMs coordinating session,
+2026-11-22. A home with no box keeps bothy's own admin page.
+
+**Settings on Keykin Login.** `KEYKIN_HOME_URL` (the home, `https://<host>/`) and `KEYKIN_STORAGE_URL` (its file
+server, optional). Each must be https (http only on this machine, for tests), with no user, query or fragment, or
+Keykin Login will not start. With a home set, `me` returns `home: { url, storage }` for an account the box holds,
+and the page's `connect-src` names exactly those two origins beside its relays, never all of `https:`. With no home
+set there is no section and the headers are as before.
+
+**Signing.** The page calls the home (NIP-86) and the file server (`POST <storage>/manage`, the same shape) itself.
+Every call is a NIP-98 kind 27235 (`u`, `method` POST, `payload`), signed by the signer a scan left here (section
+11.6, `kk=account`). Keykin Login and the box sign and pass on nothing. A password or passkey session cannot sign, so
+the section asks for a scan, once each visit ("Changes here are signed by your phone, so this page asks for a scan
+each visit."). No longer-lived signer is kept to avoid that.
+
+**Who.** The home's NIP-11 `pubkey` is its owner; anyone else asks `myrole`, and only `owner` or `admin` sees the
+section. An admin signs in with their own Keykin account. Where a person's Keykin key and messenger key differ, the
+Keykin key is the one the owner makes an admin.
+
+**What it shows** (plain words; keys, addresses, how people joined and file hashes only under Advanced):
+
+- **People:** the invite tree from `listmembers`, the owner on top, each person under whoever let them in (under the
+  owner when the inviter is unknown), names and photos from kind 0 on the home (with NIP-42 if the home asks). Each
+  row: space used, "Admin", the switch "Sees where photos were taken" (`setclose`; the page only toggles, bothy
+  sets the defaults) and Remove (`unallowpubkey`). Removing someone who invited people offers both choices with the
+  count and names, "Keep the N people they invited" and "Remove them too", neither styled as the dangerous one.
+  The page offers only what bothy takes: no Remove for the owner or yourself, and an admin gets none for an admin.
+  "Recently removed" offers "Let back in" (`allowpubkey`).
+- **Space and Bin** (with a file server): storage `usage` and `bin`, the bin by person with Restore (`restore`)
+  and, for the owner, Erase now (`erase`, after a confirm). A removed person's files say they come back if they are
+  let back in before the date. Until bothy's `memberkeys` lists admins and storage reads it, storage answers only
+  the owner, and an admin sees a line saying so.
+- **File server** (owner only): `GET <storage>/manage/info` gives its key and the home it follows. Linking
+  (`setstorage [url, key]`) first shows the key as an npub to check against the box, and is refused on the page if
+  the file server follows another home. Unlinking is under Advanced.
+
+**Built:** `login/server.ts`, `login/static/home.js` (rules and calls, also loaded by the tests), the section in
+`login/static/account.js`. Tested against stand-ins that follow the contracts (`test/home-fakes.ts`; bothy v0.28.0
+calls, storage `/manage` as agreed) in `test/home.test.ts`, and in a browser with a stand-in phone in
+`test/home-page.test.ts`. Not yet tried against a real bothy or Keykin Storage, neither of which has these calls
+deployed.
+
 ## 9. Not built yet
 
 - **A background service for the phone's site signer** (section 8j).

@@ -683,7 +683,7 @@
   // ---- Signing in ------------------------------------------------------------------------------------
 
   async function showLogin(message) {
-    leave(); stopTimers(); section = 'home'; flash = null; dropPointer(); ptrAsk = null; boxLogin = null;
+    leave(); stopTimers(); section = 'home'; flash = null; dropPointer(); ptrAsk = null; boxLogin = null; house = null; dropHouseScan();
     const scan = el('div', { className: 'kk', id: 'scan' });
     const err = el('p', { className: 'err small', role: 'alert', hidden: !message }, message ?? '');
     const user = el('input', { className: 'field', type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: false, required: true });
@@ -800,7 +800,213 @@
 
   // ---- The account -----------------------------------------------------------------------------------
 
-  const SECTIONS = [['home', 'Home'], ['devices', 'Devices'], ['sites', 'Sites and apps'], ['security', 'Security'], ['backup', 'Backup'], ['activity', 'Recent activity']];
+  // ---- Shared home: the DMs home this box is the back room of (me.home, from KEYKIN_HOME_URL) ------------
+  // The page calls the home (bothy, NIP-86) and its file server (/manage) itself, each call signed by the phone
+  // a scan left here (kind 27235). Without that signer it asks for a scan: once each visit, by design.
+  const K = globalThis.KeykinHome;
+  let house = null;              // { phase, info, role, list, names, usage, bin, sinfo, linked, notes, adv, ask, line, busy }
+  const houseSigner = () => (ptr?.npub === me?.npub ? ptr.signer : null);
+  const nameOf = (pk) => (pk === me?.npub ? 'You' : house?.names?.[pk]?.name) || (house?.adv ? K.short(pk) : 'Someone');
+  const withName = (pk) => (pk === me?.npub ? 'you' : nameOf(pk));
+  function houseFail(x) {
+    if (x?.message === 'no answer' || x?.status === 0) return 'Your home cannot be reached right now.';
+    if (x?.status === 429) return 'Too many changes at once. Wait a few seconds and try again.';
+    if (x?.status === 503) return 'The file server on your box is not set up yet.';
+    if (/did not|rejected|denied|timed? ?out|cancel/i.test(String(x?.message))) return 'Your phone did not sign that. Is Marble still open there?';
+    return String(x?.message ?? x);
+  }
+  // The scan widget is kept across redraws (the page redraws every 15 seconds), so a code being scanned is not torn down.
+  let houseScan = null;
+  function houseScanNode() {
+    if (houseScan) return houseScan.node;
+    const node = el('div', { className: 'kk', id: 'housescan' });
+    const onPhone = /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const relays = me.relays ?? [];
+    let run;
+    if (onPhone) {
+      run = KeykinSignIn.link({ relays, name: 'Your account', account: true });
+      node.append(el('a', { className: 'btn go linkbtn', id: 'housewithapp', href: run.uri }, 'Open Marble'),
+        el('p', { className: 'kk-dim' }, 'Say yes there, then come back to this page.'));
+    } else run = KeykinSignIn.start(node, { relays, ask: false, account: true, words: { scan: 'Open Marble on your phone and scan this.', digits: 'Your phone shows five digits. They should be:', differ: 'If they differ, say no on your phone.' } });
+    const npub = me.npub;
+    houseScan = { node, run };
+    run.done.then(async ({ signer }) => {
+      houseScan = null;
+      if (me?.npub !== npub || (await signer.getPublicKey()) !== npub) { signer.close().catch(() => {}); house = { ...house, line: 'That phone is signed in to a different account.' }; return draw(); }
+      holdPointer(npub, ptr?.npub === npub ? ptr.found : { state: 'checking' }, signer, relays);
+      loadHouse();
+    }).catch(() => { houseScan = null; if (section === 'house') draw(); });
+    return node;
+  }
+  const dropHouseScan = () => { houseScan?.run.cancel(); houseScan = null; };
+
+  /** Everything the section shows, in as few signatures as the calls allow. */
+  async function loadHouse() {
+    const h = me.home, signer = houseSigner();
+    house = { ...(house ?? {}), phase: 'loading', line: null };
+    if (section === 'house') draw();
+    try {
+      const info = await K.homeInfo(h.url);
+      const owner = info.pubkey, mine = owner === me.npub;
+      const c = (m, p) => K.call(signer, h.url, m, p);
+      const role = mine ? 'owner' : (await c('myrole', [])).role;
+      if (role !== 'owner' && role !== 'admin') { house = { ...house, phase: 'none', info, role }; return draw(); }
+      const s = h.storage, m = s && K.manageUrl(s);
+      const quiet = (p) => p.catch((x) => ({ failed: x }));
+      const [list, linked, usage, bin, sinfo] = await Promise.all([
+        c('listmembers', []),
+        role === 'owner' ? quiet(c('getstorage', [])) : null,
+        s ? quiet(K.call(signer, m, 'usage', [])) : null,
+        s ? quiet(K.call(signer, m, 'bin', [])) : null,
+        s ? quiet(K.storageInfo(s)) : null,
+      ]);
+      const t = K.tree(owner, list);
+      house = { ...house, phase: 'ready', info, role, owner, list, tree: t, linked, usage, bin, sinfo, names: house.names ?? {} };
+      draw();
+      // Names and photos come after, from the home itself: a home may ask the phone to sign in to read them.
+      const pks = [owner, ...K.below(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...K.binByPerson(bin?.failed ? null : bin).map((g) => g.pubkey).filter(Boolean)];
+      const relay = K.relayOf(h.url);
+      const events = await K.readProfiles(relay, [...new Set(pks)], (ch) => signer.signEvent(K.authFor(relay, ch)));
+      if (house?.phase === 'ready') { house.names = { ...house.names, ...K.profiles(events) }; if (section === 'house' && !document.querySelector('[data-busy]')) draw(); }
+    } catch (x) {
+      house = { ...house, phase: 'error', line: houseFail(x) };
+      draw();
+    }
+  }
+  /** One change: sign it, say what happened, then read the home again so the page shows what bothy now says. */
+  async function houseDo(button, run, done) {
+    const hold = button?.closest('.card'); hold?.setAttribute('data-busy', '1');
+    if (button) button.disabled = true;
+    try {
+      const r = await run();
+      house.ask = null; flash = typeof done === 'function' ? done(r) : done;
+    } catch (x) { flash = houseFail(x); }
+    hold?.removeAttribute('data-busy');
+    await loadHouse();
+    window.scrollTo(0, 0);
+  }
+  const bothy = (m, p) => K.call(houseSigner(), me.home.url, m, p);
+  const store_ = (m, p) => K.call(houseSigner(), K.manageUrl(me.home.storage), m, p);
+
+  function face(pk) {
+    const pic = house.names?.[pk]?.picture, n = nameOf(pk);
+    return pic ? el('img', { className: 'avatar small', src: pic, alt: '', referrerPolicy: 'no-referrer' })
+      : el('div', { className: 'avatar small', ariaHidden: 'true' }, (n === 'Someone' ? '?' : n).charAt(0).toUpperCase());
+  }
+  function personRow({ node: n, depth }) {
+    const pk = n.pubkey, used = K.usedBy(house.usage?.failed ? null : house.usage)[pk];
+    const can = K.removal(n, me.npub, house.role), kids = K.below(n).length;
+    const asking = house.ask?.pk === pk;
+    const bits = [n.role === 'owner' ? 'Owner' : n.invitedBy ? `Invited by ${withName(n.invitedBy)}` : null, kids ? `invited ${K.plural(n.kids.length, 'person', 'people')}` : null,
+      used ? `${K.size(used.used)} of photos and files` : null].filter(Boolean);
+    const adv = house.adv ? el('div', { className: 'detail mono' }, `${K.npub(pk)} · ${pk}${n.source ? ` · joined by ${n.source}` : ''}${n.joinedAt ? ` · ${day(n.joinedAt)}` : ''}${used ? ` · ${used.blobs} files` : ''}`) : null;
+    const sw = n.role === 'owner' ? null : el('label', { className: 'toggle', title: 'Sees where photos were taken' },
+      el('input', { type: 'checkbox', checked: !!n.close, ariaLabel: `${nameOf(pk)} sees where photos were taken`, on: { change: (e) => { const on = e.currentTarget.checked; houseDo(e.currentTarget, () => bothy('setclose', [pk, on]), `${nameOf(pk)} ${on ? 'now sees' : 'no longer sees'} where photos were taken.`); } } }),
+      'Sees where photos were taken');
+    const rm = can.remove ? el('button', { className: 'btn', ariaLabel: `Remove ${nameOf(pk)}`, on: { click: () => { house.ask = { pk }; draw(); } } }, 'Remove')
+      : can.why ? el('span', { className: 'detail', title: can.why }, can.why) : null;
+    const row = el('div', { className: 'row person', style: `padding-left:${Math.min(depth, 6) * 24}px` },
+      face(pk), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(pk), n.role === 'admin' ? el('span', { className: 'tag' }, 'Admin') : null), el('div', { className: 'detail' }, bits.join(' · ')), adv),
+      sw, asking ? null : rm);
+    row.dataset.pk = pk;
+    if (!asking) return row;
+    const w = K.removeWords(nameOf(pk), n.kids);
+    const names = n.kids.map((k) => nameOf(k.pubkey));
+    const go = (invitees, label) => el('button', { className: 'btn', id: invitees === 'remove' ? 'houseremoveall' : 'houseremovekeep', on: { click: (e) => houseDo(e.currentTarget, () => bothy('unallowpubkey', [pk, { invitees }]),
+      (r) => `${nameOf(pk)} is no longer in the home.${invitees === 'keep' && n.kids.length ? ` ${K.plural(n.kids.length, 'person', 'people')} they invited stay.` : ''}`) } }, label);
+    return el('div', {}, row, el('div', { className: 'subcard', id: 'houseask', style: `margin:0 0 14px ${Math.min(depth, 6) * 24}px` },
+      el('div', {}, w.ask), names.length ? el('div', { className: 'detail' }, names.join(', ')) : null,
+      el('div', { className: 'with-note' }, go('keep', w.keep), w.branch && can.branch ? go('remove', w.branch) : null,
+        el('button', { className: 'btn', on: { click: () => { house.ask = null; draw(); } } }, 'Cancel')),
+      w.branch && !can.branch && can.why ? el('div', { className: 'detail' }, can.why) : null,
+      el('div', { className: 'detail' }, 'Their messages and photo on the home are kept 14 days, and their files 30, in case you let them back in.')));
+  }
+  function houseView() {
+    const h = me.home;
+    const top = head(house?.info?.name || 'Shared home', null);
+    const advBtn = el('button', { className: 'go-link linkish', id: 'houseadv', on: { click: () => { house = { ...(house ?? {}), adv: !house?.adv }; draw(); } } }, house?.adv ? 'Hide advanced' : 'Advanced');
+    if (!houseSigner()) {
+      return [top, card(el('h2', {}, 'Scan with your phone to manage your home'),
+        el('div', { className: 'sub' }, 'Changes here are signed by your phone, so this page asks for a scan each visit.'),
+        house?.line ? el('p', { className: 'err small', role: 'alert' }, house.line) : null, houseScanNode())];
+    }
+    dropHouseScan();
+    if (!house || house.phase === 'loading') return [top, card(el('div', { className: 'sub', id: 'houseloading' }, 'Asking your phone and your home…'))];
+    if (house.phase === 'error') return [top, card(el('p', { className: 'err', role: 'alert' }, house.line), el('div', {}, el('button', { className: 'btn', on: { click: () => loadHouse() } }, 'Try again')))];
+    if (house.phase === 'none') return [top, card(el('div', { className: 'sub', id: 'housenone' }, 'This account is not the owner or an admin of this home, so there is nothing to manage here.'))];
+
+    const t = house.tree, people = K.flat(t), usage = house.usage?.failed ? null : house.usage, bin = house.bin?.failed ? null : house.bin;
+    const removed = house.list.removed ?? [], now = Date.now() / 1000;
+    const storageNote = house.role === 'admin' && (house.usage?.failed?.status === 401) ? 'Space and the bin show here for the owner. The file server does not know the admins yet.' : house.usage?.failed ? 'The file server cannot be reached right now.' : null;
+    const sub = [K.plural(people.length, 'person', 'people'), usage ? `${K.size(usage.total?.bytes ?? 0)} of photos and files` : null].filter(Boolean).join(' · ');
+    const out = [head(house.info.name || 'Shared home', sub)];
+
+    // People: the invite tree.
+    out.push(el('div', { className: 'card rows', id: 'housepeople' }, el('h2', { style: 'padding:16px 0 4px' }, 'People'), people.map(personRow)));
+    const back = removed.filter((r) => !r.deletesAt || r.deletesAt > now);
+    if (back.length) out.push(card(el('h2', {}, 'Recently removed'),
+      el('div', { className: 'sub' }, 'They can come back with their messages and files until the date shown.'),
+      el('div', { className: 'rows', id: 'houseremoved' }, back.map((r) => el('div', { className: 'row wrap' }, face(r.pubkey),
+        el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(r.pubkey)), el('div', { className: 'detail' }, `Removed ${day(r.removedAt)}${r.deletesAt ? `, gone after ${day(r.deletesAt)}` : ''}`),
+          house.adv ? el('div', { className: 'detail mono' }, K.npub(r.pubkey)) : null),
+        el('button', { className: 'btn', ariaLabel: `Let ${nameOf(r.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [r.pubkey]), `${nameOf(r.pubkey)} is back in the home.`) } }, 'Let back in'))))));
+
+    // Space and the bin, from the file server.
+    if (h.storage) {
+      if (usage) {
+        const d = usage.disk ?? {}, all = (d.used ?? 0) + (d.free ?? 0), pct = all ? Math.min(100, Math.round(100 * (d.used ?? 0) / all)) : 0;
+        const by = [...(usage.accounts ?? [])].filter((a) => a.used > 0).sort((a, b) => b.used - a.used);
+        out.push(card(el('h2', {}, 'Space'),
+          el('div', { className: 'sub', id: 'housespace' }, all ? `${K.size(d.used)} used, ${K.size(d.free)} free on your box.` : `${K.size(usage.total?.bytes ?? 0)} of photos and files.`),
+          all ? el('div', { className: 'bar', role: 'img', ariaLabel: `${pct}% used` }, el('div', { style: `width:${pct}%` })) : null,
+          el('div', { className: 'rows' }, by.map((a) => el('div', { className: 'row' }, face(a.pubkey), el('div', { className: 'grow' }, nameOf(a.pubkey)), el('div', { className: 'detail' }, K.size(a.used)))))));
+      }
+      if (bin) {
+        const groups = K.binByPerson(bin), parked = bin.parked ?? [];
+        const owner = house.role === 'owner';
+        out.push(card(el('h2', {}, 'Bin'), el('div', { className: 'sub' }, 'Files people deleted or left behind are kept 30 days, then erased.'),
+          !groups.length && !parked.length ? el('div', { className: 'detail', id: 'housebinempty' }, 'The bin is empty.') : null,
+          el('div', { className: 'rows', id: 'housebin' },
+            groups.map((g) => el('div', { className: 'row wrap' }, g.pubkey ? face(g.pubkey) : el('div', { className: 'avatar small' }, '?'),
+              el('div', { className: 'grow' }, el('div', { className: 'name' }, g.pubkey ? nameOf(g.pubkey) : 'People no longer here'),
+                el('div', { className: 'detail' }, `${K.plural(g.items.length, 'file')}, ${K.size(g.bytes)}${g.erasesAt ? `, erased on ${day(g.erasesAt)}` : ''}${g.pubkey ? '' : '. Restoring gives them to you.'}`),
+                house.adv ? el('div', { className: 'detail mono' }, g.items.map((x) => `${x.sha256} ${K.size(x.size)}`).join('\n')) : null),
+              el('button', { className: 'btn', ariaLabel: `Restore ${nameOf(g.pubkey)}'s files`, on: { click: (e) => houseDo(e.currentTarget, async () => { let n = 0; for (const c of K.chunks(g.items.map((x) => x.sha256))) n += (await store_('restore', [c]))?.restored ?? 0; return n; }, (n) => `${K.plural(n, 'file')} restored.`) } }, 'Restore'),
+              owner ? el('button', { className: 'btn', ariaLabel: `Erase ${nameOf(g.pubkey)}'s files now`, on: { click: (e) => { if (confirm(`Erase ${K.plural(g.items.length, 'file')} now? This cannot be undone.`)) houseDo(e.currentTarget, async () => { let n = 0; for (const c of K.chunks(g.items.map((x) => x.sha256))) n += (await store_('erase', [c]))?.erased ?? 0; return n; }, (n) => `${K.plural(n, 'file')} erased.`); } } }, 'Erase now') : null)),
+            parked.map((p) => el('div', { className: 'row wrap' }, face(p.pubkey), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(p.pubkey)),
+              el('div', { className: 'detail' }, `${K.plural(p.blobs ?? 0, 'file')}, ${K.size(p.bytes ?? 0)}. ${p.reason === 'erased' ? 'They deleted their account.' : `Comes back if you let ${nameOf(p.pubkey)} back in${p.erasesAt ? ` before ${day(p.erasesAt)}` : ''}.`}`)),
+              p.reason === 'erased' ? null : el('button', { className: 'btn', ariaLabel: `Let ${nameOf(p.pubkey)} back in`, on: { click: (e) => houseDo(e.currentTarget, () => bothy('allowpubkey', [p.pubkey]), `${nameOf(p.pubkey)} is back in the home. Their files come back within a few minutes.`) } }, 'Let back in'))))));
+      }
+      if (bin?.more) out.push(card(el('div', { className: 'sub', id: 'housebinmore' }, 'The bin holds more files than this page shows. These are the newest.')));
+      if (storageNote) out.push(card(el('div', { className: 'sub', id: 'housestoragenote' }, storageNote)));
+    }
+
+    // File server: the owner links it to the home, after seeing its key.
+    if (house.role === 'owner' && h.storage) {
+      const si = house.sinfo?.failed ? null : house.sinfo, ln = house.linked?.failed ? null : house.linked;
+      const linked = !!(ln && si && ln.pubkey === si.pubkey && ln.url?.replace(/\/+$/, '') === h.storage);
+      const follows = si && (!si.home || K.sameHome(si.home, h.url));
+      const parts = [el('h2', {}, 'File server')];
+      if (linked) parts.push(el('div', { className: 'sub', id: 'houselinked' }, 'Photos and files are kept on your box.'));
+      else if (!si) parts.push(el('div', { className: 'sub' }, 'Your box’s file server cannot be reached right now.'));
+      else if (!follows) parts.push(el('div', { className: 'sub err', id: 'housewronghome' }, 'Your box’s file server is set up for a different home, so it cannot be linked to this one. Its home setting needs changing on your box first.'));
+      else if (house.ask?.link) parts.push(el('div', { className: 'subcard', id: 'houselinkask' },
+        el('div', {}, 'Your box’s file server has this key:'), el('div', { className: 'mono', id: 'housekey' }, K.npub(si.pubkey)),
+        el('div', { className: 'detail' }, 'Check it matches the key on Keykin Storage’s page on your box, then link it.'),
+        el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'houselinkgo', on: { click: (e) => houseDo(e.currentTarget, () => bothy('setstorage', [h.storage, si.pubkey]), 'Linked. Photos and files are kept on your box.') } }, 'Link'),
+          el('button', { className: 'btn', on: { click: () => { house.ask = null; draw(); } } }, 'Cancel'))));
+      else parts.push(el('div', { className: 'sub' }, ln?.url ? 'Your home keeps photos and files somewhere else.' : 'Photos and files are not kept on your box yet.'),
+        el('div', {}, el('button', { className: 'btn go', id: 'houselink', on: { click: () => { house.ask = { link: true }; draw(); } } }, 'Keep photos and files on your box')));
+      if (house.adv) parts.push(el('div', { className: 'detail mono' }, `File server: ${h.storage}${si ? ` · key ${si.pubkey} · follows ${si.home ?? 'no home'}` : ''}${ln?.url ? ` · the home names ${ln.url} with key ${ln.pubkey}` : ''}`),
+        ln?.url ? el('div', {}, el('button', { className: 'btn', id: 'houseunlink', on: { click: (e) => { if (confirm('Unlink the file server? Apps stop saving photos and files there.')) houseDo(e.currentTarget, () => bothy('setstorage', ['']), 'Unlinked.'); } } }, 'Unlink file server')) : null);
+      out.push(card(...parts));
+    }
+    if (house.adv) out.push(card(el('h2', {}, 'Advanced'), el('div', { className: 'detail mono', id: 'houseaddr' }, `Home: ${h.url} · owner ${K.npub(house.owner)} · you are ${house.role}`)));
+    out.push(el('div', {}, advBtn));
+    return out;
+  }
+
+  const SECTIONS = [['home', 'Home'], ['house', 'Shared home'], ['devices', 'Devices'], ['sites', 'Sites and apps'], ['security', 'Security'], ['backup', 'Backup'], ['activity', 'Recent activity']];
 
   async function showAccount() {
     leave(); stopTimers();
@@ -815,7 +1021,7 @@
     });
   }
   const refresh = async () => { const n = await api('me').catch(() => null); if (n && n.ok) me = n; };
-  async function go(name) { section = name; flash = null; if (name === 'security') await refresh(); draw(); window.scrollTo(0, 0); }
+  async function go(name) { section = name; flash = null; if (name === 'security') await refresh(); draw(); window.scrollTo(0, 0); if (name === 'house' && houseSigner() && (!house || house.phase !== 'loading')) loadHouse(); }
   async function act(button, call, more, done) {
     button.disabled = true;
     const r = await api(call, more).catch(() => ({ error: 'no_box' }));
@@ -919,6 +1125,7 @@
         card(el('h2', {}, 'A second device'), el('div', { className: 'sub' }, 'The backup that works today is another device. Any two pieces sign, so a second phone, a tablet or a computer keeps the account alive if one is lost.'), link('Add a device', 'devices')),
         card(el('h2', {}, 'The whole key'), el('div', { className: 'sub' }, 'A device can form the whole key, to write down or to use in an app that needs it. Do that in the app. Anyone who gets it controls the account for good, so keep it offline.')),
         card(el('h2', {}, 'Paper backup and undo'), el('div', { className: 'sub' }, 'Not available yet.'))],
+      house: () => (me.home ? houseView() : []),
       activity: () => [
         head('Recent activity', 'What happened to this account at the box.'),
         el('div', { className: 'card rows' }, me.log.length ? me.log.map((l) => el('div', { className: 'row' }, el('div', { className: 'grow' }, l.text), el('div', { className: 'detail' }, ago(l.at))))
@@ -930,7 +1137,7 @@
         el('div', { className: 'who' }, el('span', {}, `${name} · signed in with ${HOW[me.how] ?? 'a device'}`),
           el('button', { className: 'go-link linkish', style: 'margin:0', on: { click: async () => { await api('logout'); showLogin(); } } }, 'Sign out'))),
       el('div', { className: 'shell' },
-        el('nav', { ariaLabel: 'Sections' }, SECTIONS.map(([id, label]) => el('button', { ariaCurrent: section === id ? 'page' : 'false', on: { click: () => go(id) } }, label))),
+        el('nav', { ariaLabel: 'Sections' }, SECTIONS.filter(([id]) => id !== 'house' || me.home).map(([id, label]) => el('button', { ariaCurrent: section === id ? 'page' : 'false', on: { click: () => go(id) } }, label))),
         el('main', {}, flash ? el('div', { className: 'notice', id: 'status', role: 'status' }, flash) : null, noPassword(), sections[section]())));
   }
   // An account made before setup asked for a password has none: say so on every section until it is set (SPEC 11.3).

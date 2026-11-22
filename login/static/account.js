@@ -1000,7 +1000,7 @@
       else if (!follows) parts.push(el('div', { className: 'sub err', id: 'housewronghome' }, 'Your box’s file server is set up for a different home, so it cannot be linked to this one. Its home setting needs changing on your box first.'));
       else if (house.ask?.link) parts.push(el('div', { className: 'subcard', id: 'houselinkask' },
         el('div', {}, 'Your box’s file server has this key:'), el('div', { className: 'mono', id: 'housekey' }, K.npub(si.pubkey)),
-        el('div', { className: 'detail' }, 'Check it matches the key on Keykin Storage’s page on your box, then link it.'),
+        el('div', { className: 'detail' }, 'Check it matches the key Keykin Storage printed when it started (in its logs on your box), then link it.'),
         el('div', { className: 'with-note' }, el('button', { className: 'btn go', id: 'houselinkgo', on: { click: (e) => houseDo(e.currentTarget, () => bothy('setstorage', [h.storage, si.pubkey]), 'Linked. Photos and files are kept on your box.') } }, 'Link'),
           el('button', { className: 'btn', on: { click: () => { house.ask = null; draw(); } } }, 'Cancel'))));
       else parts.push(el('div', { className: 'sub' }, ln?.url ? 'Your home keeps photos and files somewhere else.' : 'Photos and files are not kept on your box yet.'),

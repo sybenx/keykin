@@ -1361,7 +1361,7 @@ Keykin key is the one the owner makes an admin.
   let back in before the date. Until bothy's `memberkeys` lists admins and storage reads it, storage answers only
   the owner, and an admin sees a line saying so.
 - **File server** (owner only): `GET <storage>/manage/info` gives its key and the home it follows. Linking
-  (`setstorage [url, key]`) first shows the key as an npub to check against the box, and is refused on the page if
+  (`setstorage [url, key]`) first shows the key as an npub to check against the one Keykin Storage prints at start (its logs, or `home key`), and is refused on the page if
   the file server follows another home. Unlinking is under Advanced.
 
 **Built:** `login/server.ts`, `login/static/home.js` (rules and calls, also loaded by the tests), the section in

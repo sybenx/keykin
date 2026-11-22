@@ -195,9 +195,14 @@ What the person who runs the box sees, at the box's main port. Plain HTML from t
 It is never on the public side.
 
 - **Getting in:** the owner secret, which the box prints once on its first start and also
-  leaves in `owner-secret.txt`. Or, **behind another login** (`KEYKIN_BEHIND_LOGIN=1`), nothing:
-  the page trusts whoever got through, and the box makes no owner secret. Use that only when the
-  page cannot be reached any other way, such as behind an Umbrel app's login.
+  leaves in `owner-secret.txt`. **A lost secret** is replaced by putting an empty file named
+  `reset-owner` beside `state.json` and restarting the box: it makes a new secret, prints it, leaves
+  it in `owner-secret.txt` and deletes `reset-owner`, so it happens once. The old secret stops
+  working. Only someone who can write the box's data folder and restart it can do this, and they
+  could already edit `state.json`, so it opens no new door. The login page says how.
+  Or, **behind another login** (`KEYKIN_BEHIND_LOGIN=1`), nothing: the page trusts whoever got
+  through, and the box makes no owner secret. Use that only when the page cannot be reached any
+  other way, such as behind an Umbrel app's login.
 - **An empty box** shows the first setup code straight away.
 - **Waiting requests** (section 11.4), each with Approve and Refuse.
 - **Every account:** its npub, its username if it has one, and its devices and boxes with Block
@@ -1570,8 +1575,6 @@ whenever they are published.
 - **A background service for the phone's site signer** (section 8j).
 - **Helpers reporting signatures made without the box, and the relay alarm** (section 11.8).
   Recent signing lists only what the box helped with, and nothing compares it with the relays.
-- **Resetting a lost owner secret.** Today: stop the box, delete the `owner` line from
-  `state.json`, start it, and read the new secret from its output.
 - **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the
   public key on trust. iOS (Secure Enclave) is not written.
 - **A Linux device.** The Rust device (section 8d) is the natural start. Its chip key would live

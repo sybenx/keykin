@@ -53,6 +53,7 @@ export function loginPage(o: { error?: string }) {
   <label class="small dim" for="secret">Owner secret</label>
   <input id="secret" name="secret" type="password" autocomplete="current-password" required>
   <button class="go" type="submit">Log in</button>
+  <p class="dim small">Lost it? Put an empty file named <code>reset-owner</code> beside the box's <code>state.json</code> and restart the box. It shows a new secret and leaves it in <code>owner-secret.txt</code>.</p>
 </form>`);
 }
 

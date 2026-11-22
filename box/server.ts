@@ -30,10 +30,12 @@
 //                        Umbrel login, say). The page then asks for nothing itself and makes no owner
 //                        secret. Use it only when the page cannot be reached any other way.
 // On its first start it prints the owner secret once, and leaves it in owner-secret.txt beside the state.
+// Lost it? Put an empty file named reset-owner beside state.json and restart the box: it makes a new
+// secret the same way, and deletes reset-owner so it happens once.
 // The list store (box/lists.ts) is the lists/ folder beside state.json.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Box, loginOrigin, keptSetsOf, openAccountsOf, HOLD, type BoxState, type Hold } from './box.ts';
@@ -66,9 +68,14 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
   const where = (): string => `http://${o.addr ?? '127.0.0.1'}:${(server.address() as any).port}`;
   const page = new PageApi(box, () => o.url || where(), () => !!o.open, o.policy ?? {});
 
-  // The owner secret is shown once, here. Only its hash is kept.
+  // The owner secret is shown once, here. Only its hash is kept. A reset-owner file beside the state replaces
+  // a lost one: whoever can write that folder and restart the box could already edit state.json.
+  const resetFile = join(o.dir, 'reset-owner');
+  const reset = existsSync(resetFile);
+  if (reset && o.behindLogin) log('keykin box: reset-owner ignored, behind another login there is no owner secret');
   let ownerSecret: string | null = null;
-  if (!box.state.owner && !o.behindLogin) {
+  if ((!box.state.owner || reset) && !o.behindLogin) {
+    if (box.state.owner) log('keykin box: reset-owner found, the old owner secret no longer works');
     ownerSecret = bytesToHex(randomBytes(16)).match(/.{4}/g)!.join('-');
     box.state.owner = bytesToHex(sha('keykin2-owner', ownerSecret));
     log(`keykin box: owner secret (shown once, keep it): ${ownerSecret}`);
@@ -77,6 +84,7 @@ export function startBox(o: { dir: string; addr?: string; port?: number; sidePor
     writeFileSync(join(o.dir, 'owner-secret.txt'), ownerSecret + '\n', { mode: 0o600 });
   }
   save(box.state);          // also rewrites an older state file in today's shape
+  if (reset) rmSync(resetFile, { force: true, recursive: true });    // only once the new hash is saved
 
   const sessions = new Map<string, { until: number; csrf: string }>();
   let fails: number[] = [];

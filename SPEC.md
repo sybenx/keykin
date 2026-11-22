@@ -67,8 +67,14 @@ A helper never signs a bare hash. Nonces are made per request and used once.
 - Every piece holder has a **member key** (secp256k1, x-only), separate from its piece.
 - A request is `{ body, key, sig }`. `sig` is BIP-340 by `key` over `SHA-256(JCS(body))`.
 - `body.ts` is unix seconds and must be within 60 s. `body.id` is random and is refused twice.
-- A device may have a **chip key**: a P-256 key in the phone's secure chip that signs only
-  after a fingerprint or face check. Its public key is on the member list.
+- A device may have a **chip key**: a P-256 key held in the device's secure hardware that signs
+  only after the person is checked. Its public key is on the member list. The protocol needs only
+  the P-256 signature; where the key lives and how the person is checked is the device's own
+  business. Today: the Android Keystore with a fingerprint or face (section 8e), and the Mac's
+  Secure Enclave with Touch ID or the login password (section 8d). A PC's TPM2 would do the same.
+- **"Fingerprint" in this spec means that check**, whatever form it takes on the device: a
+  fingerprint, a face, or the device's own password where there is no sensor. The wire names
+  (`fp`, `needs_fingerprint`) keep the word.
 - An **account change** also carries `fp`: an ECDSA (SHA-256) signature by the asker's chip key
   over the same `JCS(body)`. Without a valid one the box answers `needs_fingerprint`. A device
   with no chip key gets `no_chip_key` and cannot make account changes.
@@ -1328,6 +1334,9 @@ check also keeps the device list and grants fresh, and is all it does with an ol
   `state.json`, start it, and read the new secret from its output.
 - **Proof that a chip key lives in a chip.** The Android app's key does, but the box takes the
   public key on trust. iOS (Secure Enclave) is not written.
+- **A Linux device.** The Rust device (section 8d) is the natural start. Its chip key would live
+  in TPM2 where there is one, and otherwise be a software key with the screen lock or a password
+  as the check, the easy kind of section 4. Not written.
 - **A pasted bunker link on the phone.** The phone's remote signer takes sites in by a scanned
   code only.
 - **A phone or a browser helping when the box is off.** Only the command-line device listens.

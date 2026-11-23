@@ -163,3 +163,48 @@ test('Keykin Login: the home settings, and the page may reach exactly those two 
   const l = await startLogin({ box: 'http://127.0.0.1:9', port: 0, log: () => {} });
   try { const r = await fetch(`http://127.0.0.1:${l.port}/home.js`, { headers: { connection: 'close' } }); assert.equal(r.status, 200); assert.match(await r.text(), /KeykinHome/); } finally { await l.close(); }
 });
+
+test('private profiles: names come from the home, signed in, asked with an own-mail filter so the home asks for AUTH', async () => {
+  const me = pk('a'), A = pk('b');
+  const sent: any[] = [];
+  const real = (globalThis as any).WebSocket;
+  class FakeWs {
+    onopen: any; onmessage: any; onerror: any; url: string;
+    constructor(url: string) { this.url = url; setTimeout(() => this.onopen?.(), 0); }
+    send(text: string) {
+      const d = JSON.parse(text); sent.push(d);
+      const reply = (x: any) => setTimeout(() => this.onmessage?.({ data: JSON.stringify(x) }), 0);
+      if (d[0] === 'REQ' && sent.filter((s) => s[0] === 'AUTH').length === 0) { reply(['AUTH', 'ch']); reply(['CLOSED', 'kk-names', 'auth-required: sign in']); }
+      else if (d[0] === 'AUTH') reply(['OK', d[1].id ?? 'x', true, '']);
+      else if (d[0] === 'REQ') { reply(['EVENT', 'kk-names', { kind: 0, pubkey: A, created_at: 1, content: '{"name":"Ana"}' }]); reply(['EOSE', 'kk-names']); }
+    }
+    close() {}
+  }
+  (globalThis as any).WebSocket = FakeWs;
+  try {
+    const got = await K.readProfiles('wss://home.example', [A], async (ch: string) => ({ id: 'auth', challenge: ch }), 2000, me);
+    assert.deepEqual(got.map((e: any) => e.pubkey), [A]);
+    const req = sent.find((s) => s[0] === 'REQ');
+    assert.deepEqual(req[2], { kinds: [0], authors: [A] });
+    assert.deepEqual([req[3].kinds, req[3]['#p'], req[3].limit], [[1059], [me], 1]);
+  } finally { (globalThis as any).WebSocket = real; }
+});
+
+test('private profiles: a sealed photo opens from the home by its hash, as a data: picture; no name reads "No name shared"', async () => {
+  const plain = new Uint8Array([0xff, 0xd8, 0xff, 1, 2, 3, 4]);
+  const key = crypto.getRandomValues(new Uint8Array(32)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const k = await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt']);
+  const sealed = new Uint8Array([...iv, ...new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, plain))]);
+  const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  const sha = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', sealed)));
+  const picture = `https://blossom.primal.net/${sha}#k=${hex(key)}`;
+  assert.equal(K.sealedKey(picture), hex(key));
+  assert.equal(K.sealedKey('https://x.example/a.jpg'), null);
+  const asked: string[] = [];
+  const fetch = async (u: string) => { asked.push(u); return new Response(u.startsWith('https://home.example/') ? sealed : null, { status: u.startsWith('https://home.example/') ? 200 : 404 }); };
+  const url = await K.sealedPicture(picture, 'https://home.example/', { fetch });
+  assert.deepEqual(asked, [`https://home.example/${sha}`]);
+  assert.equal(url, 'data:image/jpeg;base64,' + Buffer.from(plain).toString('base64'));
+  assert.equal(await K.sealedPicture(picture.replace(/k=.*/, 'k=' + '0'.repeat(64)), 'https://home.example', { fetch }), null);
+  assert.equal(K.noName(pk('a').slice(0, 58) + 'abc123'), 'No name shared abc123');
+});

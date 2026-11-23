@@ -84,15 +84,18 @@
     return out;
   }
   /**
-   * Reads kind 0 for `authors` from one relay. A home may ask for NIP-42 first: then `auth(challenge)` signs the
-   * kind 22242 and it asks again, once. Resolves with what came, after EOSE or `ms`.
+   * Reads kind 0 for `authors` from one relay. A home keeps members' profiles for its own signed-in people
+   * (bothy 0.31, private profiles) and asks for NIP-42 only on a request naming mail, so with `me` the request also
+   * carries a filter for my own mail from now on, which matches nothing worth keeping: the home asks to sign in,
+   * `auth(challenge)` signs the kind 22242 and it asks again, once. Resolves with the kind 0 that came, after EOSE or `ms`.
    */
-  function readProfiles(relay, authors, auth, ms = 6000) {
+  function readProfiles(relay, authors, auth, ms = 6000, me = null) {
     return new Promise((resolve) => {
       const got = []; let ws, done = false, tried = false, challenge = null;
-      const finish = () => { if (done) return; done = true; clearTimeout(t); try { ws?.close(); } catch {} resolve(got); };
+      const finish = () => { if (done) return; done = true; clearTimeout(t); try { ws?.close(); } catch {} resolve(got.filter((e) => e?.kind === 0)); };
       const t = setTimeout(finish, ms);
-      const ask = () => ws.send(JSON.stringify(['REQ', 'kk-names', { kinds: [0], authors: authors.slice(0, 500) }]));
+      const mail = auth && isHex(me) ? [{ kinds: [1059], '#p': [me], since: Math.floor(Date.now() / 1000) + 60, limit: 1 }] : [];
+      const ask = () => ws.send(JSON.stringify(['REQ', 'kk-names', { kinds: [0], authors: authors.slice(0, 500) }, ...mail]));
       try { ws = new WebSocket(relay); } catch { return finish(); }
       ws.onopen = ask;
       ws.onerror = finish;
@@ -110,6 +113,39 @@
     });
   }
   const authFor = (relay, challenge) => ({ kind: 22242, created_at: Math.floor(Date.now() / 1000), tags: [['relay', relay], ['challenge', challenge]], content: '' });
+
+  /** The key of a sealed photo (private profiles): the picture's `#k=<64 hex>`, or null for a plain one. */
+  function sealedKey(picture) {
+    const k = String(picture ?? '').split('#')[1]?.split('&').find((x) => x.startsWith('k='))?.slice(2).toLowerCase();
+    return k && /^[0-9a-f]{64}$/.test(k) ? k : null;
+  }
+  /**
+   * A sealed photo as a data: URL (this page's CSP takes data: images, and only fetches from the home): its blob
+   * by sha256 on the home first, then its own address. The bytes are a 12-byte nonce, then AES-256-GCM. Null when
+   * no copy opens.
+   */
+  async function sealedPicture(picture, home, o = {}) {
+    const key = sealedKey(picture);
+    const url = String(picture ?? '').split('#')[0];
+    const sha = url.match(/([0-9a-f]{64})(?:\.[a-z0-9]+)?$/)?.[1];
+    if (!key || !sha) return null;
+    const from = [...(home ? [home.replace(/\/+$/, '') + '/' + sha] : []), url];
+    for (const u of from) {
+      try {
+        const r = await (o.fetch ?? fetch)(u, { referrerPolicy: 'no-referrer' });
+        if (!r.ok) continue;
+        const b = new Uint8Array(await r.arrayBuffer());
+        if (b.length < 28) continue;
+        const k = await crypto.subtle.importKey('raw', Uint8Array.from(key.match(/../g), (x) => parseInt(x, 16)), 'AES-GCM', false, ['decrypt']);
+        const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, k, b.slice(12)));
+        let bin = ''; for (let i = 0; i < plain.length; i += 0x8000) bin += String.fromCharCode(...plain.subarray(i, i + 0x8000));
+        return 'data:image/jpeg;base64,' + btoa(bin);
+      } catch { /* the next copy */ }
+    }
+    return null;
+  }
+  /** Someone whose name this home does not have: "No name shared" and the last six characters of their key. */
+  const noName = (pk) => `No name shared ${String(pk).slice(-6)}`;
 
   // ---- The invite tree --------------------------------------------------------------------------------
   /**
@@ -230,5 +266,5 @@
     };
   }
 
-  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, tree, below, flat, find, everyone, howCame, tail, seenWords, utcDay, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
+  globalThis.KeykinHome = { npub, short, authEvent, call, CallError, homeInfo, storageInfo, manageUrl, relayOf, sameHome, profiles, readProfiles, authFor, sealedKey, sealedPicture, noName, tree, below, flat, find, everyone, howCame, tail, seenWords, utcDay, removal, size, usedBy, binByPerson, chunks, removeWords, plural, sha256 };
 })();

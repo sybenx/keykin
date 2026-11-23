@@ -814,7 +814,7 @@
   const K = globalThis.KeykinHome;
   let house = null;              // { phase, info, role, list, names, usage, bin, sinfo, linked, notes, adv, ask, line, busy }
   const houseSigner = () => (ptr?.npub === me?.npub ? ptr.signer : null);
-  const nameOf = (pk) => (pk === me?.npub ? 'You' : house?.names?.[pk]?.name) || (house?.adv ? K.short(pk) : 'Someone');
+  const nameOf = (pk) => (pk === me?.npub ? 'You' : house?.names?.[pk]?.name) || (house?.adv ? K.short(pk) : K.noName(pk));
   const withName = (pk) => (pk === me?.npub ? 'you' : nameOf(pk));
   function houseFail(x) {
     if (x?.message === 'no answer' || x?.status === 0) return 'Your home cannot be reached right now.';
@@ -871,27 +871,29 @@
       const t = K.tree(owner, list);
       house = { ...house, phase: 'ready', info, role, owner, list, tree: t, linked, files, names: house.names ?? {} };
       draw();
-      // Names and photos come after, from the home itself: a home may ask the phone to sign in to read them.
-      // Then, for anyone still nameless, the relays this page reads the account's own profile from (wss only, inside
-      // the page's CSP). What was found is kept for the visit, and nobody is looked up twice.
+      // Names and photos come after, from the home itself, signed in (private profiles: a member's name is for the
+      // home only, so nothing is looked for anywhere else). What was found is kept for the visit, and nobody is
+      // looked up twice.
       const all = [...new Set([owner, ...K.everyone(t).map((n) => n.pubkey), ...(list.removed ?? []).map((r) => r.pubkey), ...files.flatMap((f) => K.binByPerson(f.bin?.failed ? null : f.bin).map((g) => g.pubkey)).filter(Boolean)])];
       const looked = house.looked ?? (house.looked = new Set());
       const pks = all.filter((pk) => !looked.has(pk));
       if (!pks.length) return;
       const redraw = () => { if (house?.phase === 'ready' && section === 'house' && !document.querySelector('[data-busy]')) draw(); };
       const relay = K.relayOf(h.url);
-      const fromHome = K.profiles(await K.readProfiles(relay, pks, (ch) => signer.signEvent(K.authFor(relay, ch))));
+      const fromHome = K.profiles(await K.readProfiles(relay, pks, (ch) => signer.signEvent(K.authFor(relay, ch)), 6000, me.npub));
       if (house?.phase !== 'ready') return;
-      house.names = { ...house.names, ...fromHome }; redraw();
-      const missing = pks.filter((pk) => !house.names[pk]?.name);
-      const elsewhere = (me.relays ?? []).filter((r) => /^wss:\/\//.test(r) || /^ws:\/\/(127\.0\.0\.1|localhost)[:/]/.test(r));
-      if (missing.length && elsewhere.length) {
-        const found = K.profiles((await Promise.all(elsewhere.map((r) => K.readProfiles(r, missing, null)))).flat());
-        if (house?.phase !== 'ready') return;
-        for (const [pk, p] of Object.entries(found)) if (!house.names[pk]?.name || (!house.names[pk]?.picture && p.picture)) house.names[pk] = { name: house.names[pk]?.name || p.name, picture: house.names[pk]?.picture || p.picture };
-      }
+      house.names = { ...house.names, ...fromHome };
       pks.forEach((pk) => looked.add(pk));
       redraw();
+      // Sealed photos open here, one by one, as data: pictures.
+      for (const pk of pks) {
+        const pic = house.names[pk]?.picture;
+        if (!K.sealedKey(pic)) continue;
+        const opened = await K.sealedPicture(pic, h.url);
+        if (house?.phase !== 'ready') return;
+        house.names[pk] = { ...house.names[pk], picture: opened };
+        redraw();
+      }
     } catch (x) {
       house = { ...house, phase: 'error', line: houseFail(x) };
       draw();
@@ -922,9 +924,10 @@
   const anyUsage = () => (house.files ?? []).some((f) => f.usage && !f.usage.failed);
 
   function face(pk) {
-    const pic = house.names?.[pk]?.picture, n = nameOf(pk);
+    // A sealed photo not opened yet is not shown as its noise.
+    const pic = K.sealedKey(house.names?.[pk]?.picture) ? null : house.names?.[pk]?.picture, n = nameOf(pk);
     return pic ? el('img', { className: 'avatar small', src: pic, alt: '', referrerPolicy: 'no-referrer' })
-      : el('div', { className: 'avatar small', ariaHidden: 'true' }, (n === 'Someone' ? '?' : n).charAt(0).toUpperCase());
+      : el('div', { className: 'avatar small', ariaHidden: 'true' }, (house?.names?.[pk]?.name ? n : '?').charAt(0).toUpperCase());
   }
   function personRow({ node: n, depth }) {
     const pk = n.pubkey, used = storedBy()[pk];

@@ -945,7 +945,7 @@
     const rm = can.remove ? el('button', { className: 'btn', ariaLabel: `Remove ${nameOf(pk)}`, on: { click: () => { house.ask = { pk }; draw(); } } }, 'Remove')
       : can.why ? el('span', { className: 'detail', title: can.why }, can.why) : null;
     const row = el('div', { className: 'row person', style: `padding-left:${Math.min(depth, 6) * 24}px` },
-      face(pk), el('div', { className: 'grow' }, el('div', { className: 'name' }, nameOf(pk), named || house.adv ? null : el('span', { className: 'idtail', title: 'The end of their key' }, K.tail(pk)), n.role === 'admin' ? el('span', { className: 'tag' }, 'Admin') : null), el('div', { className: 'detail' }, bits.join(' · ')), adv),
+      face(pk), el('div', { className: 'grow' }, el('div', { className: 'name' }, named || house.adv ? nameOf(pk) : 'No name shared', named || house.adv ? null : el('span', { className: 'idtail', title: 'The end of their key' }, K.tail(pk)), n.role === 'admin' ? el('span', { className: 'tag' }, 'Admin') : null), el('div', { className: 'detail' }, bits.join(' · ')), adv),
       sw, asking ? null : rm);
     row.dataset.pk = pk;
     if (!asking) return row;

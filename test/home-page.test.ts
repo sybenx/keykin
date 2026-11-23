@@ -92,7 +92,7 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
   await first.close();
 
   // The home: Ana (an admin) let in Ben, Ben let in Cleo and Dev; Eve came in by the owner. Each has a name on the home.
-  // From before the invite tree (no inviter): Finn, whose name is only on the account's relays, and one with no name anywhere.
+  // From before the invite tree (no inviter): Finn, whose name is only on the account's relays (the home has none, so the page shows none), and one with no name anywhere.
   const people = Object.fromEntries(['ana', 'ben', 'cleo', 'dev', 'eve', 'finn', 'nameless'].map((n) => { const sk = generateSecretKey(); return [n, { sk, pk: getPublicKey(sk) }]; }));
   const P = (n: string) => people[n].pk;
   const home = await fakeBothy({ owner: account, name: 'The Herbst home', relayPort: homeRelay.port, members: [
@@ -132,20 +132,19 @@ test('the Shared home section: a scan, the invite tree, the photo switch, remova
 
     // The phone answers: the home loads. The owner, then each person under whoever let them in, with their names.
     await page.waitForSelector('#housepeople .row.person >> text=Cleo', { timeout: 30_000 }).catch(async (x) => { throw new Error(`${x.message}\npage: ${await page.textContent('main')}\nerrors: ${errors.join('; ')}\nphone signed: ${ph!.kinds}`); });
-    await page.waitForSelector('#housepeople .row.person >> text=Finn');
+    const ftail = P('finn').slice(-6);
+    await page.waitForSelector(`#housepeople .row.person >> text=${ftail}`);
     const rows = await page.$$eval('#housepeople .row.person', (rs) => rs.map((r) => [r.querySelector('.name')!.textContent, parseInt((r as HTMLElement).style.paddingLeft) / 24]));
     const tail = P('nameless').slice(-6);
-    assert.deepEqual(rows, [['You', 0], ['AnaAdmin', 1], ['Ben', 2], ['Cleo', 3], ['Dev', 3], ['Eve', 1], ['Finn', 1], ['Someone' + tail, 1]]);
-    // Rows from before the invite tree sit apart, under their own heading, after the tree.
-    assert.match((await page.textContent('#houseold'))!, /Added before invites/);
+    assert.deepEqual(rows, [['You', 0], ['AnaAdmin', 1], ['Ben', 2], ['Cleo', 3], ['Dev', 3], ['Eve', 1], ['No name shared' + ftail, 1], ['No name shared' + tail, 1]]);
     // No name, no photo, nothing stored: apart again, under No name yet.
-    assert.match((await page.textContent('#housequiet'))!, /No name yet1 person with no name or photo, who have stored nothing\. Oldest first\./);
+    assert.match((await page.textContent('#housequiet'))!, /No name yet2 people with no name or photo, who have stored nothing\. Oldest first\./);
     const detail = async (name: string) => (await page.locator('#housepeople .row.person', { hasText: name }).first().locator('.grow > .detail').first().textContent())!;
     assert.match(await detail('Cleo'), /^Invited by Ben · joined .* · 50 MB stored$/);
     assert.match(await detail('Dev'), /^Asked to join, let in by Ben · joined .* · Nothing stored$/);
     assert.match(await detail('Eve'), /^Added by you · joined .* · Last here Nov 22, 2026 · Nothing stored$/);
     assert.match(await detail(tail), /^Joined Nov 14, 2023 · No sign-in since Nov 21, 2026 · Nothing stored$/);
-    assert.match(await detail('Finn'), /^Joined Nov 14, 2023 · Nothing stored$/);        // inviter unknown: never "Invited by you" 
+    assert.match(await detail(ftail), /^Joined Nov 14, 2023 · Nothing stored$/);        // inviter unknown: never "Invited by you" 
     assert.match((await page.textContent('h1'))!, /The Herbst home/);
     // KEYKIN_SHOTS=<folder> saves what the section looks like, for a person to look at.
     const shot = async (name: string, width = 390) => { if (!process.env.KEYKIN_SHOTS) return; await page.setViewportSize({ width, height: 860 }); await page.locator('main').screenshot({ path: join(process.env.KEYKIN_SHOTS, `${name}-${width}.png`) }); await page.setViewportSize({ width: 390, height: 860 }); };

@@ -1,113 +1,140 @@
 # Keykin
 
-My devices and my box. Any two pieces sign.
+Keykin splits a Nostr key (secp256k1, BIP-340) into FROST pieces held by a person's
+devices and one box they or someone they trust runs. Any two pieces sign. One piece alone
+signs nothing. There are no public servers.
 
-- `DIRECTION.md`: why, and what the design is.
-- `SPEC.md`: what the code does, and what is not built.
-- `src/`: the pieces, the signing round, member requests, the device side.
-- `box/`: the box (`box.ts`), the account page's calls (`pageapi.ts`), the admin page (`page.ts`) and its HTTP server (`server.ts`).
-- `login/`: Keykin Login, the public door and the account page. `KEYKIN_BOX=http://127.0.0.1:7461 npm run login`.
-- `cli/`: this computer as a device (`keykin.ts`), including sign-in to sites.
-- `android/`: the phone app.
-- `ext/`: the browser extension. `node ext/build.mjs`, then load `ext/dist` in Chrome with Load unpacked.
-- `site/`: sign-in by a scanned code for web pages (QRST signer-ticket). `node tools/build-site.mjs`.
-- `signin/`: name-first sign-in for web sites (Marble Web, Discover, Tube), the one shared copy. Plain browser modules; see `signin/README.md`. Sites take a copy with `node tools/signin-copy.mjs <folder>`.
-- `vendor/qrst.js`: the QRST library, bundled from the `qr-secret-transfer` repo by `node tools/build-qrst.mjs`.
-- `device-rs/`: the device side in Rust (lifted from Marble on Mac) and `keykin`, a signer for Terminal whose piece is sealed by the Secure Enclave. See "Signing from Terminal" below.
-- `frost/`: the Rust FROST crate, built to `frost-wasm/`. Carried over from the `cosign` repo.
+This repository has the spec, the box, the device side in TypeScript, Kotlin and Rust, and
+the pieces a web site needs for sign-in.
+
+- `SPEC.md`: what the code does, what is not built (section 9) and known weak spots
+  (section 10).
+- `DIRECTION.md`: the design and the reasons for it.
+
+## Status
+
+Draft (spec 0.11), version 0.1.x. Not audited.
+
+- The terminal signer runs on macOS only. Linux and Windows are not built, and
+  `keykin join` refuses there because the piece would have to sit in a plain file.
+- [Marble](https://github.com/sybenx/marble) carries a copy of the Kotlin core from
+  `android/`.
+- The box is packaged for Umbrel in
+  [keykin-umbrel](https://github.com/sybenx/keykin-umbrel).
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `src/` | Pieces, the signing round, member requests, the device side. |
+| `box/` | The box (`box.ts`), the account page's calls (`pageapi.ts`), the admin page (`page.ts`), the HTTP server (`server.ts`). |
+| `login/` | Keykin Login: the public door and the account page. |
+| `cli/` | A computer as a device (`keykin.ts`), including NIP-46 sign-in to sites. |
+| `android/` | The phone app. |
+| `ext/` | The browser extension. |
+| `site/` | Sign-in by a scanned code for web pages (QRST `signer-ticket`). |
+| `signin/` | Name-first sign-in for web sites (Marble Web, Discover, Tube). The one shared copy. See `signin/README.md`. |
+| `device-rs/` | The device side in Rust, and `keykin`, the terminal signer. |
+| `frost/` | The Rust FROST crate. Built to `frost-wasm/` and, for Android, to a JNI library. |
+| `vendor/qrst.js` | The QRST library, bundled from the `qr-secret-transfer` repository. |
+| `deploy/` | Dockerfiles and a compose file for the box and Keykin Login. |
+| `vectors/`, `test/` | Test vectors and tests. |
+
+## Running
+
+Needs Node 24.
 
 ```bash
 npm install
-```
-
-```bash
 npm test
-```
-
-```bash
 npm run box
 ```
 
-The box prints its owner secret once, on first start. Open `http://127.0.0.1:7460` and log in with it.
+The box listens on port 7460 and prints its owner secret once, on first start. The admin
+page is at `http://127.0.0.1:7460`.
 
-## Try it on one computer
+Keykin Login needs the box's side door:
+
+```bash
+KEYKIN_BOX=http://127.0.0.1:7461 npm run login
+```
+
+Builds:
+
+```bash
+node ext/build.mjs           # extension, to ext/dist (Chrome: Load unpacked)
+node tools/build-site.mjs    # site/
+node tools/build-qrst.mjs    # vendor/qrst.js
+node tools/signin-copy.mjs <folder>   # copy signin/ into a site
+```
+
+## One computer, end to end
 
 Start the box, log in to its page, and expand "No camera? Copy the code as text".
 
 ```bash
-npm run box
-```
-
-Make the account from this computer, pasting that text:
-
-```bash
 npm run keykin -- create '<the text>' 'MacBook'
-```
-
-Sign in to a site: run this, then paste the link it prints into the site's remote signer sign-in.
-
-```bash
 npm run keykin -- bunker wss://your.relay
 ```
 
-## Signing from Terminal
+`create` makes the account with this computer as the first device. `bunker` prints a
+NIP-46 link to paste into a site's remote-signer sign-in.
 
-`device-rs` builds `keykin`, which makes this Mac a device of your account the way your phone is. Its piece is
-sealed by the Mac's Secure Enclave, and every signature asks for Touch ID. There's no nsec, no bunker link and
-nothing in a plain file that can sign. The Touch ID prompt says what is signed (which app, release or file, where
-the event names one) and who asked: a script passes `keykin sign --for "Pinket release" …`, and without `--for` the
-prompt names the calling script. It needs Xcode's command line tools (`swiftc`) to build.
+## Terminal signer (macOS)
+
+`device-rs` builds `keykin`, which makes a Mac a device of an account. Its piece is sealed
+by the Secure Enclave and every signature needs Touch ID. No nsec, bunker link or plain
+file that can sign is kept on disk. Building needs Xcode's command line tools (`swiftc`).
 
 ```bash
 cd device-rs && cargo build --release && mkdir -p ~/.local/bin && cp target/release/keykin ~/.local/bin/
 ```
 
-```bash
-keykin join
-```
-
-Marble on the web opens in your browser and finds your account page. Press **Add** there and this Mac joins as
-"<this Mac's name> (Terminal)". If the browser can't come back, type the six digits your account page shows,
-with its address, where `keykin join` waits.
+| Command | What |
+| --- | --- |
+| `keykin join` | Opens Marble Web, which finds the account page. Pressing Add there joins this Mac as "<name> (Terminal)". If the browser cannot return, `join` accepts the six digits and address the account page shows. |
+| `keykin sign '<event json>'` | Signs an event and prints it. `--for "<label>"` sets who the Touch ID prompt says asked. Without it the prompt names the calling script. |
+| `keykin dm <npub> '<text>'` | Sends a NIP-17 message. `-` reads the text from stdin. `--relay wss://…` overrides where both copies go. |
+| `keykin encrypt <npub> '<text>'`, `keykin decrypt <npub> '<text>'` | NIP-44 only. |
+| `keykin status` | Shows which account this Mac signs as. |
+| `keykin forget` | Deletes the sealed piece. The device should also be blocked from the phone. |
 
 ```bash
 keykin sign '{"kind":1,"content":"hello"}' | nak event wss://relay.example
 ```
 
-The Touch ID prompt says what is signed ("sign a note (kind 1): “hello” as you"). Your box still decides what is
-hard to undo. keykin never says Yes for you: what the box asks about is signed in Marble or on your phone, and
-what is never done by accident only on your phone. `keykin status` shows who this Mac signs as, and
-`keykin forget` deletes its sealed piece (block it on your phone too).
+- The Touch ID prompt states what is being signed: the kind, the app, release or file
+  where the event names one, and for a DM the recipient and the start of the text.
+- The box still decides what is hard to undo. `keykin` does not answer those questions.
+  They are answered in Marble or on the phone. Level 2 events (SPEC section 11.6) are
+  refused with `needs_fingerprint` and have to be done from the phone.
+- `keykin dm` looks up the recipient's DM relay list (falling back to their read relays),
+  sends there, and sends a copy to the sender's own DM relays. It prints where each copy
+  landed. Proof of work or NIP-42 auth demanded by a relay is done with the message's
+  one-time key, so neither costs another Touch ID.
 
-A private message needs no bunker and no other app. It's one Touch ID, and the prompt says who it's for and how
-it starts ("send a private message to Alice (npub1…): “hi, are you…”"):
+## Android app
 
-```bash
-keykin dm npub1… 'hi, are you around this week?'
-echo "a longer message from a script" | keykin dm --for "weekly report" npub1… -
-```
-
-It looks up where they read private messages (their DM relay list, else the relays they read from), leaves it
-there, and leaves a copy for you on your own DM relays so it shows in your DM apps. It prints where each copy
-landed. A relay that wants proof of work, or a login before it takes a message, gets them from the message's
-one-time key, so neither asks for another Touch ID. `--relay wss://…` sends both copies there instead. It's NIP-17: the message is sealed and signed as you,
-then wrapped by a one-time key. `keykin encrypt <npub> '<text>'` and `keykin decrypt <npub> '<text>'` do NIP-44
-alone, for scripts that build their own.
-
-Linux and Windows aren't done yet: `keykin join` says so rather than keeping a piece in a plain file.
-
-## The Android app
-
-Build the FROST library for Android once (and again when `frost/` changes), then the app:
+Build the FROST library for Android once, and again when `frost/` changes, then the app.
+Needs JDK 17, the Android NDK and `cargo-ndk`.
 
 ```bash
-cd frost && ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/29.0.14206865 cargo ndk -t arm64-v8a -t x86_64 -P 30 -o ../android/app/src/main/jniLibs build --release --features jni
+cd frost && cargo ndk -t arm64-v8a -t x86_64 -P 30 -o ../android/app/src/main/jniLibs build --release --features jni
+cd android && ./gradlew :app:assembleDebug
 ```
 
-```bash
-cd android && JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew :app:assembleDebug
-```
+- The app builds the QRST Kotlin library from `../qr-secret-transfer/kotlin`, so that
+  repository must be checked out beside this one.
+- The Kotlin tests run against a real box. Build the library for the host with
+  `cargo build --release --features jni` in `frost/`, start a box, and pass its setup text
+  in `KEYKIN_BOX_QR` to `./gradlew :app:testDebugUnitTest`. Without it the box test is
+  skipped.
 
-The Kotlin tests run against a real box. Build the library for this computer with `cargo build --release --features jni` in `frost/`, start a box, and pass its setup text in `KEYKIN_BOX_QR` to `./gradlew :app:testDebugUnitTest`. Without it the box test is skipped.
+## History
 
-The Android app also builds the QRST Kotlin library from `../qr-secret-transfer/kotlin`, so that repo must be checked out beside this one.
+Keykin v2 replaces the Cosign design (weighted shares on public servers). `frost/` was
+carried over from the `cosign` repository, which has the earlier history.
+
+## License
+
+MIT.

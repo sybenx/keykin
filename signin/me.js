@@ -167,13 +167,22 @@ export async function sign(template) {
 }
 
 /**
- * NIP-44 decrypt as you, of a message from `pubkey` (vaults: a keyring entry's one-time key, vaults.md §3.6): through
+ * NIP-44 decrypt as you, of a message from `pubkey` (Kist: a keyring entry's one-time key, kist.md §3.6): through
  * your phone's signer (NIP-46 nip44_decrypt). Throws "unsupported" signed in read-only.
  */
 export async function nip44DecryptFrom(pubkey, ct) {
   if (hold) await hold.promise;
   try {
     if (state?.method === "phone") return await (await phoneRemote()).request("nip44_decrypt", [pubkey, ct], 60000);
+  } catch (err) { throw checked(err); }
+  throw new Error("unsupported");
+}
+
+/** NIP-44 encrypt as you, to `pubkey` (yourself, for what only you read): through your phone's signer (NIP-46 nip44_encrypt). */
+export async function nip44EncryptTo(pubkey, text) {
+  if (hold) await hold.promise;
+  try {
+    if (state?.method === "phone") return await (await phoneRemote()).request("nip44_encrypt", [pubkey, text], 60000);
   } catch (err) { throw checked(err); }
   throw new Error("unsupported");
 }

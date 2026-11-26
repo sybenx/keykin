@@ -14,13 +14,15 @@ test('calendar-copy: each part copies, checks clean, and an edit fails naming th
   const tmp = mkdtempSync(join(tmpdir(), 'kk-calendar-copy-'));
   try {
     const js = join(tmp, 'web', 'calendar'), kt = join(tmp, 'app/src/main/java/cc/aaro/calendar'), vec = join(tmp, 'app/src/test/resources/calendar');
-    for (const [part, dest] of [['js', js], ['kotlin', kt], ['vectors', vec]]) {
+    const and = join(tmp, 'app/src/main/java/cc/aaro/calendar-android');
+    for (const [part, dest] of [['js', js], ['kotlin', kt], ['android', and], ['vectors', vec]]) {
       const made = run(part, dest);
       assert.equal(made.status, 0, made.stderr);
       assert.equal(run('--check', part, dest).status, 0);
     }
     assert.ok(existsSync(join(js, 'calendar.js')) && existsSync(join(js, 'sha256.js')) && !existsSync(join(js, 'Calendar.kt')));
-    assert.ok(existsSync(join(kt, 'Calendar.kt')) && !existsSync(join(kt, 'calendar.js')));
+    assert.ok(existsSync(join(kt, 'Calendar.kt')) && existsSync(join(kt, 'CalendarRows.kt')) && !existsSync(join(kt, 'calendar.js')));
+    assert.ok(existsSync(join(and, 'AndroidCalendar.kt')));
     assert.ok(existsSync(join(vec, 'calendar.json')));
     assert.match(readFileSync(join(kt, 'SOURCE'), 'utf8'), /^keykin [0-9a-f]{40}/);
 

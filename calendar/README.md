@@ -11,12 +11,14 @@ Two copies that give the same bytes for the same input, and the cases both pass:
 | Part | Files | For |
 |---|---|---|
 | `js/` | `calendar.js`, `sha256.js` | a web app or Node. Plain ES modules, no packages. |
-| `kotlin/` | `Calendar.kt` (package `cc.aaro.calendar`) | Android. Only the Kotlin and Java standard libraries. |
+| `kotlin/` | `Calendar.kt`, `CalendarRows.kt` (package `cc.aaro.calendar`) | Android or any JVM. Only the Kotlin and Java standard libraries. |
+| `android/` | `AndroidCalendar.kt` | Android: writes entries into the phone's calendar. Needs `kotlin/` beside it. |
 | `vectors/` | `calendar.json` | an app's own tests, if it wants them |
 
-`test-kotlin/` runs the vectors against `kotlin/` on the JVM; it is not copied.
+`test-kotlin/` runs the vectors and the row tests against `kotlin/` on the JVM; `test-android/` runs `android/`
+against a real calendar provider on an emulator. Neither is copied.
 
-Not here yet: recurrence expansion, iCalendar reading and writing, the Android calendar bridge.
+Not here yet: recurrence expansion, iCalendar reading and writing, reading edits back from the phone's calendar.
 
 ## What it does
 
@@ -42,6 +44,34 @@ A **version** is `{meta, data, deleted}`, as a KIST put carries them: `meta` has
 
 A version may carry only some fields (DMs sends just what changed): a field it lacks is no value at no stamp, and the
 merge takes it from the others.
+
+## The phone's calendar (Android, writing half)
+
+`AndroidCalendar(contentResolver, accountName, accountType)` puts entries into Android's own calendar
+(CalendarContract), so the phone's calendar app, widgets and alerts show them and they follow later changes.
+
+- **One calendar per source**: `Source(key, name, color, tz, access)`. `key` names it for good (`dms-plans`, a vault
+  id); name and color can change. DMs passes `ACCOUNT_TYPE_LOCAL` (the default), which needs no account of its own;
+  Marble passes its calendar account.
+- **`sync(source, entries)`**: entry id to current merged version. Each event becomes a row keyed by its entry id
+  (`_sync_id`), a changed instance becomes an exception row tied to its series, deletions and missing entries are
+  removed, and a row already right is not touched (a hash of what was written is in `sync_data1`). Running it again
+  changes nothing. `only = setOf(ids)` looks at just those entries, for an app that sends what changed.
+- **Alerts** become reminders (minutes before); an `at` alert counts only on a single event. Notes go in the
+  description. An event in a zone the phone doesn't know is shown in UTC rather than dropped.
+- **Calendars are read-only in the phone by default** (`access` = `CAL_ACCESS_READ`), so nobody types an edit there
+  that would then be written over. Once reading back exists, a source can pass `CAL_ACCESS_OWNER`.
+- **The seam for reading back**: Android marks a row the calendar app changed as dirty. `sync` holds such rows
+  (`Result.held`) instead of writing over them; `changedInPhone(key)` lists them with `sync_data2`, the tag the
+  caller passed for the version the row showed (`tags = mapOf(entry to ver)`). The reading half compares the row
+  with that version, stamps what differs (`stamp`), and then syncs with `dirty = Dirty.OVERWRITE`.
+- **`removeCalendar(key)`** takes the calendar and its rows out of the phone.
+
+Pure parts, JVM-tested: `CalendarRows.rows(entries)` (entries to row values, CalendarContract column names) and
+`CalendarRows.plan(rows, existing)` (what to add, change and remove).
+
+Not written to the phone yet: attendees, the `url` field, attachments, and `rdates` on all-day events beyond their
+date.
 
 ## Readings the spec leaves open (picked so nothing is lost; for the spec)
 
@@ -76,6 +106,10 @@ node tools/calendar-copy.mjs kotlin ../my-app/app/src/main/java/cc/aaro/calendar
 ```
 
 ```bash
+node tools/calendar-copy.mjs android ../my-app/app/src/main/java/cc/aaro/calendar/android
+```
+
+```bash
 node tools/calendar-copy.mjs --check kotlin ../my-app/app/src/main/java/cc/aaro/calendar
 ```
 
@@ -99,3 +133,9 @@ cd calendar/test-kotlin && JAVA_HOME=$(/usr/libexec/java_home -v 17) ../../andro
 ```
 
 Both run every merge case in every rotation and reversed, and check that merging the result again changes nothing.
+
+The phone's calendar, on one running emulator (it adds and then removes a test calendar):
+
+```bash
+cd calendar/test-android && JAVA_HOME=$(/usr/libexec/java_home -v 17) ../../android/gradlew -p . connectedDebugAndroidTest
+```

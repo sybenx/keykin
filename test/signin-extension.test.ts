@@ -1,7 +1,6 @@
-// signin/: signing in with the browser extension (NIP-07), which a site turns on with configure({ extension: true }).
-// Off (the default) everything is as before: no row, and a sign-in the extension made is signed out once, with its
-// toast. In headless Chromium with the stand-in extension (test/standins/extension.ts); no relay or public server is
-// reached (test/standins/browser.ts closes every WebSocket). Skipped when no Chromium is at hand.
+// signin/: signing in with the browser extension (NIP-07), on every site. In headless Chromium with the stand-in
+// extension (test/standins/extension.ts); no relay or public server is reached (test/standins/browser.ts closes every
+// WebSocket). Skipped when no Chromium is at hand.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
@@ -14,7 +13,6 @@ const FIRST = ['Sign in', 'Your Nostr address or npub', 'Continue', 'or', 'Sign 
 const ROW = 'Continue with your browser extension';
 // new screen text says none of these
 const PROTOCOL = /nostr|relay|npub|nsec|\bnip|\bkeys?\b/i;
-const OLD_TOAST = "Marble doesn't use the browser extension any more, so you're signed out. Sign in again.";
 
 let site: Awaited<ReturnType<typeof serveSignin>>, browser: any;
 before(async () => {
@@ -34,52 +32,20 @@ async function withPage(opts: Parameters<typeof openPage>[2] & { ext?: Parameter
   try { await fn(p, ext); assert.deepEqual(p.errors, []); } finally { await p.close(); }
 }
 
-test('signin extension: configure takes extension as true or false, beside the hooks', async () => {
-  const { configure, options } = await import(new URL('../signin/hooks.js', import.meta.url).href) as any;
-  assert.equal(options.extension, false, 'off unless a site turns it on');
-  assert.throws(() => configure({ extension: 'yes' }), /option extension must be true or false/);
-  try {
-    configure({ extension: true });
-    assert.equal(options.extension, true);
-  } finally { configure({ extension: false }); }
-  assert.throws(() => configure({ extensions: true }), /no hook named extensions/);
+test('signin extension: there is no switch for it', async () => {
+  const { configure } = await import(new URL('../signin/hooks.js', import.meta.url).href) as any;
+  assert.throws(() => configure({ extension: true }), /no hook named extension/);
 });
 
-test('signin extension: off (the default), no row even with an extension, and nothing asks it', { skip }, async () => {
-  await withPage({}, async ({ page }, ext) => {
-    await open(page);
-    assert.deepEqual(await dialogLines(page), FIRST, 'the first screen, as before');
-    assert.equal(await page.locator('[data-si="extension"]').count(), 0);
-    assert.deepEqual(ext!.calls, []);
-  });
-});
-
-test('signin extension: off, a sign-in the extension made is signed out once, with its toast (both kept forms)', { skip }, async () => {
-  const pk = getPublicKey(generateSecretKey());
-  for (const kept of [JSON.stringify({ pubkey: pk, method: 'extension' }), pk]) {
-    await withPage({ storage: { 'marble.me': kept } }, async ({ page }, ext) => {
-      assert.equal(await signedIn(page), null);
-      assert.equal(await stored(page), null, 'forgotten');
-      await page.waitForFunction(() => !!document.getElementById('toast') && !document.getElementById('toast')!.hidden, null, { timeout: 3000 });
-      assert.equal(await toastText(page), OLD_TOAST);
-      await page.reload();
-      await page.waitForFunction(() => !!(window as any).signin);
-      await page.waitForTimeout(600);
-      assert.equal(await toastText(page), '', 'said once');
-      assert.deepEqual(ext!.calls, []);
-    });
-  }
-});
-
-test('signin extension: on, but no extension in this browser: no row', { skip }, async () => {
-  await withPage({ extension: 'on', ext: false }, async ({ page }) => {
+test('signin extension: no extension in this browser: no row', { skip }, async () => {
+  await withPage({ ext: false }, async ({ page }) => {
     await open(page);
     assert.deepEqual(await dialogLines(page), FIRST);
   });
 });
 
-test('signin extension: on, the row comes first, signs in, signs and encrypts through it, survives a reload, and sign-out forgets it', { skip }, async () => {
-  await withPage({ extension: 'on' }, async ({ page }, ext) => {
+test('signin extension: the row comes first, signs in, signs and encrypts through it, survives a reload, and sign-out forgets it', { skip }, async () => {
+  await withPage({}, async ({ page }, ext) => {
     assert.deepEqual(ext!.calls, [], 'nothing asked on load');
     await open(page);
     const lines = await dialogLines(page);
@@ -121,10 +87,10 @@ test('signin extension: on, the row comes first, signs in, signs and encrypts th
   });
 });
 
-test('signin extension: on, a sign-in the extension made earlier is kept (and the first version\'s form too), with no toast', { skip }, async () => {
+test('signin extension: a sign-in the extension made earlier is kept (and the first version\'s form too), and nothing is said', { skip }, async () => {
   const pk = getPublicKey(generateSecretKey());
   for (const kept of [JSON.stringify({ pubkey: pk, method: 'extension' }), pk]) {
-    await withPage({ extension: 'on', storage: { 'marble.me': kept } }, async ({ page }, ext) => {
+    await withPage({ storage: { 'marble.me': kept } }, async ({ page }, ext) => {
       assert.equal(await signedIn(page), pk);
       assert.deepEqual(JSON.parse(await stored(page)), { pubkey: pk, method: 'extension' });
       await page.waitForTimeout(600);
@@ -135,7 +101,7 @@ test('signin extension: on, a sign-in the extension made earlier is kept (and th
 });
 
 test('signin extension: a slow extension shows it is waiting and can be cancelled; its late answer counts for nothing', { skip }, async () => {
-  await withPage({ extension: 'on', ext: { mode: 'slow', delay: 1500 } }, async ({ page }) => {
+  await withPage({ ext: { mode: 'slow', delay: 1500 } }, async ({ page }) => {
     await open(page);
     await page.click('[data-si="extension"]');
     await page.waitForSelector('.si-wait');
@@ -150,7 +116,7 @@ test('signin extension: a slow extension shows it is waiting and can be cancelle
 });
 
 test('signin extension: a locked extension says how to get on after a moment; Cancel, then Escape, still work', { skip }, async () => {
-  await withPage({ extension: 'on', ext: { mode: 'locked' } }, async ({ page }, ext) => {
+  await withPage({ ext: { mode: 'locked' } }, async ({ page }, ext) => {
     await open(page);
     await page.click('[data-si="extension"]');
     await page.waitForSelector('[data-ext-help]:not([hidden])', { timeout: 5000 });
@@ -166,7 +132,7 @@ test('signin extension: a locked extension says how to get on after a moment; Ca
 });
 
 test('signin extension: a refusal goes back to the dialog with a plain line, and trying again works', { skip }, async () => {
-  await withPage({ extension: 'on', ext: { mode: 'refuse' } }, async ({ page }, ext) => {
+  await withPage({ ext: { mode: 'refuse' } }, async ({ page }, ext) => {
     await open(page);
     await page.click('[data-si="extension"]');
     await page.waitForSelector('.si-said');
@@ -183,7 +149,7 @@ test('signin extension: a refusal goes back to the dialog with a plain line, and
 });
 
 test('signin extension: an extension without nip44 signs, and encrypting says plainly it can\'t', { skip }, async () => {
-  await withPage({ extension: 'on', ext: { nip44: false } }, async ({ page }, ext) => {
+  await withPage({ ext: { nip44: false } }, async ({ page }, ext) => {
     await open(page);
     await page.click('[data-si="extension"]');
     await page.waitForFunction(() => !!(window as any).signin.current());

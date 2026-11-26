@@ -1,6 +1,6 @@
 // A headless Chromium and a page with the shared sign-in on it, for the sign-in's browser tests. Finds Chromium as
 // test/signin-demo.test.ts does (KEYKIN_CHROMIUM, else Playwright's cache); serves signin/ from 127.0.0.1, plus a bare
-// site page at /standin/ (?extension=on: it calls configure({ extension: true }) first). Nothing public is reached:
+// site page at /standin/. Nothing public is reached:
 // every WebSocket but the given local relay is closed at once, every request off 127.0.0.1 is refused, and the page is
 // told to send everything to the local relay (sessionStorage "marble.local", pool.js testRelay). Use:
 //
@@ -10,7 +10,7 @@
 //     const site = await serveSignin();
 //     const browser = await (await import('playwright-core')).chromium.launch({ executablePath: exe!, headless: true });
 //     try {
-//       const p = await openPage(browser, site.base, { relay, extension: 'on', before: (ctx) => fakeExtension(ctx) });
+//       const p = await openPage(browser, site.base, { relay, before: (ctx) => fakeExtension(ctx) });
 //       try { /* p.page, p.errors */ } finally { await p.close(); }
 //     } finally { await browser.close(); await site.close(); }
 //   });
@@ -46,10 +46,8 @@ const PAGE = `<!doctype html>
 </head><body>
 <p id="who">Not signed in.</p><button type="button" data-sign-in>Sign in</button>
 <script type="module">
-  import { configure } from "../hooks.js";
   import { openSignIn } from "../dialog.js";
   import * as me from "../me.js";
-  if (new URLSearchParams(location.search).get("extension") === "on") configure({ extension: true });
   const who = document.getElementById("who");
   const show = () => { who.textContent = me.current() ? "Signed in as " + me.current() : "Not signed in."; };
   me.onMe(show);
@@ -75,7 +73,6 @@ export async function serveSignin() {
 
 export type PageOptions = {
   relay?: string;                         // the local relay; with none, every WebSocket is closed
-  extension?: 'on' | 'off';               // configure({ extension: true }) on the site page
   before?: (context: any) => unknown;     // e.g. fakeExtension(context), page.clock: before the first page opens
   storage?: Record<string, string>;       // localStorage set once, before the site's own scripts run the first time
 };
@@ -102,7 +99,7 @@ export async function openPage(browser: any, base: string, opts: PageOptions = {
   const errors: string[] = [];
   page.on('pageerror', (e: Error) => errors.push(e.message));
   page.on('dialog', (d: any) => { errors.push('dialog: ' + d.message()); d.dismiss(); });
-  await page.goto(`${base}/standin/${opts.extension === 'on' ? '?extension=on' : ''}`);
+  await page.goto(`${base}/standin/`);
   await page.waitForFunction(() => !!(window as any).signin);
   return { context, page, errors, sockets, close: () => context.close() };
 }

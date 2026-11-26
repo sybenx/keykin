@@ -54,16 +54,15 @@ read the page's `location` (pool.js `testRelay`) and use `WebSocket` and `docume
   `originOnly` (from `pure.js`), `pageFrom`, `pointerOf`, `loginPage`, `whose` (reads the name with `typedName`). Its
   calls to Marble's `data.js` go through the hooks.
 - `pure.d.ts`, `pointer.d.ts`: types for those two, for a site written in TypeScript (Tube's server).
-- `hooks.js` (new): `configure`, `hooks`, `defaults`, `options`, `watchProfiles`. See Hooks and Options below.
+- `hooks.js` (new): `configure`, `hooks`, `defaults`, `watchProfiles`. See Hooks below.
 - `rules.js` (new): layer 1 in one import. Re-exports all of `connect.js` and `pointer.js`, `PLACEHOLDER`,
-  `typedName`, `bech32Key`, `nip05Key` and `approvalPage` from `pure.js`, and `configure`, `hooks`, `defaults`,
-  `options`.
+  `typedName`, `bech32Key`, `nip05Key` and `approvalPage` from `pure.js`, and `configure`, `hooks`, `defaults`.
 - `pool.js`, `ids.js`, `vendor/noble.js`, `vendor/sign.js`: Marble's, unchanged. `pool.js`: `FAST`, `INDEXERS`,
   `MORE`, `verify`, `testRelay`, `normalize`, `relays`, `warm`, `req`, `count`, `subscribe`, `publish`, `foundOn`,
   `connectTimes`, and for a site that logs in to relays it chose (NIP-42): `setAuth`, `dropLogins`. With no hook set, a
   relay that asks for a login gets nothing, as before. `ids.js`: `toHex`, `fromHex`, `isHex64`, `decode`, `npub`, `note`, `nevent`, `nprofile`, `naddr`,
   `parseInput`, `pathFor`.
-- `me.js` (from Marble's `me.js`, without its Marble-only parts): `extensionSignedOut`, `onMe`, `onAsk`, `current`,
+- `me.js` (from Marble's `me.js`, without its Marble-only parts): `onMe`, `onAsk`, `current`,
   `method` (`"phone"`, `"extension"` or null), `phoneSecret`, `onSignedOut`, `signedInWithPhone`,
   `signedInWithExtension`, `choose`, `neither`, `signOut`, `sign`, `nip44DecryptFrom`, `nip44EncryptTo`,
   `myWriteRelays`.
@@ -124,45 +123,20 @@ configure({ outbox, resolveNip05, profile, profileOf: (pk) => profiles.get(pk), 
 The dialog listens for profiles from the moment it loads (`watchProfiles`); when a site passes its own `onProfile`,
 that listener moves over to it.
 
-## Options
+## The browser extension
 
-`configure` also takes a few things a site turns on, by name, as `true` or `false` (anything else throws). They sit in
-`options` (hooks.js).
-
-| Option | Default | What it does |
-|---|---|---|
-| `extension` | `false` | Sign in with the browser extension (NIP-07, `window.nostr`) as well. |
-
-### The browser extension (`extension: true`)
-
-Marble's own sites do not use the browser extension, so it is off unless a site asks for it:
-
-```js
-import { configure } from "./signin/rules.js";
-import { openSignIn } from "./signin/dialog.js";
-import { current } from "./signin/me.js";
-configure({ extension: true }); // in this module, before its first current() (see "When it is decided")
-```
-
-Off, everything is as before: the dialog has no extension row, and a sign-in the extension made (kept as
-`{ method: "extension" }` in `marble.me`, or the first version's bare hex) is signed out once, with its toast.
-
-On:
+Every site has it; there is nothing to turn on.
 
 - When the dialog opens and the page has `window.nostr`, its first screen starts with one more row, "Continue with
   your browser extension", then "or". With no extension there is no row.
 - Choosing it asks `getPublicKey`. While it waits the dialog says "Waiting for your browser extension…" (and, after
   3 s, "Open your browser extension to approve."), with Cancel. A refusal, or no account, goes back to the first
   screen with "Your browser extension didn't sign you in. Try again, or sign in another way."
-- `me.js`: `method()` is `"extension"`, kept across reloads. `sign`, `nip44EncryptTo` and `nip44DecryptFrom` go
+- `me.js`: `method()` is `"extension"`, kept across reloads (as `{ method: "extension" }` in `marble.me`; the first
+  version's bare hex is kept too, and saved in that form). `sign`, `nip44EncryptTo` and `nip44DecryptFrom` go
   through `window.nostr` (`nip44` when the extension has it; else they throw `unsupported: your browser extension
   can't do this`). Nothing is asked of the extension on load, only when the page asks. A signed event from another
   account signs you out, as with the phone. `signOut()` forgets it.
-
-When it is decided. `me.js` reads what this browser kept as it loads, and decides whether to keep an extension
-sign-in once the page's own modules have run (a microtask after them), or sooner if something asks first (`current()`,
-`method()`, `sign`, …). So call `configure({ extension: true })` in the module that imports the sign-in, before its first
-`current()`. A `configure` from a script that runs later is too late for a sign-in kept from before.
 
 ## Approving at a web page
 
@@ -188,8 +162,7 @@ use it.
   `window.nostr`, and the test process signs and encrypts for it. `mode`: `"ready"`, `"slow"` (with `delay`),
   `"locked"` (waits for `unlock()`), `"refuse"`; `nip44: false` leaves out `nip44`; `calls` lists what was asked.
 - `browser.ts`: `chromiumPath()` (as `test/signin-demo.test.ts` finds it), `serveSignin()` (signin/ from 127.0.0.1, and
-  a bare site page at `/standin/`, `?extension=on` to turn the extension on), `openPage(browser, base, { relay, extension,
-  before, storage })` (headless; every WebSocket but the local relay is closed and every request off 127.0.0.1 refused,
+  a bare site page at `/standin/`), `openPage(browser, base, { relay, before, storage })` (headless; every WebSocket but the local relay is closed and every request off 127.0.0.1 refused,
   so nothing public is reached), `dialogLines(page)`.
 
 `test/signin-extension.test.ts` and `test/signin-approve.test.ts` use them. Both skip without Chromium; the second

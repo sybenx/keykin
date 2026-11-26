@@ -95,6 +95,7 @@ function listen(relays, pk, since, onEvent) {
  * asks you which account is yours). others: those not yet decided on; ignored: those decided against.
  * onAuthUrl(url): the signer asked you to approve a request at a web page first (NIP-46 auth_url, http or https only:
  * anything else is ignored). The request keeps waiting, for up to APPROVE_WAIT from then, for the real answer.
+ * ended is a promise that resolves when that request is over (answered, refused, timed out or closed).
  */
 export class Remote {
   constructor({ sk, signer, relays, secret = null, made = 0, others = [], ignored = [] }) {
@@ -128,7 +129,7 @@ export class Remote {
         const page = approvalPage(msg.error);
         if (!page) return; // not a web page: ignored, and the request waits on as it was
         w.wait(APPROVE_WAIT);
-        try { this.onAuthUrl?.(page.href); } catch {}
+        try { this.onAuthUrl?.(page.href, w.ended); } catch {}
         return;
       }
       this.waiting.delete(msg.id);
@@ -162,6 +163,8 @@ export class Remote {
       this.waiting.set(id, w);
       w.wait(timeout);
     });
+    const w = this.waiting.get(id);
+    if (w) w.ended = answer.then(() => {}, () => {});
     publish(this.relays, ev);
     return answer;
   }

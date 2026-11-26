@@ -17,6 +17,8 @@
 //                                                      // 127.0.0.1 run here; opening it (GET) sends the real answer
 //   standInPhone({ approveFirst: { url: 'javascript:alert(1)', answerAfter: 1500 } })
 //                                                      // that address as the auth_url, the real answer after 1.5 s
+//   standInPhone({ approveFirst: { on: 'sign_event' } })
+//                                                      // not the first request: the first one of that method
 //
 // phone.pubkey is the account, phone.asked the methods asked so far, phone.approvalUrl the local page once it runs.
 import { createServer, type Server } from 'node:http';
@@ -27,7 +29,7 @@ import * as nip44 from 'nostr-tools/nip44';
 export type PhoneOptions = {
   refuse?: string;
   silent?: boolean;
-  approveFirst?: boolean | { url?: string; answerAfter?: number };
+  approveFirst?: boolean | { url?: string; answerAfter?: number; on?: string };
   user?: Uint8Array;
 };
 
@@ -81,9 +83,9 @@ export function standInPhone(opts: PhoneOptions = {}) {
     asked.push(req.method);
     if (opts.silent) return;
     const real = () => send(ws, from, answer(req));
-    if (opts.approveFirst && !approvalAsked) {
+    const a = typeof opts.approveFirst === 'object' ? opts.approveFirst : {};
+    if (opts.approveFirst && !approvalAsked && (!a.on || a.on === req.method)) {
       approvalAsked = true;
-      const a = typeof opts.approveFirst === 'object' ? opts.approveFirst : {};
       const url = a.url ?? (await approvalPage()) + req.id;
       if (!a.url) waitingApproval.set(req.id, real);
       send(ws, from, { id: req.id, result: 'auth_url', error: url });

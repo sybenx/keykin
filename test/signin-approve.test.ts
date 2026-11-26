@@ -159,3 +159,69 @@ test('signin approve: a signer that refuses: the bunker form says why, and a cod
     assert.equal(await signedIn(page), null);
   });
 });
+
+// ── After sign-in: a later request that the signer wants approved at a page ──
+const toastLink = (page: any) => page.locator('#toast:not([hidden]) a[data-si="approve"]');
+const toastShown = (page: any) => page.evaluate(() => { const t = document.getElementById('toast'); return !!t && !t.hidden; });
+async function approveInToast(page: any, context: any, phone: StandInPhone) {
+  const link = toastLink(page);
+  await link.waitFor({ timeout: 10000 });
+  const host = new URL(phone.approvalUrl!).host;
+  assert.equal(await link.textContent(), `Continue at ${host}`);
+  assert.ok((await link.getAttribute('href'))!.startsWith(phone.approvalUrl!));
+  assert.equal(await link.getAttribute('target'), '_blank');
+  assert.equal(await link.getAttribute('rel'), 'noopener');
+  assert.ok((await page.textContent('#toast'))!.startsWith(`Your sign-in app asks you to approve this at ${host} first.`));
+  assert.equal(await page.evaluate(() => (window as any).pendingSign.done), false, 'not before you approve');
+  const [tab] = await Promise.all([context.waitForEvent('page'), link.click()]);
+  await tab.waitForLoadState();
+  assert.match(await tab.textContent('body'), /Approved/);
+}
+const startSign = (page: any) => page.evaluate(() => {
+  const w: any = window, p: any = { done: false };
+  p.promise = w.signin.sign({ kind: 1, content: 'later' }).then((e: any) => { p.done = true; return e; });
+  w.pendingSign = p;
+});
+
+test('signin approve: signed in, a later request that needs approving at a page shows "Continue at <host>", and carries on once approved', { skip }, async () => {
+  await withPhone({ approveFirst: { on: 'sign_event' } }, async ({ page, context }, phone) => {
+    await pasteBunker(page, await phone.bunker(relay.url));
+    await page.waitForFunction(() => !!(window as any).signin.current(), null, { timeout: 10000 });
+    assert.equal(await page.locator('a[data-si="approve"]').count(), 0, 'nothing to approve at sign-in');
+    await startSign(page);
+    await approveInToast(page, context, phone);
+    const signed = await page.evaluate(() => (window as any).pendingSign.promise);
+    assert.ok(verifyEvent(signed) && signed.pubkey === phone.pubkey && signed.content === 'later');
+    await page.waitForFunction(() => document.getElementById('toast')!.hidden, null, { timeout: 3000 });
+    // and the next one needs nothing
+    const again = await page.evaluate(() => (window as any).signin.sign({ kind: 1, content: 'again' }));
+    assert.ok(verifyEvent(again));
+    assert.equal(await toastShown(page), false);
+  });
+});
+
+test('signin approve: the same after a reload, with the session this browser kept', { skip }, async () => {
+  await withPhone({ approveFirst: { on: 'sign_event' } }, async ({ page, context }, phone) => {
+    await pasteBunker(page, await phone.bunker(relay.url));
+    await page.waitForFunction(() => !!(window as any).signin.current(), null, { timeout: 10000 });
+    await page.reload();
+    await page.waitForFunction(() => !!(window as any).signin?.current());
+    await startSign(page);
+    await approveInToast(page, context, phone);
+    const signed = await page.evaluate(() => (window as any).pendingSign.promise);
+    assert.ok(verifyEvent(signed) && signed.pubkey === phone.pubkey);
+    await page.waitForFunction(() => document.getElementById('toast')!.hidden, null, { timeout: 3000 });
+  });
+});
+
+test('signin approve: signed in, an auth_url that is not a web page shows nothing, and the request is still answered', { skip }, async () => {
+  await withPhone({ approveFirst: { on: 'sign_event', url: 'javascript:alert(1)', answerAfter: 800 } }, async ({ page }, phone) => {
+    await pasteBunker(page, await phone.bunker(relay.url));
+    await page.waitForFunction(() => !!(window as any).signin.current(), null, { timeout: 10000 });
+    await startSign(page);
+    await page.waitForTimeout(500);
+    assert.equal(await page.locator('a[data-si="approve"]').count(), 0);
+    const signed = await page.evaluate(() => (window as any).pendingSign.promise);
+    assert.ok(verifyEvent(signed) && signed.pubkey === phone.pubkey);
+  });
+});

@@ -65,6 +65,7 @@ function set(next) {
 export function signedInWithPhone({ pubkey, remote: r, saved }) {
   set({ pubkey, method: "phone", phone: saved });
   remote = r;
+  r.onAuthUrl = approveAt;
   watch(r);
 }
 
@@ -77,6 +78,13 @@ export function signedInWithExtension(pubkey) {
   if (!isHex64(pk)) throw new Error("no account");
   set({ pubkey: pk, method: "extension" });
 }
+
+// Signed in, and your sign-in app asks you to approve something at a web page first (NIP-46 auth_url: connect.js
+// Remote). The request waits on; toast.js shows where to go.
+const approvals = new Set();
+/** fn(url, ended): asked to approve at that page; ended resolves when the request that asked is over. */
+export const onApproveAt = (fn) => approvals.add(fn);
+function approveAt(url, ended) { approvals.forEach((fn) => { try { fn(url, ended); } catch {} }); }
 
 // Your browser extension, asked only when the page asks for something (never on load).
 function extension() {
@@ -166,6 +174,7 @@ async function phoneRemote() {
     const saved = state.phone;
     const { Remote } = await import("./connect.js");
     remote = new Remote(saved);
+    remote.onAuthUrl = approveAt;
   }
   return remote;
 }

@@ -63,7 +63,7 @@ read the page's `location` (pool.js `testRelay`) and use `WebSocket` and `docume
   relay that asks for a login gets nothing, as before. `ids.js`: `toHex`, `fromHex`, `isHex64`, `decode`, `npub`, `note`, `nevent`, `nprofile`, `naddr`,
   `parseInput`, `pathFor`.
 - `me.js` (from Marble's `me.js`, without its Marble-only parts): `onMe`, `onAsk`, `current`,
-  `method` (`"phone"`, `"extension"` or null), `phoneSecret`, `onSignedOut`, `signedInWithPhone`,
+  `method` (`"phone"`, `"extension"` or null), `phoneSecret`, `onSignedOut`, `onApproveAt`, `signedInWithPhone`,
   `signedInWithExtension`, `choose`, `neither`, `signOut`, `sign`, `nip44DecryptFrom`, `nip44EncryptTo`,
   `myWriteRelays`.
 - `toast.js` (from Marble's `act.js`): `toast`, `approving` (was not exported in Marble).
@@ -146,6 +146,10 @@ Some signer apps answer a request with "approve it at this page first" (NIP-46: 
 with a host count (`approvalPage`); anything else (`javascript:`, `data:`, …) is ignored and the request waits on as it
 was. The dialog shows "Your sign-in app asks you to approve this at <host> first." and a "Continue at <host>" link that
 opens the page in a new tab, in the bunker form and under the code. Sign-in finishes when the real answer comes.
+
+After sign-in it is the same for any later request (`sign`, `nip44EncryptTo`, `nip44DecryptFrom`): the request waits
+on, and the toast (`toast.js`, through `me.js` `onApproveAt(fn(url, ended))`) shows the same line with "Continue at
+<host>" until that request is over, then goes. `approving()` does not put "Approve it on your phone…" over it.
 
 ## Test stand-ins
 

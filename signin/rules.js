@@ -7,4 +7,4 @@ export {
 } from "./connect.js";
 export { POINTER, LOGIN_D, originOnly, pageFrom, pointerOf, loginPage, whose } from "./pointer.js";
 export { PLACEHOLDER, typedName, bech32Key, nip05Key } from "./pure.js";
-export { configure, hooks, defaults } from "./hooks.js";
+export { configure, hooks, defaults, options } from "./hooks.js";

@@ -1,11 +1,12 @@
 // The Sign in dialog: your name first, then the login page your account names, or your phone, or another signer app (a
-// nostrconnect code or a bunker link). Moved from Marble Web's act.js as it is, Marble's words and all. It uses the
-// page's <dialog id="signin" aria-labelledby="si-title"><div class="si"></div></dialog>, made here when the page has none.
-import { npub } from "./ids.js";
+// nostrconnect code or a bunker link), or, on a site that turns it on (configure({ extension: true })), your browser
+// extension. Moved from Marble Web's act.js as it is, Marble's words and all. It uses the page's
+// <dialog id="signin" aria-labelledby="si-title"><div class="si"></div></dialog>, made here when the page has none.
+import { npub, isHex64 } from "./ids.js";
 import { loginLink, loginTemplate, legacyTemplate } from "./connect.js";
-import { hooks, watchProfiles } from "./hooks.js";
+import { hooks, watchProfiles, options } from "./hooks.js";
 import { toast } from "./toast.js";
-import { current, extensionSignedOut, signedInWithPhone, onAsk, choose, neither, onSignedOut } from "./me.js";
+import { current, extensionSignedOut, signedInWithPhone, signedInWithExtension, onAsk, choose, neither, onSignedOut } from "./me.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 // (the site's own, through configure: see hooks.js)
@@ -38,8 +39,9 @@ export function openSignIn() {
 
 // Signed out somewhere else (the phone, the login page): said once, quietly.
 onSignedOut(() => toast("Signed out"));
-// Signed in with the browser extension, which Marble no longer uses: signed out (me.js), and told so once.
-if (extensionSignedOut()) setTimeout(() => { toast("Marble doesn't use the browser extension any more, so you're signed out. Sign in again.", { stay: true }); setTimeout(() => toast(""), 9000); }, 300);
+// Signed in with the browser extension, which Marble no longer uses: signed out (me.js), and told so once. (Asked after
+// the page's own modules have run, so a site that turned the extension on keeps it.)
+setTimeout(() => { if (extensionSignedOut()) setTimeout(() => { toast("Marble doesn't use the browser extension any more, so you're signed out. Sign in again.", { stay: true }); setTimeout(() => toast(""), 9000); }, 300); }, 0);
 
 // More than one account answered the code you signed in with (me.js): which one is you? Until you say, nothing is
 // signed, and this doesn't close. Each account shows its picture, name and the ends of its npub, as sign-in apps show
@@ -153,6 +155,9 @@ const pageOf = (s) => typeof s !== "string" ? null : loginTemplate(s) || (/<nost
 // caught (EMAIL below) and answered with the phone way in, right there.
 let lastTyped = "";
 const PHONE_BUTTON = `<button type="button" class="si-button si-alt" data-si="code">Sign in with your phone</button>`;
+// Your browser extension (NIP-07): offered first, only on a site that turned it on and only when there is one.
+const hasExtension = () => options.extension && typeof globalThis.nostr?.getPublicKey === "function";
+const EXTENSION_ROW = `<button type="button" class="si-button si-alt" data-si="extension">Continue with your browser extension</button><p class="si-or"><span>or</span></p>`;
 const ACCOUNT_PAGE = `<p class="si-get">Here to manage your account? <button type="button" class="link" data-account-visitor>Your account page</button></p>`;
 function askName(note = "", typed = "") {
   attempt++;
@@ -161,7 +166,7 @@ function askName(note = "", typed = "") {
   phoneAbort = null;
   missingFor = null;
   view(`<h2 id="si-title">Sign in</h2>
-    <form data-form="name"><label for="si-who">Your Nostr address or npub</label>
+    ${hasExtension() ? EXTENSION_ROW : ""}<form data-form="name"><label for="si-who">Your Nostr address or npub</label>
       <input id="si-who" name="who" class="acct-who" type="text" value="${esc(typed)}" placeholder="name@site.com or npub1…" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" required>
       <div class="si-actions"><button type="submit" class="si-button">Continue</button></div></form>
     ${note ? `<div class="si-said" role="status">${note}</div>` : `<p class="si-or"><span>or</span></p>${PHONE_BUTTON}`}
@@ -192,6 +197,27 @@ async function lookUp(typed) {
   if (r.removed) forgetPage(pk);
   const kept = rememberedPage(pk); // a pointer seen after an earlier sign-in, should the relays miss it now
   kept ? atLoginPage(kept, { who: pk }) : withMarble({ missing: pk });
+}
+
+// ── Your browser extension ──
+// It's asked which account; a slow or locked one shows that it's waiting (and how to get on), and Cancel goes back.
+// A refusal, or no account, goes back to the first screen, saying so.
+async function withExtension() {
+  const mine = ++attempt;
+  stopWatching();
+  phoneAbort?.abort();
+  phoneAbort = null;
+  view(`<h2 id="si-title">Sign in</h2><p class="si-wait">${spinner}Waiting for your browser extension…</p>
+    <p class="si-note" data-ext-help hidden>Open your browser extension to approve.</p>
+    <div class="si-actions"><button type="button" class="si-button" data-si="retype">Cancel</button></div>`);
+  const help = setTimeout(() => { const h = mine === attempt && $("[data-ext-help]", box); if (h) h.hidden = false; }, 3000);
+  let pk = null;
+  try { pk = String(await globalThis.nostr.getPublicKey()).toLowerCase(); } catch {} finally { clearTimeout(help); }
+  if (mine !== attempt) return;
+  if (!isHex64(pk)) return askName(`<p>Your browser extension didn't sign you in. Try again, or sign in another way.</p>${PHONE_BUTTON}`, lastTyped);
+  signedInWithExtension(pk);
+  close();
+  toast("Signed in");
 }
 
 // ── Your account names a login page ──
@@ -344,6 +370,7 @@ dialog.addEventListener("click", (ev) => {
   else if (what === "unsigner") signerFrom === "name" ? askName("", lastTyped) : withMarble({ missing: missingFor });
   else if (what === "signer") { signerFrom = $("#si-who", box) ? "name" : "phone"; withSigner(); }
   else if (what === "again") again?.();
+  else if (what === "extension") withExtension();
   else if (what === "copy") navigator.clipboard?.writeText(b.dataset.code).then(() => { b.textContent = "Copied"; });
 });
 dialog.addEventListener("submit", (ev) => {
@@ -352,8 +379,9 @@ dialog.addEventListener("submit", (ev) => {
   if (f.dataset.form === "name") { const t = String(data.get("who") || "").trim(); if (t) lookUp(t); }
   else if (f.dataset.form === "bunker") { const l = String(data.get("bunker") || "").trim(); if (l) withBunker(l, f); }
 });
-// Back in this tab from the login page with a code still waiting: the sign-in picks up where it was.
-if (!current() && pendingCode()) setTimeout(() => openSignIn(), 0);
+// Back in this tab from the login page with a code still waiting: the sign-in picks up where it was. (Looked at after
+// the page's own modules have run, as the sign-in from the extension is decided then: me.js.)
+setTimeout(() => { if (!current() && pendingCode()) openSignIn(); }, 0);
 dialog.addEventListener("cancel", (ev) => { ev.preventDefault(); if (!picking) close(); });
 
 // ── For a site's own flows in this dialog (Marble Web's "Adding Marble on a Mac") ──

@@ -97,12 +97,28 @@ const watchers = new Map(); // fn → what stops it
 /** fn(pubkey, profile) for every profile, through whichever onProfile is in place now or later. */
 export function watchProfiles(fn) { watchers.set(fn, hooks.onProfile(fn)); }
 
-/** A site's own hooks, by name (see hooks). Unknown names are an error, so a typo is not silently ignored. */
+/**
+ * What a site turns on, beside the hooks. extension: sign in with the browser extension (NIP-07) as well. Off, a
+ * sign-in the extension made is signed out once (me.js), as before. Read when it matters, so set it with configure()
+ * before anything asks who is signed in (in the module that imports the sign-in, before its first current()).
+ */
+export const options = { extension: false };
+
+/** A site's own hooks, by name (see hooks), and options (see options). Unknown names are an error, so a typo is not silently ignored. */
 export function configure(given = {}) {
+  const hooked = {}, opted = {};
   for (const [k, v] of Object.entries(given)) {
+    if (k in options) {
+      if (typeof v !== "boolean") throw new Error(`signin: option ${k} must be true or false`);
+      opted[k] = v;
+      continue;
+    }
     if (!(k in hooks)) throw new Error(`signin: no hook named ${k}`);
     if (typeof v !== "function") throw new Error(`signin: hook ${k} must be a function`);
+    hooked[k] = v;
   }
+  Object.assign(options, opted);
+  given = hooked;
   const moved = "onProfile" in given && given.onProfile !== hooks.onProfile;
   Object.assign(hooks, given);
   if (moved) for (const [fn, stop] of watchers) { try { if (typeof stop === "function") stop(); } catch {} watchers.set(fn, hooks.onProfile(fn)); }

@@ -4,6 +4,7 @@
 // <dialog id="signin" aria-labelledby="si-title"><div class="si"></div></dialog>, made here when the page has none.
 import { npub, isHex64 } from "./ids.js";
 import { loginLink, loginTemplate, legacyTemplate } from "./connect.js";
+import { approvalPage } from "./pure.js";
 import { hooks, watchProfiles, options } from "./hooks.js";
 import { toast } from "./toast.js";
 import { current, extensionSignedOut, signedInWithPhone, signedInWithExtension, onAsk, choose, neither, onSignedOut } from "./me.js";
@@ -220,6 +221,23 @@ async function withExtension() {
   toast("Signed in");
 }
 
+// ── A signer app that asks you to approve at a web page first (NIP-46 auth_url) ──
+// "Continue at <host>" opens it in a new tab (http or https only; the host shown is where it goes), and this keeps
+// waiting for the answer. In the bunker form, or under the code.
+function approveAt(url, where = box) {
+  const page = approvalPage(url);
+  if (!page) return;
+  let el = $("[data-approve]", where);
+  if (!el) {
+    el = document.createElement("div");
+    el.dataset.approve = "";
+    const actions = [...where.querySelectorAll(".si-actions")].pop();
+    actions ? actions.before(el) : where.append(el);
+  }
+  el.innerHTML = `<p class="si-note">Your sign-in app asks you to approve this at ${esc(page.host)} first.</p>
+    <a class="si-button si-open" href="${esc(page.href)}" target="_blank" rel="noopener" data-si="approve">Continue at ${esc(page.host)}</a>`;
+}
+
 // ── Your account names a login page ──
 function atLoginPage(page, { who = null, pending = null } = {}) {
   const host = new URL(page.origin).host;
@@ -313,6 +331,7 @@ async function run(render, { pending = null, keep = null, extra = "", missing = 
       signal: ctrl.signal,
       pending,
       extra,
+      onAuthUrl: (url) => { if (mine === attempt) approveAt(url); },
       onPending: keep ? (p) => { try { sessionStorage.setItem(PENDING, JSON.stringify({ ...p, ...keep, who: keep.who || pending?.who || null })); } catch {} } : null,
       // the site's name the sign-in app shows: the page's own <meta name="application-name">
       name: document.querySelector('meta[name="application-name"]')?.content || location.hostname,
@@ -337,12 +356,13 @@ async function withBunker(link, form) {
   button.disabled = true;
   try {
     const { bunkerSignIn } = await import("./connect.js");
-    const done = await bunkerSignIn(link);
+    const done = await bunkerSignIn(link, { onAuthUrl: (url) => { if (mine === attempt) approveAt(url, form); } });
     if (mine !== attempt) return done.remote.stop();
     finish(done);
   } catch (err) {
     if (mine !== attempt) return;
     note.textContent = String(err?.message || "That didn't connect.").replace(/^timeout$/, "Your signer app didn't answer.");
+    $("[data-approve]", form)?.remove();
     button.disabled = false;
   }
 }
